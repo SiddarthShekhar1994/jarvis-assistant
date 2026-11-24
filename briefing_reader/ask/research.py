@@ -39,7 +39,7 @@ import re
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from functools import partial
 from pathlib import Path
@@ -47,6 +47,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from ..actions import public_host_problem
+from ..board import ask_frames
 from . import mail
 from .cli import WEB_FETCH_TOOL, WEB_SEARCH_TOOL, Runner
 from .context import COMMAND_CAP, data, now_line
@@ -856,6 +857,9 @@ class ResearchAnswer:
     answer: str
     sources: tuple[tuple[str, str], ...] = ()     # (title, url), in the model's order
     suggestions: tuple[str, ...] = ()
+    # The new look, part 6: the answer's "topic" and "frames" as board.ask_frames checked them (an AskFrames; a frame
+    # that fails is dropped there, never the answer).
+    frames: Any = field(default=None, compare=False)
 
     def __repr__(self) -> str:
         return (f"ResearchAnswer(answer={len(self.answer)} chars, sources={len(self.sources)}, "
@@ -884,7 +888,8 @@ def answer_from(data_: Any) -> ResearchAnswer | None:
         pairs.append((title, url))
     if not all(isinstance(line, str) and len(line) <= SUGGESTION_CAP for line in suggestions):
         return None
-    return ResearchAnswer(answer, tuple(pairs), tuple(suggestions))
+    # Part 6: the topic and the typed frames, checked strictly; a frame that fails is dropped, never the answer.
+    return ResearchAnswer(answer, tuple(pairs), tuple(suggestions), ask_frames.check_answer(data_))
 
 
 def read_research_result(event: Mapping[str, Any], init: InitSummary | None, *,

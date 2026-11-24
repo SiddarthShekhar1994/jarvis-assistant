@@ -8,8 +8,9 @@ own add-ons and speech model), it runs the listener process (wake_listen.WakeCli
 it works while Jarvis runs - his window open, minimized or on the desktop HUD - and stops when he is closed.
 
 The listener pauses (a hold, from the app's ``holds()``) while a talk listens or is understood, while Jarvis speaks or
-reads the briefing, while a meeting records and in focus mode; it listens again HOLD_TAIL_MS after the last hold went
-(his last word's echo). While Jarvis is in control on the desktop a wake is ignored, as the talk key is.
+reads the briefing, while a meeting records, in focus mode and on a call (quiet during calls); it listens again
+HOLD_TAIL_MS after the last hold went (his last word's echo). While Jarvis is in control on the desktop a wake is
+ignored, as the talk key is.
 
 A wake: the listener's reader thread gathers the audio from before the wake (the pre-roll) into a
 :class:`HandoffStream`, then the talk takes over on it (talk_ui.TalkController.listen_from_wake: Jarvis comes forward,
@@ -60,9 +61,30 @@ BADGE_WORDS = "HEY JARVIS"
 PHRASE = "“Hey Jarvis”"
 
 LOOK_OFF, LOOK_LISTENING, LOOK_PAUSED, LOOK_PROBLEM = "off", "listening", "paused", "problem"
+# The same in a few words (WakeController.short_status): the canvas's badge, which has no room for a sentence. Each is at
+# most SHORT_CAP characters, so the page shows it whole (board.protocol.WAKE_CAP is the same number).
+SHORT_CAP = 32
+SHORT_OFF = "Hey Jarvis is off"
+SHORT_SETUP = "Hey Jarvis needs setting up"
+SHORT_STOPPED = "Hey Jarvis stopped"
+SHORT_PAUSED = "Hey Jarvis paused"
+SHORT_LISTENING = "Listening for Hey Jarvis"
+SHORT_VIRTUAL = "Not listening: virtual mic"
+SHORT_NO_MIC = "Not listening: no microphone"
+SHORT_BUSY = "Not listening: mic busy"
+SHORT_SILENT = "Listening: mic gives silence"
+SHORT_NO_AUDIO = "Not listening: add-on missing"
+SHORT_RESTARTING = "Hey Jarvis restarting"
+SHORT_STARTING = "Hey Jarvis starting"
+# The window brief: "Hey Jarvis" on the canvas (WakeController.hearing; board.protocol.HEAR_STATES).
+HEAR_OFF, HEAR_LISTENING, HEAR_PAUSED, HEAR_CANT_HEAR, HEAR_OTHER = "", "listening", "paused", "cant_hear", "other"
+HEAR_HEARING = "hearing"          # canvas part 5B: a talk "Hey Jarvis" started is listening to the owner now
+SHORT_WORDS = (SHORT_OFF, SHORT_SETUP, SHORT_STOPPED, SHORT_PAUSED, SHORT_LISTENING, SHORT_VIRTUAL, SHORT_NO_MIC,
+               SHORT_BUSY, SHORT_SILENT, SHORT_NO_AUDIO, SHORT_RESTARTING, SHORT_STARTING)
 HOLD_TALK, HOLD_SPEAKING, HOLD_MEETING, HOLD_FOCUS = "talk", "speaking", "meeting", "focus"
+HOLD_CALL = "call"                # quiet during calls: another app uses the microphone
 HOLD_TEXTS = {HOLD_TALK: "while you talk to him", HOLD_SPEAKING: "while he speaks",
-              HOLD_MEETING: "while a meeting records", HOLD_FOCUS: "in focus mode"}
+              HOLD_MEETING: "while a meeting records", HOLD_FOCUS: "in focus mode", HOLD_CALL: "while you're on a call"}
 PROBLEM_STOPPED = "stopped"       # the listener kept failing: it is not started again until the owner turns it on
 PROBLEM_UNSAVED = "unsaved"       # Turn on could not be saved (fail-closed: it stays off)
 PROBLEM_UNSAVED_OFF = "unsaved_off"   # Turn off could not be saved: off for this run, on again at the next start
@@ -442,6 +464,7 @@ class WakeController(QObject):
         from . import meetings
 
         self._talk = talk_controller
+        self._silent: set[str] = set()          # part 5B: microphones heard silent this session (never logged)
         self._holds_now = holds
         self._in_control = in_control
         self._picked_mic = picked_mic or (lambda: meetings.DevicePrefs(meetings.meetings_root(config)).microphone)
@@ -655,6 +678,14 @@ class WakeController(QObject):
             self._listener_state = str(message.get("state") or "")
             self._mic = (str(message.get("mic") or ""), bool(message.get("default")))
             logger.info("Wake: the listener is %s", self._listener_state)
+            name = self._mic[0]
+            if name and self._listener_state in (wake_listen.STATE_SILENT, wake_listen.STATE_VIRTUAL):
+                self._silent.add(name)            # part 5B: "(silent)" in the microphone lists (on screen only)
+            elif name and self._listener_state == wake_listen.STATE_LISTENING:
+                self._silent.discard(name)
+                clear = getattr(self._talk, "clear_unheard", None)
+                if callable(clear):
+                    clear(name)                   # the resilience review's L2: it hears on that microphone now
             self._changed()
 
     def _on_ready(self, message: dict) -> None:
@@ -804,42 +835,86 @@ class WakeController(QObject):
 
     def status(self) -> tuple[str, str]:
         """(what it is doing, in words; LOOK_*) for the marks, the tray and Settings."""
+        text, _short, look = self._describe()
+        return text, look
+
+    def _talk_hears(self) -> bool:
+        """A talk "Hey Jarvis" started is listening to the owner now (talk_ui.TalkController.wake_listening)."""
+        hears = getattr(self._talk, "wake_listening", None)
+        try:
+            return bool(hears()) if callable(hears) else False
+        except Exception:  # noqa: BLE001 - unknown: not
+            return False
+
+    def silent_mics(self) -> list[str]:
+        """Canvas part 5B: the microphones the listener reported silent (or virtual) this session - marked "(silent)" in
+        Settings' microphone lists; on screen only, never logged."""
+        return sorted(self._silent)
+
+    def hearing(self) -> tuple[str, str]:
+        """The window brief: "Hey Jarvis" for the canvas's HEY JARVIS - (HEAR_*, the microphone's name). HEAR_CANT_HEAR
+        while the listener gets nothing from its microphone (one that gives only silence, or a virtual one), with that
+        microphone's name (on screen only, never logged); HEAR_OTHER for the other problems (its few words are
+        short_status); HEAR_OFF while it is off."""
+        _text, short, look = self._describe()
+        if look == LOOK_OFF:
+            return HEAR_OFF, ""
+        if self._talk_hears():
+            return HEAR_HEARING, ""             # part 5B: never "paused" while a talk it started listens
+        if look == LOOK_LISTENING:
+            return HEAR_LISTENING, ""
+        if look == LOOK_PAUSED:
+            return HEAR_PAUSED, ""
+        if short in (SHORT_SILENT, SHORT_VIRTUAL):
+            return HEAR_CANT_HEAR, self._mic[0]
+        return HEAR_OTHER, ""
+
+    def short_status(self) -> str:
+        """The same in a few words (at most SHORT_CAP): the canvas's badge at the bottom left, which has no tooltip
+        and no room for a sentence (canvas part 3: "Not listening: no microphone", never cut)."""
+        return self._describe()[1]
+
+    def _describe(self) -> tuple[str, str, str]:
+        """(the sentence, its few words, LOOK_*)."""
         if not self._store.on:
             if self._problem == PROBLEM_UNSAVED_OFF:
                 return (f"{PHRASE} is off for now, but that could not be saved: it listens again when Jarvis next "
-                        "starts.", LOOK_OFF)
+                        "starts.", SHORT_OFF, LOOK_OFF)
             return (f"{PHRASE} is off" + (": turning it on could not be saved" if self._problem == PROBLEM_UNSAVED
-                                          else ""), LOOK_OFF)
+                                          else ""), SHORT_OFF, LOOK_OFF)
         missing = self.missing()
         if missing:
-            return self._missing_text(missing), LOOK_PROBLEM
+            return self._missing_text(missing), SHORT_SETUP, LOOK_PROBLEM
         if self._problem == PROBLEM_STOPPED:
             return (f"{PHRASE} stopped: its listener kept failing. Turn it off and on in Settings > Talk to try again.",
-                    LOOK_PROBLEM)
+                    SHORT_STOPPED, LOOK_PROBLEM)
         if self._problem in (wake.ERR_MODEL, wake.ERR_ADDON):
-            return self._missing_text(["wake_model" if self._problem == wake.ERR_MODEL else "runtime"]), LOOK_PROBLEM
+            return (self._missing_text(["wake_model" if self._problem == wake.ERR_MODEL else "runtime"]), SHORT_SETUP,
+                    LOOK_PROBLEM)
         if self._holds:
-            return f"{PHRASE} paused " + " and ".join(HOLD_TEXTS.get(hold, hold) for hold in self._holds), LOOK_PAUSED
+            return (f"{PHRASE} paused " + " and ".join(HOLD_TEXTS.get(hold, hold) for hold in self._holds),
+                    SHORT_PAUSED, LOOK_PAUSED)
         name, follows = self._mic
-        where = "the Windows default" if follows else "picked in Settings > Meetings"
+        where = "the Windows default" if follows else "picked in Settings > Talk"
         state = self._listener_state
         if state == wake_listen.STATE_LISTENING:
-            return f"Listening for {PHRASE}", LOOK_LISTENING
+            return f"Listening for {PHRASE}", SHORT_LISTENING, LOOK_LISTENING
         if state == wake_listen.STATE_VIRTUAL:
             return (f"Not listening: “{name}” ({where}) is a virtual microphone, silent unless its app runs. "
-                    "Pick your real one in Settings > Meetings > Microphone.", LOOK_PROBLEM)
+                    "Pick your real one in Settings > Talk > Microphone.", SHORT_VIRTUAL, LOOK_PROBLEM)
         if state == wake_listen.STATE_NO_MIC:
-            return "Not listening: no microphone found.", LOOK_PROBLEM
+            return "Not listening: no microphone found.", SHORT_NO_MIC, LOOK_PROBLEM
         if state == wake_listen.STATE_BUSY:
             return ("Not listening: the microphone wouldn't open (another app, or Windows' privacy settings); "
-                    "trying again.", LOOK_PROBLEM)
+                    "trying again.", SHORT_BUSY, LOOK_PROBLEM)
         if state == wake_listen.STATE_SILENT:
-            return f"Listening, but “{name}” gives only silence: is it muted?", LOOK_PROBLEM
+            return f"Listening, but “{name}” gives only silence: is it muted?", SHORT_SILENT, LOOK_PROBLEM
         if state == wake_listen.STATE_NO_AUDIO:
-            return "Not listening: the add-on PyAudioWPatch is missing (Settings > Talk shows how).", LOOK_PROBLEM
+            return ("Not listening: the add-on PyAudioWPatch is missing (Settings > Talk shows how).", SHORT_NO_AUDIO,
+                    LOOK_PROBLEM)
         if self._restart_timer.isActive():
-            return f"{PHRASE}'s listener stopped; starting it again.", LOOK_PAUSED
-        return f"{PHRASE} is starting...", LOOK_PAUSED
+            return f"{PHRASE}'s listener stopped; starting it again.", SHORT_RESTARTING, LOOK_PAUSED
+        return f"{PHRASE} is starting...", SHORT_STARTING, LOOK_PAUSED
 
     def _missing_text(self, missing: list[str]) -> str:
         if "runtime" in missing:
@@ -898,7 +973,7 @@ class WakeController(QObject):
     def _status_row(self) -> str:
         text, look = self.status()
         if look == LOOK_LISTENING and self._mic[0]:
-            where = "the Windows default" if self._mic[1] else "picked in Settings > Meetings"
+            where = "the Windows default" if self._mic[1] else "picked in Settings > Talk"
             return f"{text} on “{self._mic[0]}” ({where})"
         return text
 

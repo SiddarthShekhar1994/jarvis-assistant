@@ -51,8 +51,13 @@ KINDS = (KIND_GREETING, KIND_ANNOUNCE, KIND_ACK, KIND_REPLY, KIND_RESULT, KIND_N
 QUEUE_CAP = 4                  # utterances waiting to start (the one playing does not count)
 # An utterance that has not started this many seconds after it was asked for is dropped (its
 # conversation entry is shown already).
-STALE_AFTER_S = {KIND_ACK: 8.0, KIND_GREETING: 20.0, KIND_ANNOUNCE: 20.0, KIND_REPLY: 30.0,
+# A greeting and an announcement keep 30 s (2026-11-24): his start-up line may wait up to 25 s for his own voice while it
+# loads (local_voice.URGENT_LOAD_WAIT_S), and must still be said after that.
+STALE_AFTER_S = {KIND_ACK: 8.0, KIND_GREETING: 30.0, KIND_ANNOUNCE: 30.0, KIND_REPLY: 30.0,
                  KIND_RESULT: 60.0, KIND_NOTICE: 60.0}
+# The say thread waits for the local voice at most this much less than its utterance's limit, so the Windows voice can
+# still make the line in time (an utterance whose audio comes after its limit is never said).
+SAY_MARGIN_S = 4.0
 _DROPPED_FIRST = (KIND_ACK, KIND_GREETING)   # when the queue is full
 
 
@@ -163,6 +168,11 @@ class Utterance:
     @property
     def ready(self) -> bool:
         return self.audio is not None
+
+
+def wait_limit_s(kind: str) -> float:
+    """How long the making of an utterance of ``kind`` may wait for the local voice: its limit less SAY_MARGIN_S."""
+    return max(0.0, STALE_AFTER_S.get(kind, STALE_AFTER_S[KIND_NOTICE]) - SAY_MARGIN_S)
 
 
 class SpeechLane:
@@ -309,7 +319,9 @@ class SayWorker(threading.Thread):
     ``synth_factory()`` runs on this thread (SAPI/COM is thread-bound). ``on_result(seq, audio,
     error)`` runs on this thread too: ``audio`` is a SectionAudio, or None with ``error`` (a short
     reason that never holds the text). A job ``forget``-ten before it starts is skipped. A failing
-    synthesizer or callback never ends the thread.
+    synthesizer or callback never ends the thread. ``submit``'s ``within_s``: the job's audio is wanted within this many
+    seconds of the submit (its utterance's limit, wait_limit_s); a synthesizer with ``set_wait_limit`` is told what is
+    left of it when the job starts, so a wait for the local voice never outlasts the utterance.
     """
 
     def __init__(self, synth_factory: Callable[[], Any],
@@ -317,13 +329,14 @@ class SayWorker(threading.Thread):
         super().__init__(name="tts-say", daemon=True)
         self._synth_factory = synth_factory
         self._on_result = on_result
-        self._jobs: queue.Queue[tuple[int, str] | None] = queue.Queue()
+        self._jobs: queue.Queue[tuple[int, str, float | None] | None] = queue.Queue()
         self._lock = threading.Lock()
         self._forgotten: set[int] = set()
         self._stop_requested = threading.Event()
 
-    def submit(self, seq: int, text: str) -> None:
-        self._jobs.put((int(seq), str(text)))
+    def submit(self, seq: int, text: str, within_s: float | None = None) -> None:
+        deadline = None if within_s is None else time.monotonic() + max(0.0, float(within_s))
+        self._jobs.put((int(seq), str(text), deadline))
 
     def forget(self, seq: int) -> None:
         """Skip this job if it has not started (its utterance was dropped)."""
@@ -342,11 +355,14 @@ class SayWorker(threading.Thread):
                 job = self._jobs.get()
                 if job is None or self._stop_requested.is_set():
                     break
-                seq, text = job
+                seq, text, deadline = job
                 with self._lock:
                     if seq in self._forgotten:
                         self._forgotten.discard(seq)
                         continue
+                limit = getattr(synth, "set_wait_limit", None)
+                if callable(limit):
+                    limit(None if deadline is None else max(0.0, deadline - time.monotonic()))
                 audio, error = self._process(synth, startup_error, seq, text)
                 if self._stop_requested.is_set():
                     break

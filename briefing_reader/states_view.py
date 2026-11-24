@@ -11,6 +11,7 @@ Words (plain text; British spelling; never a vendor name in what Jarvis says)
     ``waiting_word(run)``                   "WAITING FOR THE AM BRIEFING" (the header readout)
     ``waiting_readout(interval, until)``    "EVERY MINUTE \u00b7 UNTIL 10:27 AM" (when Jarvis checks)
     ``OFFLINE_LINE`` / ``offline_line(address)``   "My usual voice is out of reach, sir. I'll keep trying."
+    ``CALL_LINE`` / ``call_line(address)``   "You're on a call, sir: I'll keep to captions."
     ``offline_badge(retry)``                "WINDOWS VOICE" or "WINDOWS VOICE \u00b7 RETRY 10:14"
     ``quiet_word(until)``                   "QUIET HOURS UNTIL 8:00 AM"
     ``clock_text(moment, hour24)``          "8:00 AM" / "08:00"
@@ -33,10 +34,12 @@ Words (plain text; British spelling; never a vendor name in what Jarvis says)
     other action is the app's to answer (Retry: the same Retry as before; it never sends by itself).
 
 ``Toast``
-    Jarvis's own small window (TOAST_SIZE, ``raised``, radius 14, bottom-right of the work area, on top) -
+    Jarvis's own small window (TOAST_SIZE, ``raised``, radius 14 - the canvas look: a square canvas frame,
+    TOAST_CANVAS - bottom-right of the work area, on top) -
     never a Windows notification, so nothing lands in Windows' notification history. It never takes the
     focus (``Qt.Tool``, ``WindowDoesNotAcceptFocus``, ``WA_ShowWithoutActivating``; its button takes no
-    focus either). The mini orb, one line and ONE action. ``post(line, action, key, look=)`` shows it;
+    focus either). The mini orb (while Home is the canvas: the canvas orb's flat JARVIS badge, TOAST_BADGE px
+    square), one line and ONE action. ``post(line, action, key, look=)`` shows it;
     it hides after ``TOAST_MS`` (hovering pauses the time; leaving gives the rest back); ``actionClicked(key)``
     after a click on its action (the toast hides first). The toast never acts by itself: the app only
     brings an existing screen forward.
@@ -65,8 +68,13 @@ TOAST_MS = 8000
 TOAST_SIZE = QSize(360, 88)
 TOAST_RADIUS = 14
 TOAST_MARGIN = 16                 # from the work area's bottom-right corner
+TOAST_BADGE = 60                  # the canvas look: the orb's flat JARVIS badge, this square (the toast's height
+                                  # less its 14 px padding)
+TOAST_CANVAS = holo.CanvasFrameLook(QColor(3, 10, 13), holo.CANVAS_EDGE, holo.CANVAS_GLOW, 1.0,
+                                    QColor(255, 255, 255, 150), holo.BRACKETS_ALL)   # the canvas look's frame
 TOAST_LINES = 3                   # the line wraps beside the action (8 words fit)
 OFFLINE_LINE = "My usual voice is out of reach, {sir}. I'll keep trying."
+CALL_LINE = "You're on a call, {sir}: I'll keep to captions."     # quiet during calls (shown, never said)
 OFFLINE_BADGE = "WINDOWS VOICE"
 QUIET_DIM = 0.7                   # the idle orb in quiet hours (spec 16.7)
 VIEW_TEXT = "View"
@@ -110,6 +118,11 @@ def waiting_readout(interval: str, until: str) -> str:
 def offline_line(address: str = "sir") -> str:
     """"My usual voice is out of reach, sir. I'll keep trying." (no vendor names in Jarvis's lines)."""
     return with_address(OFFLINE_LINE, address)
+
+
+def call_line(address: str = "sir") -> str:
+    """"You're on a call, sir: I'll keep to captions." (quiet during calls)."""
+    return with_address(CALL_LINE, address)
 
 
 def offline_badge(retry: str = "") -> str:
@@ -336,6 +349,10 @@ class ErrorTile(QWidget):
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
         return QSize(offer_view.TILE_MIN, self.height_for(offer_view.TILE_MIN))
 
+    def fit_width(self) -> int:
+        """The narrowest width at which its one button shows whole (canvas part 5B)."""
+        return self.action_button.sizeHint().width() + 2 * holo.TILE_PAD[1] - 2 * holo.HoloButton.MARGIN
+
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
         self._place_button()
@@ -438,7 +455,11 @@ class Toast(QWidget):
         self._remaining_ms = TOAST_MS
         self._started = 0.0
         self._hovered = False
+        # Canvas part 5B (the walk's 22): a box on the screen it never covers (the canvas's orb in its corner while
+        # Jarvis's window shows it): () -> QRect | None, global px. The app sets it.
+        self.avoid: Any = None
         self.mini = orb_mod.MiniOrb(self, ring_color=holo.RAISED)
+        self.mini.set_badge_form(True)
         self.action_button = holo.HoloButton("", holo.GO, size=holo.SIZE_SM, parent=self)
         self.action_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)   # a click never moves the focus here
         self.action_button.clicked.connect(self._on_action)
@@ -491,12 +512,22 @@ class Toast(QWidget):
         return self.isVisible() and not self._timer.isActive() and self._hovered
 
     def place(self) -> None:
-        """Bottom-right of the primary screen's work area (above the taskbar)."""
+        """Bottom-right of the primary screen's work area (above the taskbar) - above the box ``avoid`` gives when it
+        would cover it (canvas part 5B: the canvas's orb in its corner)."""
         screen = QGuiApplication.primaryScreen()
         if screen is None:
             return
         area: QRect = screen.availableGeometry()
-        self.move(area.right() + 1 - TOAST_MARGIN - self.width(), area.bottom() + 1 - TOAST_MARGIN - self.height())
+        x = area.right() + 1 - TOAST_MARGIN - self.width()
+        y = area.bottom() + 1 - TOAST_MARGIN - self.height()
+        try:
+            avoid = self.avoid() if callable(self.avoid) else None
+        except Exception:  # noqa: BLE001 - unknown: its own corner
+            avoid = None
+        spot = QRect(x, y, self.width(), self.height())
+        if isinstance(avoid, QRect) and not avoid.isEmpty() and spot.intersects(avoid):
+            y = max(area.top(), avoid.top() - TOAST_MARGIN - self.height())
+        self.move(x, y)
 
     def dismiss(self) -> None:
         self._timer.stop()
@@ -550,6 +581,9 @@ class Toast(QWidget):
 
     def _place_children(self) -> None:
         pad = 14
+        side = TOAST_BADGE if self.mini.badge_shown() else orb_mod.MINI
+        if self.mini.width() != side:
+            self.mini.setFixedSize(side, side)
         self.mini.move(pad, (self.height() - self.mini.height()) // 2)
         size = self.action_button.sizeHint()
         self.action_button.setGeometry(self.width() - pad + holo.HoloButton.MARGIN - size.width(),
@@ -569,9 +603,12 @@ class Toast(QWidget):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-            painter.setPen(QPen(holo.LINE_STRONG, 1.0))
-            painter.setBrush(QColor(holo.RAISED))
-            painter.drawRoundedRect(rect, TOAST_RADIUS, TOAST_RADIUS)
+            if holo.canvas_look():                   # a canvas frame: square, opaque, the bright edge, glow, ticks
+                holo.paint_canvas_frame(painter, QRectF(self.rect()), TOAST_CANVAS)
+            else:
+                painter.setPen(QPen(holo.LINE_STRONG, 1.0))
+                painter.setBrush(QColor(holo.RAISED))
+                painter.drawRoundedRect(rect, TOAST_RADIUS, TOAST_RADIUS)
             font = hud.display_font(14, 500, 0.02)
             painter.setFont(font)
             painter.setPen(QColor(holo.INK_1))

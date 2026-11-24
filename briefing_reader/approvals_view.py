@@ -20,6 +20,12 @@ Public API
     they need more height than the screen has (never squeezed on top of each other). ``sync(cards)``
     rebuilds it from the cards; ``tileClicked(action_id)``; ``set_selected(action_id)``; ``set_count(n)``.
 
+``BatchBar`` (mail extras, part 1)
+    A slim bar over the card column at any width: "Add all N to calendar..." while at least two own-calendar cards
+    could go together, "Adding 2 of 5..." with Stop while a batch runs, hidden else. ``ApprovalsStage.set_batch(count,
+    state, text)`` sets it; ``batchRequested`` / ``batchStopRequested`` are its clicks. It only asks: the app opens the
+    confirm dialog, and each card is still carried out on its own path.
+
 Nothing here decides or sends anything: the tiles only point at the cards, whose buttons decide.
 """
 
@@ -31,7 +37,7 @@ from typing import Any
 import shiboken6
 from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFontMetricsF, QPainter, QPen
-from PySide6.QtWidgets import QAbstractButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QAbstractButton, QHBoxLayout, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
 
 from . import holo, hud
 
@@ -106,6 +112,9 @@ class QueueTile(QAbstractButton):
         self._title = card.title()
         self._meta = card.detail_label.text().upper()
         self._mail = card.is_mail()
+        # The kind's glyph: a message for a Reply / Email, an envelope for an Unsubscribe (mail extras), else the
+        # calendar.
+        self._glyph = "send" if self._mail else "mail" if "unsubscribe" in self._label.casefold() else "calendar"
         self._dimmed = card.is_locked()
         self.setAccessibleName(f"{self._label}: {self._title}")
         self.setToolTip(hud.plain_tooltip(self._title))
@@ -170,7 +179,7 @@ class QueueTile(QAbstractButton):
             painter.setBrush(QColor(holo.AMBER))
             painter.drawEllipse(dot, 3.5, 3.5)
             glyph = QRectF(rect.right() - self.PAD_X - 16, y - 1, 16, 16)
-            holo.paint_icon(painter, glyph, "send" if self._mail else "calendar", holo.AMBER, stroke=1.8)
+            holo.paint_icon(painter, glyph, self._glyph, holo.AMBER, stroke=1.8)
             painter.setFont(label_font)
             painter.setPen(QColor(holo.AMBER))
             label_rect = QRectF(x + 15, y, glyph.left() - x - 23, 14)
@@ -200,7 +209,9 @@ class QueueTile(QAbstractButton):
 
 
 class _DecidedToggle(QAbstractButton):
-    """``Decided today`` and its count (Chakra 13 / 500, ink-4, 34 high): opens and closes the list."""
+    """``Decided today`` and its count (Chakra 13 / 500, ink-4, 34 high): opens and closes the list. Canvas part 5B
+    (the walk's 13): a chevron says open or closed, and while nothing was decided today it is no button at all (not
+    enabled, no pointer, no hover, not reached by Tab) - a click never shows nothing."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -215,6 +226,11 @@ class _DecidedToggle(QAbstractButton):
     def set_count(self, count: int) -> None:
         self._count = max(0, int(count))
         self.setAccessibleName(f"{DECIDED_TITLE}, {self._count}")
+        works = self._count > 0
+        if works != self.isEnabled():
+            self.setEnabled(works)
+            self.setFocusPolicy(Qt.FocusPolicy.TabFocus if works else Qt.FocusPolicy.NoFocus)
+            self.setCursor(Qt.CursorShape.PointingHandCursor if works else Qt.CursorShape.ArrowCursor)
         self.update()
 
     def count(self) -> int:
@@ -242,13 +258,24 @@ class _DecidedToggle(QAbstractButton):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect())
-            if self.underMouse():
+            hot = self.underMouse() and self.isEnabled()
+            if hot:
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(holo.alpha(holo.INK_1, 0.06))
                 painter.drawRoundedRect(rect, holo.RADIUS_BUTTON_SM, holo.RADIUS_BUTTON_SM)
-            painter.setPen(QColor(holo.INK_1 if self.underMouse() else holo.INK_4))
-            painter.setFont(hud.display_font(13, 500, 0.04))
+            ink = holo.INK_1 if hot else holo.INK_4
             inner = rect.adjusted(8, 0, -8, 0)
+            if self.isEnabled():                 # the chevron: right while closed, down while open
+                box = QRectF(inner.left(), rect.center().y() - 6, 12, 12)
+                painter.save()
+                painter.translate(box.center())
+                painter.rotate(90 if self.isChecked() else 0)
+                painter.translate(-box.center())
+                holo.paint_icon(painter, box, "chevron", QColor(ink), stroke=2.0)
+                painter.restore()
+                inner = inner.adjusted(18, 0, 0, 0)
+            painter.setPen(QColor(ink))
+            painter.setFont(hud.display_font(13, 500, 0.04))
             painter.drawText(inner, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), self.text())
             painter.setFont(hud.mono_font(11, 400, 0.12))
             painter.drawText(inner, int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter), str(self._count))
@@ -469,8 +496,85 @@ class ApprovalQueue(QWidget):
             painter.end()
 
 
+BATCH_IDLE = "idle"          # "Add all N to calendar..."
+BATCH_RUNNING = "running"    # "Adding 2 of 5..." and Stop
+BATCH_HIDDEN = "hidden"
+BATCH_ADD_TEXT = "Add all {count} to calendar..."
+BATCH_STOP_TEXT = "Stop"
+BATCH_STOPPING_TEXT = "Stopping..."
+BATCH_TIP = "Lists them first; nothing is added before you confirm"
+
+
+class BatchBar(QWidget):
+    """The batch bar over the card column (see the module docstring): a status line at its left and one button at
+    its right, over a hairline."""
+
+    requested = Signal()
+    stopRequested = Signal()
+    HEIGHT = 40
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._state = BATCH_HIDDEN
+        self._count = 0
+        self.setAccessibleName("Add all")
+        row = QHBoxLayout(self)
+        row.setContentsMargins(4, 0, 0, 4)
+        row.setSpacing(12)
+        self.label = hud.make_label("", hud.mono_font(10, 600, 0.06), hud.TEXT_SOFT)
+        row.addWidget(self.label, 1)
+        self.button = holo.HoloButton("", holo.AMBER_GHOST, size=holo.SIZE_SM)
+        self.button.clicked.connect(self._on_click)
+        row.addWidget(self.button, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.setFixedHeight(self.HEIGHT)
+        self.hide()
+
+    def set_batch(self, count: int, state: str, text: str = "") -> None:
+        self._count = max(0, int(count))
+        self._state = state if state in (BATCH_IDLE, BATCH_RUNNING) else BATCH_HIDDEN
+        if self._state == BATCH_IDLE:
+            self.label.setText("")
+            self.button.setText(BATCH_ADD_TEXT.format(count=self._count))
+            self.button.set_variant(holo.AMBER_GHOST)
+            self.button.setToolTip(BATCH_TIP)
+            self.button.setEnabled(True)
+        elif self._state == BATCH_RUNNING:
+            self.label.setText(text.upper())
+            stopping = text.startswith("Stopping")
+            self.button.setText(BATCH_STOPPING_TEXT if stopping else BATCH_STOP_TEXT)
+            self.button.set_variant(holo.GHOST)
+            self.button.setToolTip("Stops after the card being added now; each added card keeps its Undo")
+            self.button.setEnabled(not stopping)
+        self.button.updateGeometry()
+        self.setVisible(self._state != BATCH_HIDDEN)
+
+    def state(self) -> str:
+        return self._state
+
+    def count(self) -> int:
+        return self._count
+
+    def _on_click(self) -> None:
+        if self._state == BATCH_IDLE:
+            self.requested.emit()
+        elif self._state == BATCH_RUNNING:
+            self.stopRequested.emit()
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        painter = QPainter(self)
+        try:
+            painter.setPen(QPen(holo.LINE, 1.0))
+            y = self.height() - 0.5
+            painter.drawLine(QPointF(0, y), QPointF(self.width(), y))
+        finally:
+            painter.end()
+
+
 class ApprovalsStage(QWidget):
     """The Approvals screen; see the module docstring."""
+
+    batchRequested = Signal()
+    batchStopRequested = Signal()
 
     def __init__(self, cards: hud.ActionList, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -479,6 +583,9 @@ class ApprovalsStage(QWidget):
         cards.setParent(self)
         self.queue = ApprovalQueue(self)
         self.queue.tileClicked.connect(self.select)
+        self.batch_bar = BatchBar(self)
+        self.batch_bar.requested.connect(self.batchRequested)
+        self.batch_bar.stopRequested.connect(self.batchStopRequested)
         cards.changed.connect(self._schedule_sync)
         self._sync_pending = False
         self._schedule_sync()
@@ -498,6 +605,14 @@ class ApprovalsStage(QWidget):
     def sync_now(self) -> None:
         """Rebuild the queue from the cards at once (tests and screenshots)."""
         self._sync()
+
+    def set_batch(self, count: int, state: str, text: str = "") -> None:
+        """The batch bar: BATCH_IDLE with ``count`` cards that could go together, BATCH_RUNNING with ``text``
+        ("Adding 2 of 5..."), or BATCH_HIDDEN."""
+        shown = self.batch_bar.isVisibleTo(self)
+        self.batch_bar.set_batch(count, state, text)
+        if self.batch_bar.isVisibleTo(self) != shown:
+            self._place()
 
     def select(self, action_id: str) -> None:
         """Make ``action_id``'s card the focal one and bring it to the top of the column (a queue tile)."""
@@ -539,7 +654,12 @@ class ApprovalsStage(QWidget):
         else:
             card_w = min(CARD_MAX + 40, width - 2 * pad)
             x = (width - card_w) / 2
-        self.cards.setGeometry(round(x), top, round(card_w), max(0, height - top - bottom))
+        cards_top = top
+        if self.batch_bar.isVisibleTo(self):
+            bar_top = max(4, top - BatchBar.HEIGHT - 4) if top >= BatchBar.HEIGHT + 8 else top
+            self.batch_bar.setGeometry(round(x), bar_top, round(card_w), BatchBar.HEIGHT)
+            cards_top = max(top, bar_top + BatchBar.HEIGHT + 4)
+        self.cards.setGeometry(round(x), cards_top, round(card_w), max(0, height - cards_top - bottom))
         self.queue.setVisible(show_queue)
         if show_queue:
             self.queue.setGeometry(round(x + card_w), top, QUEUE_GAP + QUEUE_WIDTH, max(0, height - top - bottom))

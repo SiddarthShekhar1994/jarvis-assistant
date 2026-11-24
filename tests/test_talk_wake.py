@@ -301,5 +301,33 @@ class ListenFromWakeTests(unittest.TestCase):
         self.assertFalse(controller._chime_timer.isActive())
 
 
+
+class WakeCaptionTests(unittest.TestCase):
+    """Smaller items part 9: a talk "Hey Jarvis" started shows live captions too, without the wake words."""
+
+    make = ListenFromWakeTests.make
+    through = ListenFromWakeTests.through
+
+    def test_hey_jarvis_talks_caption_without_the_wake_words(self) -> None:
+        import dataclasses
+
+        from tests.test_talk_ui import PeekClient
+
+        controller = self.make()
+        controller._cfg = dataclasses.replace(controller._cfg, live_captions="on")
+        self.client = PeekClient(Heard(True, "Hey Jarvis, open Spotify.", ms=200),
+                                 partials=("Hey Jarvis, open", "Hey Jarvis, open Spotify"), device="cpu")
+        controller.listen_from_wake(FakeStream(tone(1800, VOICE) + noise(1500, ROOM)), preroll=WAKE_WORDS,
+                                    speaking=True)
+        self.through(controller)
+        shown = [text for text, _tone in self.calls.statuses if text.startswith("\u201c")]
+        self.assertTrue(shown)
+        self.assertTrue(all("Jarvis" not in text for text in shown))
+        self.assertEqual(shown[0], "\u201cOpen\u201d")
+        self.assertEqual(self.calls.submitted, ["Open Spotify."])
+        self.assertTrue(self.client.peeks)
+        self.assertTrue(all(size >= len(WAKE_WORDS) for size in self.client.peeks))   # from the pre-roll on
+
+
 if __name__ == "__main__":
     unittest.main()

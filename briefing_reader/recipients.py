@@ -48,6 +48,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from . import atomic
+
 logger = logging.getLogger(__name__)
 
 RECIPIENTS_FILE = "recipients.json"
@@ -207,7 +209,7 @@ class RecipientHistory:
                 fh.write(text)
                 fh.flush()
                 os.fsync(fh.fileno())
-            os.replace(part, self.path)
+            atomic.replace(part, self.path)   # a standing check may be reading it
             part = None
             return True
         except OSError as exc:

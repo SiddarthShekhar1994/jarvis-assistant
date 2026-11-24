@@ -479,12 +479,14 @@ class ResearchCliTests(unittest.TestCase):
         self.assertLess(prompt.index("WEB RESEARCH"), prompt.index("EXAMPLE (invented)"))
 
     # schema_text() (length, sha256) for (allow_search, allow_web): as at 3b598ee but for the words of say's description
-    # (up to four sentences, facts from the context) and, with the web on, weather and SAY_WITH_WEB; the memory build adds
-    # "remember" only when asked, so these change only when schema.json is meant to.
-    SCHEMA_GOLDEN = {(False, False): (927, "f9935a6fa5705643e92e1265ac0ee5cfc2584ebcbbc60c64f126d9436187c467"),
-                     (False, True): (1614, "af94ec50b76b53ad1273886a76e0bed84e87d1b3d103cb20e63f23376769f3ae"),
-                     (True, False): (1423, "dcad9d43c86bf0ae741bc3a0c6a2c1e0115239cc334789689fbf5a1c92b5cbb6"),
-                     (True, True): (2110, "f4ad0fa87f26eaf0290ef85fe047f505967fcbf045bca064a30b6074917d045b")}
+    # (up to four sentences, facts from the context) and, with the web on, weather and SAY_WITH_WEB, and for the new
+    # look's part 6 (2026-11-15): the optional "topic" and "frames" after the other properties (tests/test_ask_frames.py);
+    # and part 6's fixes (2026-11-16): the rows' description says a cell is words or a figure written as text
+    # ("3,400"); the memory build adds "remember" only when asked, so these change only when schema.json is meant to.
+    SCHEMA_GOLDEN = {(False, False): (3228, "40a08eb32e109bd935d10e565df416c6316e3bb670fe4368602b7cd4f455115a"),
+                     (False, True): (3915, "d2fc66810ea1d382c7d236cb97aab0d33bd34d6741787535ee8fde5639d9ab27"),
+                     (True, False): (3724, "6304a0faffb5a40faa5af0198f690790fe71da2d2d473c7f0acac41e24b6dc68"),
+                     (True, True): (4411, "42f238354a989eaadc8b06d3a3eebb01e5832cae4778b91187f45953cdf37642")}
 
     def test_say_is_told_of_the_web_only_when_the_web_is_there(self) -> None:
         for allow_search in (False, True):
@@ -679,8 +681,8 @@ class ModeArgvTests(unittest.TestCase):
     def test_the_prep_schema_text(self) -> None:
         self.assertEqual(cli.mode_schema_text("prep"), cli.compact_json(json.loads(
             cli.PREP_SCHEMA_FILE.read_text(encoding="utf-8"))))
-        self.assertEqual(set(cli.MODE_PROMPTS), {"plan", "prep", "nudge", "meeting", "desktop"})
-        self.assertEqual(set(cli.MODE_SCHEMAS), {"plan", "prep", "nudge", "meeting", "desktop"})
+        self.assertEqual(set(cli.MODE_PROMPTS), {"plan", "prep", "nudge", "meeting", "desktop", "capture", "revise", "doc"})   # revise: mail extras; doc: item 5
+        self.assertEqual(set(cli.MODE_SCHEMAS), {"plan", "prep", "nudge", "meeting", "desktop", "capture", "revise", "doc"})   # revise: mail extras; doc: item 5
         self.assertEqual(cli.mode_schema_text("nudge"), cli.compact_json(json.loads(
             cli.NUDGE_SCHEMA_FILE.read_text(encoding="utf-8"))))
 

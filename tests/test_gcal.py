@@ -407,6 +407,47 @@ class EventBodyTests(unittest.TestCase):
             with self.subTest(action=action), self.assertRaises(CalendarError):
                 build_event_body(action, TZ)
 
+    # ---- capture (build plan item 3, part A) ----
+
+    def test_capture_rule_lines_become_the_recurrence_list(self) -> None:
+        action = make_action(rrule="RRULE:FREQ=WEEKLY;BYDAY=TU,TH;UNTIL=20261211T235959Z\n"
+                                   "EXDATE:20261020T150000,20261022T150000")
+        local_end = datetime(2026, 12, 12, 7, 59, 59, tzinfo=timezone.utc)
+        with mock.patch.object(gcal, "_local_end_of_day_utc", return_value=local_end):
+            body = build_event_body(action, TZ)
+        self.assertEqual(body["recurrence"], ["RRULE:FREQ=WEEKLY;BYDAY=TU,TH;UNTIL=20261212T075959Z",
+                                              f"EXDATE;TZID={TZ}:20261020T150000,20261022T150000"])
+        all_day = make_action("Holiday", all_day_start=date(2026, 10, 5),
+                              rrule="RRULE:FREQ=YEARLY\nEXDATE;VALUE=DATE:20271005")
+        self.assertEqual(build_event_body(all_day, TZ)["recurrence"],
+                         ["RRULE:FREQ=YEARLY", "EXDATE;VALUE=DATE:20271005"])
+        # Without a time zone (the card's preview) a floating EXDATE is shown as it is.
+        self.assertEqual(build_event_body(make_action(rrule="RRULE:FREQ=DAILY\nEXDATE:20261010T150000"), "")
+                         ["recurrence"], ["RRULE:FREQ=DAILY", "EXDATE:20261010T150000"])
+
+    def test_capture_rule_line_without_a_known_prefix_is_refused(self) -> None:
+        for rule in ("RRULE:FREQ=DAILY\nFREQ=WEEKLY", "RRULE:FREQ=DAILY\nDTSTART:20261010T150000",
+                     "RRULE:FREQ=DAILY\nSUMMARY:x"):
+            with self.subTest(rule=rule), self.assertRaises(CalendarError):
+                build_event_body(make_action(rrule=rule), TZ)
+
+    def test_capture_uid_and_footer(self) -> None:
+        action = dataclasses.replace(make_action(notes="From term.ics"), mode="capture", uid="abc@example.org")
+        body = build_event_body(action, TZ, footer=gcal.event_footer(action))
+        self.assertEqual(body["extendedProperties"], {"private": {"jarvisCaptureUid": "abc@example.org"}})
+        self.assertEqual(body["description"], "From term.ics\n\nAdded by Jarvis from a capture.")
+        self.assertNotIn("extendedProperties", build_event_body(make_action(), TZ))
+
+    def test_listed_events_carry_their_uids(self) -> None:
+        item = {"summary": "Lab", "iCalUID": "abc@example.org",
+                "start": {"dateTime": "2026-10-09T15:00:00-07:00"}, "end": {"dateTime": "2026-10-09T16:00:00-07:00"},
+                "extendedProperties": {"private": {"jarvisCaptureUid": " u-1 "}}}
+        event = gcal._event_from(item, "primary")
+        self.assertEqual((event.ical_uid, event.capture_uid), ("abc@example.org", "u-1"))
+        plain = gcal._event_from({"summary": "x", "start": {"date": "2026-10-09"},
+                                  "extendedProperties": {"private": "nope"}, "iCalUID": 5}, "primary")
+        self.assertEqual((plain.ical_uid, plain.capture_uid), ("", ""))
+
 
 # --------------------------------------------------------------------------
 # Time zone
@@ -2071,6 +2112,21 @@ class ChangesNeedAConfirmedAccountTests(EventCallTestCase):
         self.assertEqual((cal.change_problem(), cal.needs_confirmation()), (("", ""), False))
         cal.respond(EVENT_ID, "yes", interactive=False)
         self.assertEqual(len(self.service.calls_to("events.patch")), 1)
+
+
+
+class CaptureListTests(GcalTestCase):
+    """Review item 7: a capture's duplicate check knows when a calendar had more events than one read takes."""
+
+    def test_list_events_checked_says_when_a_page_was_left(self) -> None:
+        page = {"items": [_timed_event("A", "2026-10-05T09:00:00-07:00", "a")], "nextPageToken": "more"}
+        self.service.outcomes["events.list"] = [dict(page) for _ in range(3)]
+        cal = self.signed_in_calendar()
+        events, complete = cal.list_events_checked(DAY_START, DAY_END, max_pages=2)
+        self.assertFalse(complete)
+        self.assertEqual(len(self.service.calls_to("events.list")), 2)
+        self.service.outcomes["events.list"] = [{"items": []}]
+        self.assertEqual(cal.list_events_checked(DAY_START, DAY_END), ([], True))
 
 
 if __name__ == "__main__":

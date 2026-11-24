@@ -494,6 +494,95 @@ class MidRunTests(RunCase):
         self.assertEqual(self.engine.messages[1], "The owner says: use the blue one too")
         self.assertEqual(end.summary, "Heard: The owner says: use the blue one too")
 
+    def delivered(self) -> list[ar.AgentEvent]:
+        return [event for event in self.of(ar.E_NOTICE) if event.code == ar.C_DELIVERED]
+
+    def test_words_typed_mid_tool_show_as_delivered_after_its_result_and_the_replay(self) -> None:
+        tool, entered, release = self.blocking()
+
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.call("block")
+            said = engine.wait_message()                # its replay: delivered now
+            engine.call("finish", summary=f"Heard: {said}", outcome="done")
+            engine.end_turn()
+
+        run = self.go(script, extra_tools=(tool,))
+        self.assertTrue(entered.wait(10))
+        with self.assertLogs("briefing_reader.agent.runner", level="INFO") as captured:
+            self.assertEqual(run.owner_says("use the blue one too"), "sent")
+            time.sleep(0.1)
+            self.assertEqual(self.delivered(), [])      # the tool still runs: not delivered yet
+            release.set()
+            self.end()
+        notes = self.delivered()
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0].text, "")             # a code only, no words
+        tool_end = next(index for index, event in enumerate(self.events)
+                        if event.kind == ar.E_TOOL_END and event.tool == "block")
+        self.assertLess(tool_end, self.events.index(notes[0]))   # after the tool's result
+        lines = [line for line in captured.output if "was delivered" in line]
+        self.assertEqual(lines, [f"INFO:briefing_reader.agent.runner:Agent {run.run_id}: a message from the owner "
+                                 "was delivered"])
+        self.assertNotIn("blue", "\n".join(captured.output))
+
+    def test_a_message_of_jarvis_s_own_makes_no_note(self) -> None:
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.end_turn("Hello?")
+            engine.wait_message()                       # the one prompt to carry on: Jarvis's, not the owner's
+            engine.call("finish", summary="Fine.", outcome="done")
+            engine.end_turn()
+
+        self.go(script)
+        self.end()
+        self.assertIn(ar.CONTINUE_TEXT, self.engine.messages)
+        self.assertEqual(self.delivered(), [])          # nor the goal's replay
+
+    def test_words_queued_behind_the_goal_and_the_outbox_are_each_delivered_in_turn(self) -> None:
+        class Slow(FakeEngine):
+            hold = threading.Event()
+
+            def connect(self) -> None:
+                self.hold.wait(10)
+                super().connect()
+
+        def script(engine: FakeEngine) -> None:
+            for _message in range(3):
+                engine.wait_message()
+            engine.call("finish", summary="Done.", outcome="done")
+            engine.end_turn("Done.")
+
+        process = Slow(script)
+        self.addCleanup(process.hold.set)
+        run = self.go(process)
+        self.until(lambda: run._process is process)
+        self.assertEqual(run.owner_says("and keep it to one page"), "queued")   # behind the goal: they go in with it
+        self.assertEqual(run.owner_says("in plain words"), "queued")
+        process.hold.set()
+        self.end()
+        self.assertEqual(process.messages[1:], ["The owner says: and keep it to one page",
+                                                "The owner says: in plain words"])
+        self.assertEqual(len(self.delivered()), 2)      # the two of theirs, not the goal
+
+    def test_a_replay_is_matched_to_its_own_message(self) -> None:
+        """A late replay of Jarvis's (after the replay wait gave up) never stands for the owner's message; the owner's
+        own replay still shows as delivered, though the count of replays awaited ran out."""
+        run = self.go(lambda engine: (engine.wait_message(), time.sleep(30)))
+        self.until(lambda: self.of(ar.E_STARTED))
+        self.until(lambda: not run._sent_kinds)          # the goal's replay came
+        owner = owner_message("use the blue one")
+        with run._lock:
+            run._sent_kinds.extend([(ar.SENT_JARVIS, ar.CONTINUE_TEXT), (ar.SENT_OWNER, owner)])
+            run._sent_kinds.popleft()                    # the replay wait gave up on Jarvis's prompt
+            run._unreplayed = 1
+        run._on_user({"type": "user", "isReplay": True, "message": {"role": "user", "content": ar.CONTINUE_TEXT}})
+        self.assertEqual(self.delivered(), [])           # late, and not the owner's
+        run._on_user({"type": "user", "isReplay": True, "message": {"role": "user", "content": owner}})
+        self.assertEqual(len(self.delivered()), 1)
+        run._on_user({"type": "user", "isReplay": True, "message": {"role": "user", "content": owner}})
+        self.assertEqual(len(self.delivered()), 1)       # once
+
     def test_a_result_while_a_message_is_on_its_way_is_not_idle(self) -> None:
         tool, entered, release = self.blocking()
 
@@ -927,6 +1016,32 @@ class LimitTests(RunCase):
         run.answer(self.question().id, "yes")
         self.assertEqual(self.end().outcome, "done")
         self.assertEqual(self.engine.messages[1:], [ar.RESUME_YES, "The owner says: use the blue one"])
+
+    def test_words_held_by_the_limit_show_as_delivered_only_after_the_resume(self) -> None:
+        now = self.clocked()
+
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.emit(rate_limit_event(resets_at=self.RESET.timestamp()))
+            engine.emit(result_event("limit", is_error=True, api_error_status=429))
+            engine.wait_message()
+            engine.wait_message()
+            engine.call("finish", summary="Done.", outcome="done")
+            engine.end_turn()
+
+        def delivered() -> list[ar.AgentEvent]:
+            return [event for event in self.of(ar.E_NOTICE) if event.code == ar.C_DELIVERED]
+
+        run = self.go(script, now=lambda: now[0])
+        self.until(lambda: self.of(ar.E_NOTICE))
+        self.assertEqual(run.owner_says("use the blue one"), "held")
+        time.sleep(0.1)
+        self.assertEqual(delivered(), [])               # held: nothing went in
+        now[0] = self.RESET + timedelta(seconds=1)
+        run.answer(self.question().id, "yes")
+        self.assertEqual(self.end().outcome, "done")
+        self.assertEqual(self.engine.messages[1:], [ar.RESUME_YES, "The owner says: use the blue one"])
+        self.assertEqual(len(delivered()), 1)           # theirs; the resume's own words make no note
 
     def test_no_time_given_he_says_when(self) -> None:
         def script(engine: FakeEngine) -> None:

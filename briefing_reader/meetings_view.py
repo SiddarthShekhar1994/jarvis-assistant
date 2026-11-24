@@ -1139,8 +1139,18 @@ class MeetingsStage(QWidget):
         holder.setMaximumWidth(COLUMN_MAX + 120)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(holo.GUTTER_SIDE + 8, holo.GUTTER_TOP, holo.GUTTER_SIDE, 16)
+        layout.addStretch(0)                 # the canvas look: the column centred, as every screen over the canvas
         layout.addWidget(holder, 1000)
         layout.addStretch(1)
+        self._row = layout
+
+    def place_column(self) -> None:
+        """The column at the left (the hologram look) or centred (the canvas look)."""
+        self._row.setStretch(0, 1 if holo.canvas_look() else 0)
+
+    def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        self.place_column()
+        super().showEvent(event)
 
     # ---- API ---------------------------------------------------------------------------------
 
@@ -1226,49 +1236,82 @@ class MeetingsStage(QWidget):
 # Settings > Meetings
 # --------------------------------------------------------------------------
 
-class _DeviceRow(QWidget):
+MIC_NOTE = "This microphone is the one for talking, “Hey Jarvis” and meetings."   # (part 5B: on both rows)
+SILENT_MARK = " (silent)"        # a microphone the listener heard nothing from this session (on screen only)
+
+
+class DeviceRow(QWidget):
+    """A device row of Settings: its label, what is picked ("Follows the Windows default (...)" when none), Change and
+    its menu. Canvas part 5B: the microphone's row is in Settings > Meetings AND Settings > Talk - one setting, both
+    rows show and change it -, with ``note`` under it (MIC_NOTE) and the microphones the listener reported silent this
+    session marked SILENT_MARK in the menu (``silent``; on screen only, never logged). Nothing is picked for the owner."""
+
     picked = Signal(str)
 
-    def __init__(self, label: str, parent: QWidget | None = None) -> None:
+    def __init__(self, label: str, parent: QWidget | None = None, *, note: str = "") -> None:
         super().__init__(parent)
         self.name_label = body_label(label, "body_sm", holo.INK_3, wrap=False)
         self.value_label = body_label("", "body", holo.INK_1, name="meetingsDevice")
         self.change_button = holo.HoloButton("Change", holo.GHOST, size=holo.SIZE_SM)
         self.change_button.setAccessibleName(f"Change the {label.lower()}")
         self.change_button.clicked.connect(self._menu)
+        self.note_label = body_label(note, "body_sm", holo.INK_3, name="deviceNote")
+        self.note_label.setVisible(bool(note))
+        if note:
+            self.change_button.setAccessibleDescription(note)
         self._choices: list[str] = []
+        self._silent: set[str] = set()
         self._picked = ""
         self.menu: QMenu | None = None
-        row = QHBoxLayout(self)
+        column = QVBoxLayout(self)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(4)
+        row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(12)
         row.addWidget(self.name_label)
         row.addWidget(self.value_label, 1)
         row.addWidget(self.change_button)
+        column.addLayout(row)
+        column.addWidget(self.note_label)
 
-    def set_state(self, picked: str, default: str, choices: Sequence[str]) -> None:
+    def set_state(self, picked: str, default: str, choices: Sequence[str], silent: Sequence[str] = ()) -> None:
         self._picked, self._choices = picked, list(choices)
+        self._silent = {str(name) for name in silent if name}
         if picked:
             missing = "" if picked in choices or not choices else " - not connected now: the default is used"
             self.value_label.setText(f"{picked}{missing}")
         else:
             self.value_label.setText(f"Follows the Windows default ({default or 'none found'})")
 
+    def picked_name(self) -> str:
+        return self._picked
+
     def menu_items(self) -> list[str]:
-        return [FOLLOW_DEFAULT, *self._choices]
+        return [FOLLOW_DEFAULT, *(name + SILENT_MARK if name in self._silent else name for name in self._choices)]
 
     def choose(self, text: str) -> None:
-        self.picked.emit("" if text == FOLLOW_DEFAULT else text)
+        if text == FOLLOW_DEFAULT:
+            self.picked.emit("")
+            return
+        name = text
+        if text.endswith(SILENT_MARK) and text[:-len(SILENT_MARK)] in self._silent:
+            name = text[:-len(SILENT_MARK)]
+        self.picked.emit(name)
 
     def _menu(self) -> None:
         menu = QMenu(self)
         for text in self.menu_items():
             action = menu.addAction(text)
             action.setCheckable(True)
-            action.setChecked(text == (self._picked or FOLLOW_DEFAULT))
+            plain = text[:-len(SILENT_MARK)] if text.endswith(SILENT_MARK) else text
+            action.setChecked(plain == (self._picked or FOLLOW_DEFAULT))
             action.triggered.connect(lambda _checked=False, t=text: self.choose(t))
         self.menu = menu
         menu.popup(self.change_button.mapToGlobal(self.change_button.rect().bottomLeft()))
+
+
+_DeviceRow = DeviceRow
 
 
 class MeetingsSettingsPanel(QWidget):
@@ -1280,9 +1323,9 @@ class MeetingsSettingsPanel(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.mic_row = _DeviceRow("Microphone (You)")
+        self.mic_row = DeviceRow("Microphone (You)", note=MIC_NOTE)
         self.mic_row.picked.connect(self.microphonePicked)
-        self.call_row = _DeviceRow("Call audio (Others)")
+        self.call_row = DeviceRow("Call audio (Others)")
         self.call_row.picked.connect(self.callAudioPicked)
         self.model_label = body_label("", "body_sm", holo.INK_2, name="meetingsModel")
         self.download_button = holo.HoloButton(DOWNLOAD_BUTTON, holo.GHOST, size=holo.SIZE_SM)
@@ -1300,9 +1343,10 @@ class MeetingsSettingsPanel(QWidget):
         column.addWidget(Rule())
         column.addLayout(model)
 
-    def set_devices(self, mic: tuple[str, str, Sequence[str]], call: tuple[str, str, Sequence[str]]) -> None:
-        """(picked, default name, choices) for each."""
-        self.mic_row.set_state(*mic)
+    def set_devices(self, mic: tuple[str, str, Sequence[str]], call: tuple[str, str, Sequence[str]],
+                    silent: Sequence[str] = ()) -> None:
+        """(picked, default name, choices) for each; ``silent``: the microphones heard silent this session."""
+        self.mic_row.set_state(*mic, silent=silent)
         self.call_row.set_state(*call)
 
     def set_model(self, text: str, *, can_download: bool) -> None:

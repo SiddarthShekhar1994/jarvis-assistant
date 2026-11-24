@@ -1,7 +1,8 @@
 <#
 .SYNOPSIS
 Removes the Jarvis Assistant scheduled tasks created by install-schedule.ps1:
-"Briefing AM", "Briefing PM", "Briefing catch-up" and "Briefing hotkey".
+"Briefing AM", "Briefing PM", "Briefing catch-up", "Briefing hotkey" and
+"Briefing agents".
 
 .DESCRIPTION
 Unregisters the tasks that exist and reports what was removed and what was
@@ -25,7 +26,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 
 $TaskPath = "\"
-$TaskNames = @("Briefing AM", "Briefing PM", "Briefing catch-up", "Briefing hotkey")
+$TaskNames = @("Briefing AM", "Briefing PM", "Briefing catch-up", "Briefing hotkey", "Briefing agents")
 
 $removed = @()
 $notFound = @()

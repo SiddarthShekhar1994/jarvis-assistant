@@ -30,6 +30,7 @@ import argparse
 import ctypes
 import dataclasses
 import getpass
+import json
 import logging
 import platform
 import os
@@ -67,6 +68,9 @@ TALK_ACTIVATION = {**OPEN_ACTIVATION, "talk": True}
 LAUNCH_OPEN = "open"
 LAUNCH_READ = "read"
 LAUNCH_SCHEDULED = "scheduled"
+LAUNCH_STANDING = "standing"
+# What --standing-show sends a running Jarvis instead of coming forward: a standing check has news.
+STANDING_ACTIVATION = {"cmd": "standing", "runs": []}
 _PAGE_ID_RE = re.compile(r"[0-9a-f]{32}")
 _PACKAGE_PARENT = Path(__file__).resolve().parent.parent
 
@@ -141,6 +145,14 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--followups-check", action="store_true",
                       help="the follow-ups of the productivity bundle: one real scan of your accounts' mail "
                            "headers (read only, the last 14 days, never the text); prints counts only")
+    mode.add_argument("--standing-run", action="store_true",
+                      help="standing agents and rules: one check of what is due, without a window ([standing] "
+                           "enabled; used by the Briefing agents task every 5 minutes)")
+    mode.add_argument("--standing-check", action="store_true",
+                      help="standing agents and rules: print what is set up and how the checks went (no Claude "
+                           "request, nothing read from Google)")
+    # Internal: who started a standing check (the task, or Jarvis while his window is open).
+    parser.add_argument("--origin", choices=("task", "app", "now"), default="task", help=argparse.SUPPRESS)
     parser.add_argument("--ask-dry-run", action="store_true",
                         help="with --ask-text: print the exact text Jarvis would send to Claude Code "
                              "(email text shown as counts) and stop; no Claude request")
@@ -154,6 +166,8 @@ def build_parser() -> argparse.ArgumentParser:
     view.add_argument("--now", action="store_true",
                       help="older name of --open, kept so existing shortcuts and hotkeys keep working; "
                            "it no longer starts reading (use --read)")
+    # Internal: a standing check found something that needs you while Jarvis was closed: open him without the focus.
+    view.add_argument("--standing-show", action="store_true", help=argparse.SUPPRESS)
     view.add_argument("--read", action="store_true",
                       help="open Jarvis and read the briefing aloud at once (what --now did before)")
     parser.add_argument("--from-file", metavar="PATH",
@@ -176,7 +190,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                            ("--ask-check", args.ask_check), ("--ask-text", args.ask_text is not None),
                            ("--plan-dry-run", args.plan_dry_run is not None),
                            ("--desktop-dry-run", args.desktop_dry_run is not None),
-                           ("--followups-check", args.followups_check)):
+                           ("--followups-check", args.followups_check),
+                           ("--standing-run", args.standing_run), ("--standing-check", args.standing_check)):
             if used:
                 parser.error(f"{view} cannot be combined with {flag}")
         if args.read and args.ask:
@@ -192,17 +207,20 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _view_flag(args: argparse.Namespace) -> str:
     """"--open", "--now" or "--read" when one was given, else ""."""
-    for flag in ("open", "now", "read"):
+    for flag in ("open", "now", "read", "standing_show"):
         if getattr(args, flag, False):
-            return f"--{flag}"
+            return f"--{flag.replace('_', '-')}"
     return ""
 
 
 def launch_kind(args: argparse.Namespace) -> str:
-    """How this launch asks for Jarvis: --read READ; --open, --now, --ask or --hud OPEN; --run (or a due
-    --catch-up, which sets run) SCHEDULED; nothing OPEN."""
+    """How this launch asks for Jarvis: --read READ; --open, --now, --ask or --hud OPEN; --standing-show STANDING
+    (shown without the focus and told, as a scheduled briefing arrives); --run (or a due --catch-up, which sets run)
+    SCHEDULED; nothing OPEN."""
     if getattr(args, "read", False):
         return LAUNCH_READ
+    if getattr(args, "standing_show", False):
+        return LAUNCH_STANDING
     if (getattr(args, "open", False) or getattr(args, "now", False) or getattr(args, "ask", False)
             or getattr(args, "hud", False)):
         return LAUNCH_OPEN
@@ -215,7 +233,7 @@ def _run(args: argparse.Namespace) -> int:
     from .config import load_config, setup_logging
 
     # The hotkey agent runs all day: it must not hold the log open (rotation).
-    log_file = setup_logging(debug=args.debug, keep_open=not args.hotkey_agent)
+    log_file = setup_logging(debug=args.debug, keep_open=not (args.hotkey_agent or args.standing_run))
     logger.info("%s %s starting (Python %s on %s)", APP_NAME, __version__,
                 platform.python_version(), platform.platform())
     logger.info("Arguments: run=%s open=%s now=%s read=%s catch_up=%s hotkey_agent=%s ask=%s hud=%s slots=%s "
@@ -239,6 +257,8 @@ def _run(args: argparse.Namespace) -> int:
                     getattr(args, "plan_dry_run", None) is not None, bool(getattr(args, "followups_check", False)),
                     getattr(args, "desktop_dry_run", None) is not None)
         return commands.run(args, config, sys.stdout)
+    if args.standing_run or args.standing_check:
+        return _run_standing(config, check_only=bool(args.standing_check), origin=args.origin)
     slots = _resolve_slots(args.slots, config.schedule.slots)
     if args.hotkey_agent:
         return _run_hotkey_agent(config, slots)
@@ -390,9 +410,24 @@ def _forward_to_running(name: str, run: str | None, *, launch: str, ask: bool = 
     """Ask the running app to come forward with this launch's kind (activation.forward_to_running_instance
     builds the message: "open": true, "read": true, or a run alone for a scheduled launch; --ask adds "ask": true
     and --hud "desktop": true)."""
+    if launch == LAUNCH_STANDING:
+        return _tell_running_standing(name)
     from .activation import forward_to_running_instance
     extra = {**({"ask": True} if ask else {}), **({"desktop": True} if desktop else {})}
     return forward_to_running_instance(name, run, launch=launch, **extra)
+
+
+def _tell_running_standing(name: str) -> int:
+    """--standing-show while Jarvis is running already: the standing message (he reads the run files again and tells
+    the owner), never a launch that brings him forward."""
+    from .activation import try_send
+    from PySide6.QtCore import QCoreApplication
+
+    app = QCoreApplication.instance() or QCoreApplication([sys.argv[0] if sys.argv else APP_NAME])
+    sent = try_send(name, (json.dumps(STANDING_ACTIVATION) + "\n").encode("utf-8"))
+    logger.info("Standing: Jarvis is running; %s", "told it" if sent else "it did not answer")
+    del app
+    return 0 if sent else 1
 
 
 # --------------------------------------------------------------------------
@@ -471,6 +506,41 @@ def _windowless_python() -> str:
         if candidate.is_file():
             return str(candidate)
     return sys.executable
+
+
+# --------------------------------------------------------------------------
+# Standing agents and rules
+# --------------------------------------------------------------------------
+
+def _run_standing(config: Any, *, check_only: bool, origin: str) -> int:
+    """``--standing-run``: one check without a window (no Qt, no app lock, its own mutex); ``--standing-check``:
+    print the status. Refused while the tests run (the test guard): a real check reads Google and runs Claude Code."""
+    from .standing import runner
+    from .standing.lock import RunnerLock
+
+    if check_only:
+        for line in runner.describe(config):
+            print(line)
+        return 0
+    from .desktop.backend import real_backend_blocked
+
+    if real_backend_blocked():
+        logger.info("Standing: no real check while the tests run")
+        return 0
+    if not getattr(getattr(config, "standing", None), "enabled", False):
+        logger.info("Standing: [standing] is off; nothing to check")
+        return 0
+    lock = RunnerLock()
+    if not lock.acquire():
+        logger.info("Standing: another check is running; this one ends")
+        return 0
+    try:
+        if lock.abandoned:
+            logger.info("Standing: the last check ended without letting go of its lock; carrying on")
+        runner.run_check(config, runner.real_deps(config, _instance_name()), origin=origin)
+    finally:
+        lock.release()
+    return 0
 
 
 # --------------------------------------------------------------------------
@@ -585,6 +655,18 @@ def _build_client(args: argparse.Namespace, config: Any) -> tuple[Any, Any, str 
     return NotionClient("", session=session, notion_version=config.notion_version), config, None
 
 
+def _prepare_board() -> None:
+    """The board's own address scheme (jarvis-board:), which the web engine must know before the QApplication exists: on
+    every start, whatever the settings, since the board may be needed at any time. Never stops the app (without it the
+    board says it can't start)."""
+    try:
+        from .board.scheme import register_scheme
+
+        register_scheme()
+    except Exception as exc:  # noqa: BLE001 - Jarvis works without it
+        logger.info("Board: the scheme was not set up (%s)", type(exc).__name__)
+
+
 def _prepare_agent_window(config: Any) -> None:
     """While tasks are on: Jarvis's address scheme for a task's files, which the web engine must know before the
     QApplication exists. Off: nothing of it is imported. Never stops the app."""
@@ -610,8 +692,10 @@ def _run_app(args: argparse.Namespace, config: Any, name: str, run: str | None,
     from .snapshot_engine import prepare_application
 
     _set_app_user_model_id()
-    # Qt's attributes for the page snapshots' web engine: only before the QApplication exists.
+    # Qt's attributes for the page snapshots' web engine, and the web engine's custom schemes: only before the
+    # QApplication exists.
     prepare_application()
+    _prepare_board()
     _prepare_agent_window(config)
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName(APP_NAME)

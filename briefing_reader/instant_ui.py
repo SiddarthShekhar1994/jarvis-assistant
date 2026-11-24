@@ -75,8 +75,8 @@ SETTINGS_TITLE = "Instant answers"
 SETTINGS_NOTE = ("Everyday questions Jarvis answers himself, typed or spoken, in well under a second and without your "
                  "Claude plan. Anything he can't answer for sure goes to Claude as before.")
 SETTINGS_HOW = ("Set the weather's town by saying or typing \"my town is\" and its name; \"forget my town\" clears it. "
-                "The rest is [instant] in config.toml (JARVIS_INSTANT_ENABLED in .env turns them all on or off), then "
-                "restart Jarvis.")
+                "Change sets the temperature on this PC (used after a restart). The rest is [instant] in config.toml "
+                "(JARVIS_INSTANT_ENABLED in .env turns them all on or off), then restart Jarvis.")
 _TOWN_FIELDS = ("name", "region", "country", "shown", "full", "query")
 
 

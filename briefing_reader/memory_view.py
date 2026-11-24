@@ -71,8 +71,9 @@ _LOWER_FIRST = frozenset({"a", "an", "the", "my", "our", "his", "her", "their", 
 
 def body_label(text: str, role: str, color: str | QColor, *, wrap: bool = True, selectable: bool = False,
                name: str = "") -> QLabel:
-    """A plain-text label in the type role ``role`` (never read as HTML)."""
+    """A plain-text label in the type role ``role`` (never read as HTML; tagged with it: holo.tag_role)."""
     label = hud.make_label(text, holo.font(role), color, wrap=wrap, name=name)
+    holo.tag_role(label, role)
     if selectable:
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
     return label
@@ -89,11 +90,15 @@ def question_text(note: str) -> str:
 
 
 class PanelFrame(QWidget):
-    """The quiet panel (spec 5, information look): ``tile`` fill, a 1 px ``line-faint`` border, radius 10."""
+    """The quiet panel (spec 5, information look): ``tile`` fill, a 1 px ``line-faint`` border, radius 10. The canvas
+    look: a canvas frame (square, the bright edge and its inner glow, corner ticks)."""
 
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
         try:
+            if holo.canvas_look():
+                holo.paint_canvas_frame(painter, QRectF(self.rect()), holo.CANVAS_PANEL)
+                return
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
             painter.setPen(QPen(holo.LINE_FAINT, 1.0))
@@ -113,7 +118,7 @@ class Rule(QWidget):
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
         try:
-            painter.fillRect(self.rect(), holo.LINE_FAINT)
+            painter.fillRect(self.rect(), holo.CANVAS_LINE if holo.canvas_look() else holo.LINE_FAINT)
         finally:
             painter.end()
 
@@ -165,9 +170,14 @@ def _style_line_edit(edit: QLineEdit, role: str) -> None:
     edit.setPalette(palette)
 
 
+CANVAS_FIELD = "#03090C"                         # the canvas look's input ground (board.css --tile, opaque)
+CANVAS_FIELD_EDGE = QColor(143, 235, 255, 153)    # ... and its edge (the mock's input line, .6)
+
+
 class AddField(QWidget):
     """The "Add a note..." pill (``field`` fill, a ``line-input`` border, ``holo`` while the keyboard is in it)
-    with the input and the round add button inside."""
+    with the input and the round add button inside. The canvas look: the mock's input line - square, its cyan edge
+    (white with the keyboard in it) and a soft glow inside."""
 
     def __init__(self, placeholder: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -200,6 +210,14 @@ class AddField(QWidget):
             if not self.input.isEnabled():
                 painter.setOpacity(0.45)
             rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+            if holo.canvas_look():                   # the mock's input line: square, its cyan edge, a soft glow inside
+                painter.fillRect(rect, QColor(CANVAS_FIELD))
+                holo.paint_canvas_glow(painter, rect.adjusted(0.5, 0.5, -0.5, -0.5), holo.CANVAS_GLOW,
+                                       0.9 if self.input.hasFocus() else 0.5, depth=10.0)
+                painter.setPen(QPen(holo.CANVAS_EDGE_HI if self.input.hasFocus() else CANVAS_FIELD_EDGE, 1.0))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRect(rect)
+                return
             border = QColor(holo.HOLO) if self.input.hasFocus() else holo.LINE_INPUT
             painter.setPen(QPen(border, 1.0))
             painter.setBrush(QColor(holo.FIELD))
@@ -219,9 +237,14 @@ class NoteEdit(QLineEdit):
         super().__init__(parent)
         self.setMaxLength(400)
         self.setMinimumHeight(38)
-        self.setStyleSheet(f"QLineEdit {{ background: {holo.FIELD}; border: 1px solid rgba(60, 211, 238, 128);"
-                           f" border-radius: {holo.RADIUS_BUTTON}px; padding: 0 12px; }}"
-                           f" QLineEdit:focus {{ border: 1px solid {holo.HOLO}; }}")
+        if holo.canvas_look():                       # (made while it is on: a note is edited on the canvas's Memory)
+            self.setStyleSheet(f"QLineEdit {{ background: {CANVAS_FIELD}; border: 1px solid rgba(143, 235, 255, 153);"
+                               f" border-radius: {holo.CANVAS_RADIUS:g}px; padding: 0 12px; }}"
+                               " QLineEdit:focus { border: 1px solid #FFFFFF; }")
+        else:
+            self.setStyleSheet(f"QLineEdit {{ background: {holo.FIELD}; border: 1px solid rgba(60, 211, 238, 128);"
+                               f" border-radius: {holo.RADIUS_BUTTON}px; padding: 0 12px; }}"
+                               f" QLineEdit:focus {{ border: 1px solid {holo.HOLO}; }}")
         _style_line_edit(self, "body")
 
     def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override

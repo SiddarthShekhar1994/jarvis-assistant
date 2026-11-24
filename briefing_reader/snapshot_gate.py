@@ -1,7 +1,8 @@
 """Page pictures' network gate (Qt-free): the one way the hidden private window reaches the network.
 
     ConnectGate(resolve=, connect=)   start() -> the port on 127.0.0.1 (0: it could not start);
-                                      port(); counts() (tunnels / refused / failed); seal(bool); close()
+                                      port(); counts() (tunnels / refused / failed); seal(bool); cut() (every
+                                      open connection ended, still listening); close()
 
 snapshot_engine starts Chromium with --proxy-server=127.0.0.1:<port> and --proxy-bypass-list=<-loopback>
 (snapshots.GATE_FLAGS), so every connection of a pictured page comes here first: its own requests,
@@ -107,6 +108,7 @@ class ConnectGate:
         self._port = 0
         self._stopped = threading.Event()
         self._sealed = threading.Event()
+        self._allowed: frozenset[str] = frozenset()   # while sealed, the only hosts a CONNECT may still reach
         self._open: set[socket.socket] = set()
         self._counts = {"tunnels": 0, "refused": 0, "failed": 0}
 
@@ -150,14 +152,45 @@ class ConnectGate:
             return dict(self._counts)
 
     def seal(self, sealed: bool) -> None:
-        """While sealed every new CONNECT is refused before its name is looked up (a tunnel already open goes on):
-        nothing a page does can reach a resolver or a server, not even what the request interceptor never sees (a
-        pre-connection, WebRTC's TURN over TCP). The agent's window seals it while a page the agent wrote is open
-        (agent.browser): such a page may hold private data and may load nothing from the network. Never raises."""
+        """While sealed every new CONNECT is refused before its name is looked up (a tunnel already open goes on, unless
+        cut() ends it): nothing a page does can reach a resolver or a server, not even what the request interceptor
+        never sees (a pre-connection, WebRTC's TURN over TCP). The agent's window seals it while a page the agent wrote
+        is open, and while a page holds what Jarvis typed into it (agent.browser): such a page may hold private data and
+        may load nothing from the network. A tunnel still being made when the seal comes is refused before its first
+        byte. Never raises."""
         if sealed:
             self._sealed.set()
         else:
             self._sealed.clear()
+
+    def allow(self, hosts: Any) -> None:
+        """While sealed, a CONNECT to one of ``hosts`` (names as a CONNECT gives them, lower case) still goes through
+        and every other is refused before its name is looked up; empty: none goes through (the owner's Send on a page
+        Jarvis filled in lifts the seal for the card's hosts alone: agent.browser). Never raises."""
+        try:
+            self._allowed = frozenset(str(host).casefold().rstrip(".") for host in hosts or () if host)
+        except Exception:  # noqa: BLE001 - unsure: none
+            self._allowed = frozenset()
+
+    def _refused_now(self, host: str) -> bool:
+        return self._sealed.is_set() and not (host and host in self._allowed)
+
+    def cut(self) -> int:
+        """End every connection open now (tunnels and heads still being read), and keep listening: with seal(True)
+        first, nothing a page holds can go out on a connection it opened earlier (a keep-alive or HTTP/2 one). How many
+        connections were ended (a count only). Never raises."""
+        with self._lock:
+            open_now = list(self._open)
+            self._open.clear()
+        for sock in open_now:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            _close(sock)
+        if open_now:
+            logger.debug("Page pictures' gate: %d connection(s) cut", len(open_now))
+        return len(open_now)
 
     def close(self) -> None:
         """Stop accepting and end every open tunnel. Never raises."""
@@ -259,11 +292,15 @@ class ConnectGate:
                 self._add("refused")
                 client.sendall(_REPLIES[405])
                 return
-            if self._sealed.is_set():
+            if self._sealed.is_set() and not self._allowed:   # sealed: not even the target is read
                 self._add("refused")
                 client.sendall(_REPLIES[403])
                 return
             host, problem = snapshots.tunnel_target(parts[1])
+            if self._refused_now("" if problem else host):
+                self._add("refused")
+                client.sendall(_REPLIES[403])
+                return
             addresses: list[str] = []
             if not problem:
                 if _is_address(host):
@@ -287,6 +324,12 @@ class ConnectGate:
             if upstream is None or not self._track(upstream):
                 self._add("failed")
                 client.sendall(_REPLIES[502])
+                return
+            if self._refused_now(host):
+                # Sealed while this one was being made: refused before a byte goes through. (A seal from here on is
+                # followed by cut(), which ends both sockets: they are tracked already.)
+                self._add("refused")
+                client.sendall(_REPLIES[403])
                 return
             self._add("tunnels")
             for sock in (client, upstream):

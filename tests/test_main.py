@@ -699,6 +699,7 @@ class RunAppTests(unittest.TestCase):
         import PySide6.QtWidgets as qt_widgets
 
         from briefing_reader import hud, snapshot_engine, ui
+        from briefing_reader.board import scheme
 
         order: list[str] = []
         app = mock.MagicMock(name="app")
@@ -706,6 +707,7 @@ class RunAppTests(unittest.TestCase):
         app_class.instance.side_effect = lambda: order.append("instance")
         app_class.side_effect = lambda argv: order.append("QApplication") or app
         with mock.patch.object(snapshot_engine, "prepare_application", side_effect=lambda: order.append("prepare")), \
+                mock.patch.object(scheme, "register_scheme", side_effect=lambda: order.append("board")), \
                 mock.patch.object(qt_widgets, "QApplication", app_class), \
                 mock.patch.object(qt_core, "qInstallMessageHandler"), \
                 mock.patch.object(entry, "_set_app_user_model_id"), \
@@ -715,7 +717,8 @@ class RunAppTests(unittest.TestCase):
                 mock.patch.object(ui, "app_icon", return_value=None):
             rc = entry._run_app(argparse.Namespace(), SimpleNamespace(project_root=PROJECT_ROOT), "test", None)
         self.assertEqual(rc, 0)
-        self.assertEqual(order, ["prepare", "instance", "QApplication"])
+        # The board's scheme (jarvis-board:) on every start, before the QApplication, like the engine's attributes.
+        self.assertEqual(order, ["prepare", "board", "instance", "QApplication"])
         controller.assert_called_once()
         self.assertIs(controller.call_args.args[4], app)
 
@@ -725,6 +728,7 @@ class RunAppTests(unittest.TestCase):
 
         from briefing_reader import hud, snapshot_engine, ui
         from briefing_reader.agent import browser
+        from briefing_reader.board import scheme
         from briefing_reader.config import AgentConfig
 
         order: list[str] = []
@@ -734,10 +738,11 @@ class RunAppTests(unittest.TestCase):
         on = SimpleNamespace(project_root=PROJECT_ROOT, agent=AgentConfig(enabled=True),
                              desktop=SimpleNamespace(enabled=True), ask=SimpleNamespace(enabled=True))
         off = SimpleNamespace(project_root=PROJECT_ROOT, agent=AgentConfig(enabled=False))
-        for config, expected in ((on, ["prepare", "scheme", "instance", "QApplication"]),
-                                 (off, ["prepare", "instance", "QApplication"])):
+        for config, expected in ((on, ["prepare", "board", "scheme", "instance", "QApplication"]),
+                                 (off, ["prepare", "board", "instance", "QApplication"])):
             order.clear()
             with mock.patch.object(snapshot_engine, "prepare_application", side_effect=lambda: order.append("prepare")), \
+                    mock.patch.object(scheme, "register_scheme", side_effect=lambda: order.append("board")), \
                     mock.patch.object(browser, "register_scheme", side_effect=lambda: order.append("scheme")), \
                     mock.patch.object(qt_widgets, "QApplication", app_class), \
                     mock.patch.object(qt_core, "qInstallMessageHandler"), \
@@ -757,6 +762,13 @@ class RunAppTests(unittest.TestCase):
                              ask=SimpleNamespace(enabled=True))
         with mock.patch.object(browser, "register_scheme", side_effect=RuntimeError("no")):
             entry._prepare_agent_window(on)
+
+    def test_a_board_scheme_that_can_t_be_set_up_never_stops_the_app(self) -> None:
+        from briefing_reader.board import scheme
+
+        with mock.patch.object(scheme, "register_scheme", side_effect=RuntimeError("no")) as register:
+            entry._prepare_board()
+        register.assert_called_once_with()
 
     def test_prepare_application_never_raises_and_waits_for_no_app(self) -> None:
         from briefing_reader import snapshot_engine

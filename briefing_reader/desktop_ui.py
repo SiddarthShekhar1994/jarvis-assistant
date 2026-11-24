@@ -221,6 +221,10 @@ CONSENT_VERSION = 2
 # The agent's card (part A3): tasks need version 3, which adds their row. It is what Turn on stores while [agent] is on;
 # anything allowed on 1 or 2 stays allowed, and with [agent] off nothing of this shows and 2 is stored as before.
 AGENT_CONSENT_VERSION = 3
+# Filling in pages (build plan item 7, decision 14): version 4 adds the row that a task may type into public pages in
+# its own window, nothing typed leaving before the owner's click on its Send card. It is what Turn on stores while tasks
+# and [agent] drive are on. A task works on 3 as before; only the drive tools wait for 4 (agent.policy.offered).
+DRIVE_CONSENT_VERSION = 4
 TASK_UPDATE_TEXT = "Tasks need your OK on the updated card first, {sir} - nothing was started."
 TASK_UPDATE_HUD_TEXT = "Tasks need your OK on the updated card first, {sir} - Bring Jarvis back to read it."
 REVEAL_FAILED_TEXT = "Windows couldn't show that file in its folder, {sir}."
@@ -684,6 +688,7 @@ class DesktopController(QObject):
         # controller's own book, as before.
         self._shared_timers = timers is not None
         self.shared_timers_changed: Callable[[], Any] | None = None   # the app's TimerController.poke (shared book)
+        self.chime_quiet: Callable[[], bool] = lambda: False           # the app's _call_quiet (quiet during calls)
         self.timers = timers if timers is not None else pcctl.TimerBook(self._timers_folder(), now=self._timer_now)
         self._timer_check = QTimer(self)
         self._timer_check.setSingleShot(True)
@@ -854,6 +859,14 @@ class DesktopController(QObject):
         """The owner's OK covers a task (version 3; fail-closed)."""
         return self.consent_version() >= AGENT_CONSENT_VERSION
 
+    def drive_on(self) -> bool:
+        """Tasks are on and [agent] drive is True: the card has the filling-in row (fail-closed)."""
+        return self.tasks_on() and getattr(getattr(self.config, "agent", None), "drive", False) is True
+
+    def consent_for_drive(self) -> bool:
+        """The owner's OK covers filling in pages (version 4; fail-closed). Before it no drive tool is offered."""
+        return self.consent_version() >= DRIVE_CONSENT_VERSION
+
     def needs_task_update(self) -> bool:
         """Turned on, on a card that did not list tasks, while tasks are on: the updated card is offered at the first
         task request."""
@@ -921,7 +934,8 @@ class DesktopController(QObject):
         store = None
         try:
             store = self._consent_store() if self._consent_store is not None else None
-            version = (AGENT_CONSENT_VERSION if self.tasks_on() else CONSENT_VERSION) if on else 0
+            version = ((DRIVE_CONSENT_VERSION if self.drive_on() else AGENT_CONSENT_VERSION) if self.tasks_on()
+                       else CONSENT_VERSION) if on else 0
             saved = bool(store.set_desktop_turned_on(bool(on), version=version)) if store is not None else False
         except Exception as exc:  # noqa: BLE001 - not saved: fail-closed
             logger.warning("Desktop: the owner's OK could not be saved (%s)", type(exc).__name__)
@@ -1042,9 +1056,13 @@ class DesktopController(QObject):
 
     def _on_chip(self, key: str) -> None:
         """A chip's click: the window back on its screen ("Briefing ready" Briefing, "N need your OK" Approvals,
-        REC Meetings)."""
+        REC Meetings; the new look's "9 on the board" Home with the board showing)."""
         screen = self._chip_screens.get(key)
         if screen is not None:
+            if key == hud_overlay.CHIP_BOARD:
+                show_board = getattr(self.reading, "show_board", None)
+                if callable(show_board):
+                    show_board(False)        # unfolded: Home comes back as the desk (the switch shows it)
             self.leave_hud(screen)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
@@ -2229,7 +2247,14 @@ class DesktopController(QObject):
         self._arm_timers()
 
     def _chime(self) -> None:
-        """A timer's end sound, played on the desktop thread (its seam is there)."""
+        """A timer's end sound, played on the desktop thread (its seam is there); kept quiet on a call (the toast
+        still says it)."""
+        try:
+            if self.chime_quiet():
+                logger.info("Desktop: the timer sound kept quiet (call)")
+                return
+        except Exception:  # noqa: BLE001 - unknown: played
+            pass
         try:
             worker, service = self._ensure_worker()
             worker.submit(service.chime)
@@ -2486,6 +2511,8 @@ class DesktopController(QObject):
             return
         win.set_briefing_ready(reading.is_new_briefing())
         win.set_pending(reading.pending_count() + self.waiting_count())    # a NEEDS YOUR OK card counts (P2.3)
+        board_count = getattr(reading, "board_count", None)
+        win.set_board(board_count() if callable(board_count) else 0)       # the new look: "9 on the board"
         elapsed, warning = reading.recording_state()
         win.set_recording(elapsed, warning)
         win.set_timer(pcctl.chip_text(self.timers.running(), self._hour24))     # P2.4: while a timer runs
@@ -2494,6 +2521,11 @@ class DesktopController(QObject):
             win.set_wake(*wake_state())                      # "Hey Jarvis" while it is on (wake_ui)
         self._sync_instant()                                 # P2.5: the instant row as it is now
         win.orb.set_recording(bool(elapsed))
+        voice = getattr(reading, "voice_listening", None)
+        win.orb.set_voice_listening(bool(voice()) if callable(voice) else False)   # the voice locks it; typing leans
+        share = getattr(reading, "glow_share", None)
+        if callable(share):
+            win.orb.set_glow_share(share())                  # the new look: a lit frame halves the core glow
         base, muted, offline = reading.look()
         win.set_look(base, muted=muted, offline=offline, word=reading.task_word(base, muted))
         self._refresh_flight()                               # the chips arrive with the counts as they are now

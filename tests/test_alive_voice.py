@@ -161,7 +161,7 @@ class VoiceTimelineTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
-# The orb's voice spikes and boost
+# The ring's voice reach (the band's segments, today's spikes)
 # --------------------------------------------------------------------------
 
 
@@ -184,26 +184,28 @@ class OrbVoiceTests(unittest.TestCase):
         return frame
 
     def test_the_spikes_follow_the_voice_and_stop_when_it_ends(self) -> None:
+        # The ring (DESIGN-SPEC 4.2): today's 64 spikes are the band's 64 segments reaching out with the voice.
         motion(self)
         widget, clock, level = self.make()
         widget.set_look(orb.SPEAKING)
         frame = self.run_for(widget, clock, 1.0)
         self.assertAlmostEqual(frame.spikes, 1.0, places=3)
         self.assertEqual(len(frame.spike_lens), orb.SPIKES)
-        self.assertLess(max(frame.spike_lens), orb.SPIKE_MIN + 0.5)    # silent: the bars rest
+        self.assertEqual(frame.segments, orb.SPIKES)                   # one reach per segment
+        self.assertLess(max(frame.spike_lens), orb.SPIKE_MIN + 0.5)    # silent: the segments rest
         level[0] = 1.0
         loud = self.run_for(widget, clock, 0.4)
-        self.assertGreater(max(loud.spike_lens), 20.0)                 # the voice lengthens them
+        self.assertGreater(max(loud.spike_lens), 20.0)                 # the voice reaches them out
         self.assertLessEqual(max(loud.spike_lens), orb.SPIKE_MAX + 1e-6)
-        self.assertAlmostEqual(widget._tw["boost"].value(clock[0]), orb.SPEAK_BOOST)   # the rings boost
+        self.assertIn(orb.C_HI, loud.colors)                           # the loudest light up
         self.assertFalse(widget.grab().isNull())
         widget.set_look(orb.IDLE)                                      # the speech ended
         clock[0] += 0.1
-        easing = widget._tw["boost"].value(clock[0])
-        self.assertTrue(0.0 < easing < orb.SPEAK_BOOST)                # settles back, never a jump
+        easing = widget._tw["spikes"].value(clock[0])
+        self.assertTrue(0.0 < easing < 1.0)                            # draws back in, never a jump
         ended = self.run_for(widget, clock, 1.0)
         self.assertEqual((ended.spikes, ended.spike_lens), (0.0, ()))
-        self.assertEqual(widget._tw["boost"].value(clock[0]), 0.0)
+        self.assertEqual(widget._tw["spikes"].value(clock[0]), 0.0)
 
     def test_calm_is_gentler_and_off_has_no_spikes(self) -> None:
         motion(self, holo.MOTION_CALM)
@@ -212,36 +214,38 @@ class OrbVoiceTests(unittest.TestCase):
         widget.set_look(orb.SPEAKING)
         frame = self.run_for(widget, clock, 1.0)
         self.assertLessEqual(max(frame.spike_lens), orb.SPIKE_CALM_MAX + 1e-6)
-        self.assertAlmostEqual(widget._tw["boost"].value(clock[0]), orb.SPEAK_BOOST_CALM)
+        self.assertAlmostEqual(frame.spikes, 1.0, places=3)
         holo.set_motion_level(holo.MOTION_OFF)
         still, clock2, level2 = self.make()
         level2[0] = 1.0
         still.set_look(orb.SPEAKING)
         frame = self.run_for(still, clock2, 1.0)
         self.assertEqual((frame.spikes, frame.spike_lens), (0.0, ()))
-        self.assertEqual(still._tw["boost"].value(clock2[0]), 0.0)     # the orb as it was
+        self.assertEqual(still._tw["spikes"].value(clock2[0]), 0.0)    # the still pose: nothing reaches out
 
-    def test_only_the_hero_and_only_with_room(self) -> None:
+    def test_every_ring_reaches_inside_its_sight_and_never_grows(self) -> None:
+        # The band reaches from r135 to at most r157, inside the sight (r156): no ring needs room beyond its box.
         motion(self)
         compact, clock, level = self.make(orb.COMPACT)
         level[0] = 1.0
         compact.set_look(orb.SPEAKING)
-        self.assertEqual(self.run_for(compact, clock, 1.0).spikes, 0.0)
+        frame = self.run_for(compact, clock, 1.0)
+        self.assertEqual((frame.spikes, len(frame.spike_lens)), (1.0, 48))   # the 120 px ring speaks too
+        self.assertEqual(orb.voice_side(orb.HERO), orb.widget_side(orb.HERO))
         hero, clock, _level = self.make()
         hero.set_voice_room(0)
-        self.assertEqual(hero.width(), orb.widget_side(orb.HERO))     # no room given: the old widget
-        self.assertLess(hero.spike_room(), orb.SPIKE_MAX)
-        hero.set_voice_room(orb.voice_side(orb.HERO))
-        self.assertEqual(hero.width(), orb.widget_side(orb.HERO))     # idle: the room is not taken
-        self.assertEqual((orb.voice_side(orb.HERO) - orb.widget_side(orb.HERO)) % 8, 0)
-        self.assertAlmostEqual(hero.spike_room(), orb.SPIKE_MAX)
+        self.assertEqual(hero.width(), orb.widget_side(orb.HERO))     # no room given: its widget
+        self.assertAlmostEqual(hero.spike_room(), orb.SPIKE_MAX)       # ... and the full reach
+        hero.set_voice_room(orb.widget_side(orb.HERO) + 64)
         hero.set_look(orb.SPEAKING)
-        self.assertEqual(hero.width(), orb.voice_side(orb.HERO))      # speaking: it grows for the spikes
+        self.assertEqual(hero.width(), orb.widget_side(orb.HERO))     # speaking: it never grows
+        self.run_for(hero, clock, 1.0)
+        self.assertLessEqual(orb.BAND_OUT + orb.SPIKE_MAX, orb.SIGHT_R + 1.0)
         hero.set_look(orb.IDLE)
         self.run_for(hero, clock, 1.0)
         hero.grab()
         settle()
-        self.assertEqual(hero.width(), orb.widget_side(orb.HERO))     # faded: back to the halo's room
+        self.assertEqual(hero.width(), orb.widget_side(orb.HERO))
 
     def test_without_voice_data_the_synthetic_curve_runs(self) -> None:
         motion(self)

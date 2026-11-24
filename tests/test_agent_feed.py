@@ -960,6 +960,84 @@ class BarTests(FeedApp):
         self.assertEqual(self.ended().summary, "The owner says: use the cheaper ones too")
         self.assertNotIn("Passing that on, sir.", self.said())         # shown, not said
 
+    def live_notes(self) -> list[str]:
+        return [note.text for step in self.agent_tasks()[-1].steps for note in step.notes]
+
+    def test_words_typed_while_a_step_runs_say_when_he_has_them_then_that_he_does(self) -> None:
+        stages = Stages()
+
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.call("update_plan", found="", steps=STEPS)
+            stages.reach(1)
+            engine.end_turn("Working.")
+            said = engine.wait_message()                              # delivered: its replay
+            stages.reach(2)
+            engine.call("finish", summary=said, outcome="done")
+            engine.end_turn()
+
+        self.start(script)
+        self.reached(stages, 1)
+        bar = self.c.ask.bar
+        with mock.patch.object(self.c.agent, "tools_running", return_value=True):   # a step of his runs now
+            self.type_it("use the cheaper ones too")
+        self.assertEqual(bar.status(), "Passing that on, sir: he'll have it when this step ends.")
+        self.assertNotIn(agent_ui.DELIVERED_NOTE, self.live_notes())
+        stages.go(1)
+        self.reached(stages, 2)
+        self.assertTrue(wait_for(lambda: bar.status() == "He has your message, sir.", timeout=5), bar.status())
+        self.assertEqual(bar.tone(), hud.TONE_DONE)
+        self.assertIn(agent_ui.DELIVERED_NOTE, self.live_notes())
+        stages.go(2)
+        self.assertEqual(self.ended().summary, "The owner says: use the cheaper ones too")
+        self.assertFalse([text for text in self.said() if "message" in text or "Passing" in text])   # shown, not said
+
+    def test_words_queued_for_the_next_result_never_promise_the_step_s_end(self) -> None:
+        stages = Stages()
+
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.call("update_plan", found="", steps=STEPS)
+            stages.reach(1)
+            engine.call("finish", summary="Done.", outcome="done")
+            engine.end_turn()
+
+        self.start(script)
+        self.reached(stages, 1)
+        run = self.c.agent._run
+        with mock.patch.object(self.c.agent, "tools_running", return_value=True), \
+                mock.patch.object(run, "owner_says", return_value="queued"):   # behind a message of Jarvis's
+            self.type_it("and the cheaper ones")
+        self.assertEqual(self.c.ask.bar.status(), "Passing that on, sir.")
+        self.assertIn("Your message goes in next", self.live_notes())
+        stages.go(1)
+        self.ended()
+
+    def test_delivered_while_a_click_only_card_waits_keeps_the_bar_s_words(self) -> None:
+        stages = Stages()
+
+        def script(engine: FakeEngine) -> None:
+            engine.wait_message()
+            engine.call("update_plan", found="", steps=STEPS)
+            stages.reach(1)
+            engine.call("finish", summary="Done.", outcome="done")
+            engine.end_turn()
+
+        self.start(script)
+        self.reached(stages, 1)
+        acknowledged: list[str] = []
+        self.c.agent.acknowledged.connect(acknowledged.append)
+        agent, run = self.c.agent, self.c.agent._run
+        delivered = ar.AgentEvent(ar.E_NOTICE, code=ar.C_DELIVERED)
+        with mock.patch.object(run, "click_awaited", return_value=object()):
+            agent._on_event(agent._seq, delivered)
+        self.assertEqual(acknowledged, [])                             # the card still needs its click
+        self.assertIn(agent_ui.DELIVERED_NOTE, self.live_notes())      # LIVE says it reached him
+        agent._on_event(agent._seq, delivered)
+        self.assertEqual(acknowledged, ["He has your message, sir."])
+        stages.go(1)
+        self.ended()
+
     def test_a_plain_ask_s_bar_stays_read_only_while_it_runs(self) -> None:
         self.make_agent(plan_stream({"say": "It's at two.", "question": "", "lines": []}))
         release = threading.Event()
@@ -999,6 +1077,7 @@ class ConsentTests(FeedApp):
     # The card's row as the default voice (made on this PC: [voice] engine = "local") shows it; ONLINE_ROW on Ryan's.
     ROW = desktop_view.consent_task_row("DuckDuckGo", "Bing and Google", local=True)
     ONLINE_ROW = desktop_view.CONSENT_TASK_ROW.format(engine="DuckDuckGo", others="Bing and Google")
+    DRIVE_ROW = desktop_view.CONSENT_DRIVE_ROW
 
     def test_every_line_of_the_row_shows_and_it_says_what_a_task_may_read(self) -> None:
         for words in ("calendar", "mail", "contacts", "notes", "allowed folders", "waits for your click"):
@@ -1036,7 +1115,7 @@ class ConsentTests(FeedApp):
         engine = self.asked_in_the_window(2)
         self.assertFalse(self.c.agent.running)
         self.assertTrue(self.card().is_open())
-        self.assertEqual(self.card().new_rows(), [self.ROW])          # only its row is new
+        self.assertEqual(self.card().new_rows(), [self.ROW, self.DRIVE_ROW])   # only its row (and filling in) is new
         self.assertIn(self.ROW, self.card().texts())
         self.assertEqual(self.c.ask.bar.text(), TYPED)                # the words wait for Enter
         self.assertEqual(self.c.ask.bar.status(), "Tasks need your OK on the updated card first, sir - nothing was started.")
@@ -1044,8 +1123,9 @@ class ConsentTests(FeedApp):
         self.assertTrue(self.desktop.consent_current())               # what v2 allowed stays allowed
         self.card()._on_turn_on()
         settle()
-        self.assertEqual(self.desktop.consent_version(), 3)
-        self.assertEqual(self.stored().desktop_consent_version, 3)
+        # Item 7: with [agent] drive on (the default) Turn on stores the card that lists filling in pages too.
+        self.assertEqual(self.desktop.consent_version(), desktop_ui.DRIVE_CONSENT_VERSION)
+        self.assertEqual(self.stored().desktop_consent_version, desktop_ui.DRIVE_CONSENT_VERSION)
         self.assertFalse(self.card().is_open())
         self.c.ask.bar.submit()                                       # Enter: the words that waited
         self.assertTrue(wait_for(lambda: self.c.agent.running or self.c.agent.last_end is not None, timeout=10))
@@ -1056,8 +1136,8 @@ class ConsentTests(FeedApp):
         self.asked_in_the_window(1)
         self.assertTrue(self.card().is_open())
         new = self.card().new_rows()
-        self.assertEqual(len(new), 3)
-        self.assertEqual(new[-1], self.ROW)
+        self.assertEqual(len(new), 4)
+        self.assertEqual(new[-2:], [self.ROW, self.DRIVE_ROW])
         self.assertTrue(self.desktop.consent_given())
         self.assertFalse(self.desktop.consent_current())
         self.assertFalse(self.desktop.consent_for_tasks())
@@ -1071,7 +1151,7 @@ class ConsentTests(FeedApp):
         self.assertEqual(self.card().new_rows(), [])
         self.card()._on_turn_on()
         settle()
-        self.assertEqual(self.stored().desktop_consent_version, 3)
+        self.assertEqual(self.stored().desktop_consent_version, desktop_ui.DRIVE_CONSENT_VERSION)
 
     def test_on_the_hud_it_waits_for_the_window(self) -> None:
         engine = FakeEngine(whole)
@@ -1086,7 +1166,7 @@ class ConsentTests(FeedApp):
         self.back()
         settle()
         self.assertTrue(self.card().is_open())
-        self.assertEqual(self.card().new_rows(), [self.ROW])
+        self.assertEqual(self.card().new_rows(), [self.ROW, self.DRIVE_ROW])
 
     def test_turn_off_clears_it(self) -> None:
         self.make_agent(desktop_consent=3)
@@ -1312,8 +1392,9 @@ class CopyTests(unittest.TestCase):
 
         from briefing_reader.ask import cli
 
-        prompt = cli.AGENT_PROMPT_FILE.read_text(encoding="utf-8")
-        self.assertIsNone(re.search(r"\b(?:he|him|his|himself)\b", prompt, re.IGNORECASE))
+        for path in (cli.AGENT_PROMPT_FILE, cli.AGENT_DRIVE_PROMPT_FILE):
+            prompt = path.read_text(encoding="utf-8")
+            self.assertIsNone(re.search(r"\b(?:he|him|his|himself)\b", prompt, re.IGNORECASE), path.name)
         shown = [desktop_view.CONSENT_TASK_ROW, agent_feed.QUESTION_NOTE, agent_feed.CLICK_ONLY_NOTE, agent_feed.NOT_SHOWN_TEXT,
                  *agent_feed.EXPIRED_WORDS.values(), desktop_ui.TASK_UPDATE_TEXT, desktop_ui.TASK_UPDATE_HUD_TEXT,
                  settings_view.TURNED_ON_NO_TASKS]

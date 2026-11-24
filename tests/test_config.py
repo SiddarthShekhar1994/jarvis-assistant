@@ -303,6 +303,9 @@ clock = "24h"
 """
 
 
+AGENT_DRIVE_KEYS = ("drive", "max_pages", "max_actions", "max_sends")
+
+
 class ConfigFileTests(ProjectTestCase):
     def test_values_read_from_file(self) -> None:
         self.write_config(FULL_CONFIG)
@@ -355,7 +358,8 @@ class ConfigFileTests(ProjectTestCase):
         raw.decode("ascii")  # must be plain ASCII
         doc = tomllib.loads(raw.decode("utf-8"))
         expected_keys = {
-            "voice": {f.name for f in dataclasses.fields(VoiceConfig)},
+            # Smaller items part 7: [voice] quiet_in_calls holds its config.py default (on); config.toml is not changed.
+            "voice": {f.name for f in dataclasses.fields(VoiceConfig)} - {"quiet_in_calls"},
             "prompt": {f.name for f in dataclasses.fields(PromptConfig)},
             "polling": {f.name for f in dataclasses.fields(PollingConfig)},
             "sections": {f.name for f in dataclasses.fields(SectionsConfig)},
@@ -375,9 +379,14 @@ class ConfigFileTests(ProjectTestCase):
             "ui": {f.name for f in dataclasses.fields(config.UiConfig)},
             "meetings": {f.name for f in dataclasses.fields(config.MeetingsConfig)},
             "desktop": {f.name for f in dataclasses.fields(config.DesktopConfig)},
-            "agent": {f.name for f in dataclasses.fields(config.AgentConfig)},
-            "talk": {f.name for f in dataclasses.fields(config.TalkConfig)},
+            # Build plan item 7: [agent] drive, max_pages, max_actions and max_sends hold their config.py defaults
+            # until the shipped config.toml lists them (it is not changed by that build).
+            "agent": {f.name for f in dataclasses.fields(config.AgentConfig)} - set(AGENT_DRIVE_KEYS),
+            # Smaller items part 8: [talk] live_captions holds its config.py default ("auto") the same way.
+            "talk": {f.name for f in dataclasses.fields(config.TalkConfig)} - {"live_captions"},
             "instant": {f.name for f in dataclasses.fields(config.InstantConfig)},
+            "standing": {f.name for f in dataclasses.fields(config.StandingConfig)},
+            "look": {f.name for f in dataclasses.fields(config.LookConfig)},
         }
         self.assertEqual(set(doc), set(expected_keys))
         for table, keys in expected_keys.items():
@@ -747,7 +756,7 @@ class AccountsConfigTests(ProjectTestCase):
     def test_gmail_send_alone(self) -> None:
         self.write_config('[accounts.work]\nfeatures = ["gmail_send"]\n')
         self.assertEqual(self.load_quietly().accounts["work"].features, ("gmail_send",))
-        self.assertEqual(config.ACCOUNT_FEATURES, ("calendar", "gmail_send", "gmail_read"))
+        self.assertEqual(config.ACCOUNT_FEATURES, ("calendar", "gmail_send", "gmail_read", "gmail_tidy"))
 
     def test_no_features(self) -> None:
         self.write_config("[accounts.work]\nfeatures = []\n")

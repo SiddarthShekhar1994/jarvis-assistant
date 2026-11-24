@@ -2,10 +2,14 @@
 
     agent_on(config)            [agent] enabled, with [desktop] and [ask] on: anything less is "off" - no endpoint,
                                 nothing started, no new word in any prompt or schema
-    offered(config, tools, connected)   the tools this version offers a run: every entry of tools.TOOLS whose tier is on
-                                OFFERED_TIERS and, for one that needs something (Tool.needs), only when that is
-                                connected and, for the owner's things, allowed by [agent] private. Fail-closed: anything
-                                unknown offers nothing
+    offered(config, tools, connected, drive_consent=)   the tools this version offers a run: every entry of tools.TOOLS
+                                whose tier is on OFFERED_TIERS and, for one that needs something (Tool.needs), only when
+                                that is connected and, for the owner's things, allowed by [agent] private. Fail-closed:
+                                anything unknown offers nothing. The drive tools (tools.DRIVE_TOOLS, and open_page with
+                                its tab and line) only with ``drive_consent`` (the owner's Turn on at consent version 4:
+                                desktop_ui, part 3) and [agent] drive (drive_on)
+    drive_on(config), drive_caps(config)   [agent] drive as it stands (True only when it is True), and a task's caps
+                                ([agent] max_pages, max_actions, max_sends: agent.drive.DriveCaps)
     Budget(max_turns, max_minutes, clock)   one task's turns and minutes of work: its clock rests while the owner is
                                 being waited for; reached() says which ran out; extend() is the owner's yes to "Keep
                                 going?"
@@ -34,6 +38,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from ..config import AGENT_PRIVATE
+from . import drive as agent_drive
 from . import tools as agent_tools
 
 logger = logging.getLogger(__name__)
@@ -43,10 +48,10 @@ DAY = timedelta(days=1)
 # What this version offers. A later part adds its tier here when it adds its tools and its firewall.
 OFFERED_TIERS = frozenset({agent_tools.TIER_SHOW, agent_tools.TIER_WAIT, agent_tools.TIER_END,
                            agent_tools.TIER_WORKSPACE, agent_tools.TIER_WEB, agent_tools.TIER_PRIVATE,
-                           agent_tools.TIER_CARD, agent_tools.TIER_INSTANT})
+                           agent_tools.TIER_CARD, agent_tools.TIER_INSTANT, agent_tools.TIER_DRIVE})
 # Tiers that reach outside Jarvis's own show, end and workspace tools: never without a firewall.
 GUARDED_TIERS = frozenset({agent_tools.TIER_WEB, agent_tools.TIER_PRIVATE, agent_tools.TIER_CARD,
-                           agent_tools.TIER_INSTANT})
+                           agent_tools.TIER_INSTANT, agent_tools.TIER_DRIVE})
 _PERMITTED_AS = {"conversation": "memory"}   # what the owner said before a task goes with [agent] private's "memory"
 NO_FIREWALL = "no_firewall"       # a tool result's code
 NO_FIREWALL_TEXT = "That tool isn't available in this version of Jarvis; say so in your report."
@@ -72,10 +77,30 @@ def private_allowed(config: Any) -> frozenset[str]:
     return frozenset(name for name in listed if name in AGENT_PRIVATE)
 
 
+def drive_on(config: Any) -> bool:
+    """[agent] drive is True (config.py sets its default; anything else, or none, is off)."""
+    return getattr(getattr(config, "agent", None), "drive", False) is True
+
+
+def _cap(config: Any, name: str, default: int) -> int:
+    value = getattr(getattr(config, "agent", None), name, default)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else default
+
+
+def drive_caps(config: Any) -> agent_drive.DriveCaps:
+    """One task's pages, page actions and Send cards, from [agent] (the defaults for anything odd)."""
+    return agent_drive.DriveCaps(_cap(config, "max_pages", agent_drive.DEFAULT_MAX_PAGES),
+                                 _cap(config, "max_actions", agent_drive.DEFAULT_MAX_ACTIONS),
+                                 _cap(config, "max_sends", agent_drive.DEFAULT_MAX_SENDS))
+
+
 def offered(config: Any = None, tools: Sequence[agent_tools.Tool] = agent_tools.TOOLS,
-            connected: frozenset[str] | set[str] = frozenset()) -> tuple[agent_tools.Tool, ...]:
+            connected: frozenset[str] | set[str] = frozenset(), *,
+            drive_consent: bool = False) -> tuple[agent_tools.Tool, ...]:
     """The tools a run is given, in the registry's order: nothing that needs what is not ``connected``, and none of the
-    owner's things that [agent] private leaves out."""
+    owner's things that [agent] private leaves out. With ``drive_consent`` True and [agent] drive on, the drive tools
+    come after them and open_page is the one with a tab and a line; with anything less, exactly what was offered before
+    them."""
     allowed = private_allowed(config)
 
     def on(tool: agent_tools.Tool) -> bool:
@@ -86,7 +111,11 @@ def offered(config: Any = None, tools: Sequence[agent_tools.Tool] = agent_tools.
         permit = _PERMITTED_AS.get(tool.needs, tool.needs)
         return tool.needs in connected and (permit not in AGENT_PRIVATE or permit in allowed)
 
-    return tuple(tool for tool in tools if on(tool))
+    chosen = [tool for tool in tools if on(tool)]
+    if drive_consent is True and drive_on(config) and any(tool.name == "open_page" for tool in chosen):
+        chosen = [agent_tools.DRIVE_OPEN_PAGE if tool.name == "open_page" else tool for tool in chosen]
+        chosen += [tool for tool in agent_tools.DRIVE_TOOLS if tool.tier in OFFERED_TIERS]
+    return tuple(chosen)
 
 
 class Firewall(Protocol):

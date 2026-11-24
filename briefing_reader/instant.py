@@ -63,7 +63,7 @@ import unicodedata
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from fractions import Fraction
-from typing import Union
+from typing import Any, Union
 
 from . import instant_maths as maths
 from .persona import with_address
@@ -89,6 +89,9 @@ class InstantReply:
     speech: str = field(repr=False)          # said
     source: str = ""                         # the credit line under a network answer ("Weather data by Open-Meteo.com")
     brief: str = field(default="", repr=False)   # the bar's one line when ``text`` is long (a calendar's day); shown
+    # The new look, part 6: a sum's working as a maths frame (instant_maths.Calc.working), when it has one: the board
+    # shows it. Never logged.
+    working: Any = field(default=None, repr=False, compare=False)
 
     def __repr__(self) -> str:
         return f"InstantReply({self.kind})"
@@ -1379,4 +1382,4 @@ def _maths(words: str, address: str) -> InstantReply | None:
     about = "" if calc.exact else "about "
     spoken = calc.spoken or calc.value
     return InstantReply(KIND_MATHS, f"{calc.shown} {'=' if calc.exact else '≈'} {calc.value}",
-                        with_address(f"That's {about}{spoken}, {{sir}}.", address))
+                        with_address(f"That's {about}{spoken}, {{sir}}.", address), working=calc.working)

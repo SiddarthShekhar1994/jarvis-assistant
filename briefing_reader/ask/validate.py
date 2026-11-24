@@ -37,6 +37,7 @@ from __future__ import annotations
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
+from urllib.parse import urlsplit
 
 from ..actions import (
     CALENDAR,
@@ -49,7 +50,10 @@ from ..actions import (
     RSVP,
     SOURCE_ASK,
     TODO,
+    UNSUBSCRIBE,
+    ONLY_ASK_UNSUBSCRIBE,
     ProposedAction,
+    make_unsubscribe,
     parse_action_line,
     restrict,
     with_error,
@@ -57,6 +61,9 @@ from ..actions import (
 from .context import ContextIndex
 
 ASK_KINDS = frozenset({CALENDAR, TODO, RSVP, MOVE, CANCEL, EMAIL, REPLY, OPEN})
+# The owner's own Ask (planner.plan) only: an Unsubscribe line too (mail extras). Never the default: an agent task,
+# a summary or another mode that reads mail gets ONLY_ASK_UNSUBSCRIBE (information only).
+PLAIN_ASK_KINDS = ASK_KINDS | {UNSUBSCRIBE}
 ACCOUNT_LINE_KINDS = frozenset({RSVP, MOVE, CANCEL, EMAIL, REPLY})
 FAR_DAYS = 60
 ALREADY_LISTED = "Already in your list under BRIEFING - use Edit there"
@@ -64,6 +71,12 @@ UNKNOWN_EVENT = "Jarvis doesn't know this event - ask again"
 NOT_ORGANIZER = "You don't organise this event, so Jarvis can't {verb} it - ask for an email to the organiser"
 ORGANIZER_RSVP = "You organise this event, so there is no invitation to answer"
 UNKNOWN_THREAD = "Jarvis can only reply to a thread in your briefing or in mail it read for this request"
+# Mail extras: an Unsubscribe line names only a message Ask was shown; Jarvis builds its card from that message's header.
+UNSUBSCRIBE_WRITTEN = "Jarvis reads how to unsubscribe from the message itself - ask again"
+UNSUBSCRIBE_UNKNOWN = "Jarvis wasn't shown a way to unsubscribe in that message - ask again"
+UNSUBSCRIBE_MAILTO_WARNING = "An unsubscribe request to the list's own address"
+UNSUBSCRIBE_PAGE_TITLE = "Unsubscribe page of {name}"
+_MODEL_UNSUBSCRIBE_KEYS = ("method", "url", "sender", "list")
 UNKNOWN_MESSAGE = "This reply names a message that is not in that thread - ask again"
 PAST_MOVE = "The new time is in the past"
 FAR_MOVE = f"The new time is more than {FAR_DAYS} days away - check the date"
@@ -150,6 +163,8 @@ def check_line(line: str, index: ContextIndex, *, now: datetime, link_hosts: Seq
     """One planner line as an Ask card: valid, or information only with the reason. ``kinds``: what
     may be proposed (a planner mode's own); ``refusal``: its words for any other kind."""
     parsed = parse_action_line(line, link_hosts=link_hosts)
+    if parsed.kind == UNSUBSCRIBE and parsed.error == ONLY_ASK_UNSUBSCRIBE and UNSUBSCRIBE in kinds:
+        return unsubscribe_card(parsed, index)
     if refusal and not parsed.error and parsed.kind not in kinds:
         return with_error(replace(parsed, source=SOURCE_ASK), refusal)
     action = restrict(parsed, kinds, SOURCE_ASK)
@@ -165,6 +180,47 @@ def check_line(line: str, index: ContextIndex, *, now: datetime, link_hosts: Seq
     if action.kind == MOVE and action.start is not None and action.start > far:
         action = replace(action, warnings=action.warnings + (FAR_MOVE,))
     return action
+
+
+def unsubscribe_card(parsed: ProposedAction, index: ContextIndex) -> ProposedAction:
+    """An Unsubscribe line (acct, thread and gmid only) as the card Jarvis builds from that message's own header
+    (unsubscribe.choose): one-click -> an Unsubscribe card; the list's address -> an Email from that account (its
+    address NEW until ticked, with UNSUBSCRIBE_MAILTO_WARNING); its page -> an Open card (web); a sender Gmail could
+    not verify, or no usable way -> information only with the reason. Anything else the line wrote is refused."""
+    from .. import unsubscribe as un
+
+    asked = replace(parsed, source=SOURCE_ASK)
+    if any(parsed.field(key) for key in _MODEL_UNSUBSCRIBE_KEYS):
+        return with_error(asked, UNSUBSCRIBE_WRITTEN)
+    alias, thread, gmid = parsed.field("acct"), parsed.field("thread"), parsed.field("gmid")
+    if alias not in index.aliases:
+        return with_error(asked, f'Jarvis has no account called "{alias}"')
+    found = index.lists.get((alias, gmid))
+    if found is None or found[0] != thread:
+        return with_error(asked, UNSUBSCRIBE_UNKNOWN)
+    header = found[1]
+    shown = header.name or header.sender or "this list"
+    titled = replace(asked, title=f"Unsubscribe from {shown}")
+    method = un.choose(header)
+    if method == un.ONE_CLICK:
+        return make_unsubscribe(alias, thread=thread, gmid=gmid, url=header.https, sender=header.sender,
+                                list_id=header.list_id, name=header.name, source=SOURCE_ASK, raw=parsed.raw)
+    if method == un.MAILTO:
+        subject, body = (text.replace("|", "/") for text in un.mailto_words(header))
+        email = parse_action_line(f"Email: acct={alias} | to={header.mailto.address} | cc= | subject={subject} | "
+                                  f"due= | link= | body={body}")
+        if email.error:
+            return with_error(titled, un.REFUSAL_WORDS[un.NO_METHOD])
+        return replace(email, source=SOURCE_ASK, unverified=frozenset({header.mailto.address.casefold()}),
+                       warnings=(UNSUBSCRIBE_MAILTO_WARNING,))
+    if method == un.PAGE:
+        host = (urlsplit(header.https).hostname or "").casefold()
+        page = parse_action_line(f"Open: title={UNSUBSCRIBE_PAGE_TITLE.format(name=shown).replace('|', '/')} | "
+                                 f"link={header.https}", link_hosts=(host,) if host else ())
+        if page.error:
+            return with_error(titled, un.REFUSAL_WORDS[un.NO_METHOD])
+        return replace(page, source=SOURCE_ASK, web=True)
+    return with_error(titled, un.REFUSAL_WORDS.get(method, un.REFUSAL_WORDS[un.NO_METHOD]))
 
 
 def to_cards(lines: Sequence[str], index: ContextIndex, *, now: datetime, link_hosts: Sequence[str] = (),

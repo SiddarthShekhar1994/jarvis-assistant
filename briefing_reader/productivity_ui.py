@@ -1874,10 +1874,13 @@ class ProductivityController(QObject):
                                           playback_started=self._playback_started, now=now))
 
     def _requeue_dropped(self, now: datetime) -> None:
-        """A sentence queued long ago that the voice never started was dropped as stale: held again."""
-        for offer in self._offers.values():
+        """A sentence queued long ago that the voice never started was dropped as stale: held again - and taken from
+        the voice (offerUnsaid), so a copy still waiting there is never said after the one queued again (canvas part 5B,
+        the walk's 20: "Shall I plan your day, sir?" twice in a row)."""
+        for offer in list(self._offers.values()):
             if offer.speech_state == QUEUED and offer.queued_at is not None and now - offer.queued_at > QUEUED_FOR:
                 self._back_to_held(offer)
+                self.offerUnsaid.emit(offer)
 
     def _take_back(self, act: str, *, locked: bool = False) -> None:
         """A sentence queued but not started that may not be said now goes back to held and the app

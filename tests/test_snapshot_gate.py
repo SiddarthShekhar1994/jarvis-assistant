@@ -256,6 +256,22 @@ class GateTests(unittest.TestCase):
         _sock, reply = self.ask(gate, b"CONNECT rebind.example.org:443 HTTP/1.1\r\n\r\n")
         self.assertTrue(reply.startswith(b"HTTP/1.1 403"), reply)
 
+    def test_sealed_with_hosts_let_through_only_those_go_and_their_rules_hold(self) -> None:
+        gate = self.gate()
+        gate.seal(True)
+        gate.allow(["WWW.example.org."])                 # the owner's Send: the card's host alone
+        _sock, reply = self.ask(gate, b"CONNECT www.example.org:443 HTTP/1.1\r\n\r\n")
+        self.assertTrue(reply.startswith(b"HTTP/1.1 200"), reply)
+        for head in (b"CONNECT secret-words.example.org:443 HTTP/1.1\r\n\r\n",
+                     b"CONNECT 93.184.215.14:443 HTTP/1.1\r\n\r\n", b"CONNECT www.example.org:80 HTTP/1.1\r\n\r\n"):
+            _sock, reply = self.ask(gate, head)
+            self.assertTrue(reply.startswith(b"HTTP/1.1 403"), reply)
+        self.assertEqual(self.resolved, ["www.example.org"])   # no other name reached a resolver
+        gate.allow(())
+        _sock, reply = self.ask(gate, b"CONNECT www.example.org:443 HTTP/1.1\r\n\r\n")
+        self.assertTrue(reply.startswith(b"HTTP/1.1 403"), reply)
+        self.assertEqual(self.resolved, ["www.example.org"])
+
     def test_sealing_leaves_a_tunnel_already_open(self) -> None:
         gate = self.gate()
         sock, reply = self.ask(gate, b"CONNECT www.example.org:443 HTTP/1.1\r\n\r\n")
@@ -263,6 +279,64 @@ class GateTests(unittest.TestCase):
         gate.seal(True)
         sock.sendall(b"still here")
         self.assertEqual(sock.recv(1024), b"STILL HERE")
+
+    def _ended(self, sock: socket.socket) -> bool:
+        sock.settimeout(5)
+        try:
+            return sock.recv(1024) == b""
+        except (ConnectionError, OSError):
+            return True
+
+    def test_cut_ends_every_open_tunnel_and_the_gate_keeps_listening(self) -> None:
+        gate = self.gate()
+        first, reply = self.ask(gate, b"CONNECT www.example.org:443 HTTP/1.1\r\n\r\n")
+        self.assertTrue(reply.startswith(b"HTTP/1.1 200"), reply)
+        second, reply = self.ask(gate, b"CONNECT www.example.org:443 HTTP/1.1\r\n\r\n")
+        self.assertTrue(reply.startswith(b"HTTP/1.1 200"), reply)
+        self.assertTrue(wait_for(lambda: self.echo.connections == 2))
+        self.assertGreaterEqual(gate.cut(), 4)                    # both sides of both tunnels
+        self.assertTrue(self._ended(first))
+        self.assertTrue(self._ended(second))
+        self.assertEqual(gate.cut(), 0)                           # nothing is open now
+        _sock, reply = self.ask(gate, b"CONNECT www.example.org:443 HTTP/1.1\r\n\r\n")
+        self.assertTrue(reply.startswith(b"HTTP/1.1 200"), reply)  # not sealed: it tunnels again
+        self.assertEqual(sorted(gate.counts()), ["failed", "refused", "tunnels"])
+
+    def test_sealed_and_cut_nothing_a_page_opened_earlier_goes_on(self) -> None:
+        gate = self.gate()
+        sock, reply = self.ask(gate, b"CONNECT www.example.org:443 HTTP/1.1\r\n\r\n")
+        self.assertTrue(reply.startswith(b"HTTP/1.1 200"), reply)
+        sock.sendall(b"before")
+        self.assertEqual(sock.recv(1024), b"BEFORE")
+        gate.seal(True)
+        gate.cut()
+        self.assertTrue(self._ended(sock))
+        received = self.echo.received
+        try:
+            sock.sendall(b"typed-value")
+        except OSError:
+            pass
+        time.sleep(0.2)
+        self.assertEqual(self.echo.received, received)            # not a byte more reached the server
+        _sock, reply = self.ask(gate, b"CONNECT www.example.org:443 HTTP/1.1\r\n\r\n")
+        self.assertTrue(reply.startswith(b"HTTP/1.1 403"), reply)
+
+    def test_a_tunnel_being_made_when_the_seal_comes_is_refused(self) -> None:
+        holder: list[snapshot_gate.ConnectGate] = []
+
+        def sealing_connect(address: str, port: int, timeout: float) -> socket.socket:
+            upstream = self.connect(address, port, timeout)
+            holder[0].seal(True)                                  # the first value went in meanwhile
+            return upstream
+
+        gate = snapshot_gate.ConnectGate(resolve=self.resolve, connect=sealing_connect)
+        self.addCleanup(gate.close)
+        holder.append(gate)
+        self.assertGreater(gate.start(), 0)
+        _sock, reply = self.ask(gate, b"CONNECT www.example.org:443 HTTP/1.1\r\n\r\n")
+        self.assertTrue(reply.startswith(b"HTTP/1.1 403"), reply)
+        self.assertTrue(wait_for(lambda: gate.counts() == {"tunnels": 0, "refused": 1, "failed": 0}))
+        self.assertEqual(self.echo.received, b"")
 
     def test_the_log_never_gets_a_host_or_an_address(self) -> None:
         with self.assertLogs("briefing_reader.snapshot_gate", logging.DEBUG) as logs:

@@ -625,6 +625,7 @@ class PlanStage(QWidget):
         left.addLayout(head)
         left.addWidget(self.scroll, 1)
         self.orb = orb_mod.OrbWidget(orb_mod.COMPACT)
+        self.orb.set_badge_form(True)     # canvas part 5A: the canvas orb's flat badge while Home is the canvas
         self.caption = QLabel()
         self.caption.setFont(holo.font("caption_sm"))
         self.caption.setWordWrap(True)

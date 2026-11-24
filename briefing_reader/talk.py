@@ -15,19 +15,31 @@ approves or undoes.
   no speech, or barely words, is dropped, and so are its sound tags ("[Music]", "(upbeat music)", "♪").
 * :func:`hint_prompt` is the short list of names the model should expect ("Jarvis" first), so "Discord" is not
   written as "this cord".
+* :class:`CaptionPump` (smaller items part 8, owner decisions 2026-11-24): live captions while the owner talks. It
+  asks the warm speech process for the words so far (talk_speech.SpeechClient.peek, on a worker thread) CAPTION_EVERY_MS
+  after the last partial came back, only after CAPTION_AFTER_MS of speech, for at most the newest CAPTION_MAX_S of audio
+  and never while one is in flight; a partial that comes back after the talk ended or was cancelled is dropped, and
+  after one slower than CAPTION_SLOW_MS (the processor, a big model) none is asked for the rest of the talk. [talk] live_captions
+  ("auto" / "on" / "off", :func:`captions_on`): "auto" only while the speech process runs on the GPU. The partial
+  words are for the screen only; what goes in is still the final transcript of the whole clip.
 
 Privacy: the audio stays in memory and is never written to disk, and nothing here logs what was said.
 """
 
 from __future__ import annotations
 
+import itertools
+import logging
 import math
 import re
 import sys
+import threading
 import time
 from array import array
 from collections.abc import Callable, Iterable
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16_000
 BYTES_PER_SAMPLE = 2
@@ -380,6 +392,28 @@ class TalkSession:
             return self._preroll + bytes(self._audio[:last])   # "Hey Jarvis, open Spotify": all of it, said at once
         return bytes(self._audio[first:last])                  # or after a pause (the wake words come off the words)
 
+    def partial_clip(self, max_bytes: int | None = None) -> bytes:
+        """The audio so far for a live caption (CaptionPump): as :meth:`clip` would start it (a second before the
+        speech, or the wake's preroll) to now - only its newest ``max_bytes`` when given (only that much is copied);
+        b"" before speech is heard or once the talk ended."""
+        ep = self.endpointer
+        if ep.ended or not ep.heard_speech:
+            return b""
+        audio = self._audio
+        limit = None if max_bytes is None else max(0, int(max_bytes) - int(max_bytes) % BYTES_PER_SAMPLE)
+        if self._preroll:
+            if limit is None:
+                return self._preroll + bytes(audio)
+            if len(audio) >= limit:
+                return bytes(audio[len(audio) - limit:])
+            room = limit - len(audio)
+            return self._preroll[max(0, len(self._preroll) - room):] + bytes(audio)
+        first, _last = ep.span(len(audio))
+        if limit is not None:
+            start = max(first, len(audio) - limit)
+            first = start - start % BYTES_PER_SAMPLE
+        return bytes(audio[first:])
+
     def speech_since(self, ms: int) -> bool:
         """Something as loud as speech in the audio from ``ms`` into the talk on (the chime is not played over it)."""
         ep = self.endpointer
@@ -393,3 +427,152 @@ class TalkSession:
         """Drops the audio (once it was understood, or not needed)."""
         self._audio = bytearray()
         self._preroll = b""
+
+
+# --------------------------------------------------------------------------
+# Live captions (smaller items part 8)
+# --------------------------------------------------------------------------
+
+CAPTIONS_AUTO, CAPTIONS_ON, CAPTIONS_OFF = "auto", "on", "off"   # [talk] live_captions (config.LIVE_CAPTIONS)
+CAPTION_EVERY_MS = 700        # a partial this long after the last one came back (never back to back) ...
+CAPTION_AFTER_MS = 600        # ... only after this much speech ...
+CAPTION_MAX_S = 12.0          # ... of at most the newest this much audio (the caption shows the newest words) ...
+CAPTION_MAX_BYTES = int(CAPTION_MAX_S * SAMPLE_RATE) * BYTES_PER_SAMPLE   # ... and never while one is in flight
+CAPTION_SLOW_MS = 1500        # a partial slower than this: no more for the rest of the talk (the final would wait)
+CAPTION_WORDS = 8             # the newest words shown (the status line and Home's caption are one line)
+GPU_DEVICE = "cuda"           # what the speech process says when it runs on the GPU (gpu.CUDA)
+
+
+def captions_on(setting: str, device: str) -> bool:
+    """[talk] live_captions: "on" always, "off" never, "auto" (or anything else) while the speech process says it runs
+    on the GPU (``device`` "cuda"; "" before it said, or "cpu": off)."""
+    if setting == CAPTIONS_ON:
+        return True
+    if setting == CAPTIONS_OFF:
+        return False
+    return device == GPU_DEVICE
+
+
+def caption_text(text: str, words: int = CAPTION_WORDS) -> str:
+    """The newest ``words`` of a partial, "..." before them when some came first; "" when it holds no words."""
+    pieces = " ".join(_TAG_RE.sub(" ", str(text or "")).split()).split()
+    if not pieces or _NO_WORDS_RE.fullmatch("".join(pieces)):
+        return ""
+    if len(pieces) <= words:
+        return " ".join(pieces)
+    return "..." + " ".join(pieces[-words:])
+
+
+# Every pump's generations, app-wide: a partial queued to the screen by one talk's pump never matches another talk's.
+_GENERATIONS = itertools.count(1)
+
+
+def _on_a_thread(work: Callable[[], Any]) -> None:
+    threading.Thread(target=work, name="talk-caption", daemon=True).start()
+
+
+class CaptionPump:
+    """One talk's live captions (see the module docstring; no Qt). ``peek(pcm, cancelled)`` gives the words in ``pcm``
+    (blocking; None: no answer - the process is not running, busy or failed; ``cancelled``, a threading.Event set by
+    :meth:`stop`, says the talk ended before the peek reached the process); ``deliver(generation, text)`` is called on the
+    worker thread with each partial; the screen's side shows ``take(generation, text)`` (None: the talk ended or was
+    cancelled meanwhile, or no words). ``wanted()`` is asked at each :meth:`tick` ([talk] live_captions against the
+    device the speech process last reported). ``start(work)`` runs a peek (default: a daemon thread; tests run it in
+    place or later). :meth:`stop` ends it: what is in flight is dropped, and the log gets the count and the average
+    time (never a word)."""
+
+    def __init__(self, peek: Callable[[bytes, threading.Event], str | None], deliver: Callable[[int, str], Any], *,
+                 wanted: Callable[[], bool] = lambda: True, clock: Callable[[], float] = time.monotonic,
+                 start: Callable[[Callable[[], Any]], Any] | None = None) -> None:
+        self._peek, self._deliver, self._wanted, self._clock = peek, deliver, wanted, clock
+        self._start = start or _on_a_thread
+        self._lock = threading.Lock()
+        self._live = True
+        self._busy = False
+        self._last: float | None = None        # when the last partial was asked for, then when it came back
+        self._cancel = threading.Event()        # stop(): a peek not yet sent is not sent
+        self.slow = False                       # a partial took longer than CAPTION_SLOW_MS: no more this talk
+        self.generation = next(_GENERATIONS)
+        self.count = 0                          # partials that came back in time
+        self.total_ms = 0
+
+    @property
+    def in_flight(self) -> bool:
+        return self._busy
+
+    @property
+    def live(self) -> bool:
+        return self._live
+
+    def tick(self, session: Any) -> bool:
+        """The talk's poll: asks for a partial when one is due (True when it did)."""
+        with self._lock:
+            if not self._live or self._busy or self.slow:
+                return False
+            ep = session.endpointer
+            if ep.ended or not ep.heard_speech or ep.speech_frames * FRAME_MS < CAPTION_AFTER_MS:
+                return False
+            now = self._clock()
+            if self._last is not None and (now - self._last) * 1000 < CAPTION_EVERY_MS:
+                return False
+        try:
+            if not self._wanted():
+                return False
+        except Exception:  # noqa: BLE001 - unknown: no caption
+            return False
+        pcm = session.partial_clip(CAPTION_MAX_BYTES)    # the newest CAPTION_MAX_S only (only that is copied)
+        if not pcm:
+            return False
+        with self._lock:
+            if not self._live or self._busy:
+                return False
+            self._busy, self._last = True, now
+            generation = self.generation
+        try:
+            self._start(lambda: self._work(generation, pcm))
+        except Exception as exc:  # noqa: BLE001 - no thread: no captions this talk, the talk goes on
+            logger.info("Talk: a caption could not start (%s)", type(exc).__name__)
+            with self._lock:
+                self._busy = False
+                self._live = False
+            return False
+        return True
+
+    def _work(self, generation: int, pcm: bytes) -> None:
+        began = self._clock()
+        try:
+            text = self._peek(pcm, self._cancel)
+        except Exception:  # noqa: BLE001 - a partial that failed is no caption; the final has the last word
+            text = None
+        ended = self._clock()
+        took = int((ended - began) * 1000)
+        with self._lock:
+            self._busy = False
+            self._last = ended                  # the next one CAPTION_EVERY_MS after this came back
+            if took > CAPTION_SLOW_MS:
+                self.slow = True                # the final must not wait on more of these
+            if generation != self.generation or not self._live or text is None:
+                return                          # the talk ended or was cancelled meanwhile: dropped
+            self.count += 1
+            self.total_ms += max(0, took)
+        self._deliver(generation, str(text))
+
+    def take(self, generation: int, text: str) -> str | None:
+        """On the screen's thread: the words to show for a partial delivered under ``generation``, or None."""
+        with self._lock:
+            if generation != self.generation or not self._live:
+                return None
+        return caption_text(text) or None
+
+    def stop(self) -> None:
+        """The talk ended (any end): no more partials, and one in flight is dropped. Logs counts and ms only."""
+        self._cancel.set()
+        with self._lock:
+            if not self._live:
+                return
+            self._live = False
+            self.generation = next(_GENERATIONS)
+            count, total, slow = self.count, self.total_ms, self.slow
+        if count or slow:
+            logger.info("Talk: %d caption(s), %d ms each%s", count, total // count if count else 0,
+                        " (stopped: slow)" if slow else "")

@@ -1258,7 +1258,8 @@ class StructuredDetectionTests(unittest.TestCase):
                 self.assertEqual(action.error, "")
                 self.assertTrue(action.decidable)
                 self.assertEqual(action.raw, line)
-        self.assertEqual(STRUCTURED_KINDS, frozenset(LABELS))
+        # Mail extras: an Unsubscribe line is read too, but never as a working card (tests/test_unsubscribe.py).
+        self.assertEqual(STRUCTURED_KINDS, frozenset(LABELS) | {actions.UNSUBSCRIBE})
 
     def test_free_text_lines_stay_as_before(self) -> None:
         for line, kind in (("Reply: Carol about the draft", REPLY), ("Reply: x=1 is wrong", REPLY),
@@ -2138,10 +2139,12 @@ class CardViewTests(unittest.TestCase):
     def test_calendar_and_legacy_cards(self) -> None:
         self.assertEqual(card_view(parse_action_line(CHESS), TODAY),
                          CardView("calendar", "Chess Club Weekly Meeting",
-                                  f"Fri Oct 9{DOT}3:00-4:00 PM{DOT}weekly until Dec 11", approve_text="Approve",
+                                  f"Fri Oct 9{DOT}3:00-4:00 PM{DOT}weekly until Dec 11{DOT}Personal calendar",
+                                  approve_text="Approve",
                                   decidable=True))
         self.assertEqual(card_view(parse_action_line(FILM), TODAY).detail,
-                         f"Tue Oct 6{DOT}5:00-6:00 PM{DOT}Central Library, Media Lab")
+                         f"Tue Oct 6{DOT}5:00-6:00 PM{DOT}Central Library, Media Lab{DOT}Personal calendar")
+        # (canvas part 5B, the walk's 21: a calendar card says which calendar it goes to)
         self.assertEqual(card_view(parse_action_line("Reply: Carol about the draft"), TODAY),
                          CardView("reply", "Carol about the draft", "Information only"))
         self.assertEqual(card_view(parse_action_line("Nothing needs your OK today."), TODAY),
@@ -2194,9 +2197,11 @@ class CarriedOutKindsTests(unittest.TestCase):
     with no countdown: the calendar kinds at once (Undo reverses them), the others after a hidden hold."""
 
     def test_carried_kinds(self) -> None:
-        self.assertEqual(actions.CARRIED_KINDS, frozenset({CALENDAR, TODO, RSVP, MOVE, CANCEL, REPLY, EMAIL}))
+        # Mail extras: an Unsubscribe tells the list's server once, after the same hidden hold.
+        self.assertEqual(actions.CARRIED_KINDS, frozenset({CALENDAR, TODO, RSVP, MOVE, CANCEL, REPLY, EMAIL,
+                                                           actions.UNSUBSCRIBE}))
         self.assertEqual(actions.UNDO_KINDS, frozenset({CALENDAR, TODO, RSVP, MOVE}))
-        self.assertEqual(actions.HOLD_KINDS, frozenset({CANCEL, REPLY, EMAIL}))
+        self.assertEqual(actions.HOLD_KINDS, frozenset({CANCEL, REPLY, EMAIL, actions.UNSUBSCRIBE}))
         self.assertEqual(actions.UNDO_KINDS | actions.HOLD_KINDS, actions.CARRIED_KINDS)
         self.assertFalse(actions.UNDO_KINDS & actions.HOLD_KINDS)
         for action in (example("RSVP"), example("Move"), example("Todo"), parse_action_line(CHESS)):
@@ -2646,8 +2651,10 @@ class WebCardTests(unittest.TestCase):
         self.assertTrue(actions.restrict(web, {OPEN}, actions.SOURCE_ASK).web)
         self.assertTrue(actions.restrict(web, {TODO}, actions.SOURCE_ASK).web)   # refused, still web
         self.assertTrue(dataclasses.replace(web, title="x").web)
-        # web, then the planner modes' mode and serves (memory only, never in the id) come last.
-        self.assertEqual([field.name for field in dataclasses.fields(ProposedAction)][-3:], ["web", "mode", "serves"])
+        # web, then the planner modes' mode and serves (memory only, never in the id), then a capture's uid (never in
+        # the id either) come last.
+        self.assertEqual([field.name for field in dataclasses.fields(ProposedAction)][-4:],
+                         ["web", "mode", "serves", "uid"])
 
     def test_a_web_open_card(self) -> None:
         card = self.web_open()

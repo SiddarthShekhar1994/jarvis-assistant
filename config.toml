@@ -134,7 +134,12 @@ trusted_domains = []
 # new Google sign-in for that account, which asks for all of them; if you
 # untick reading email, the rest still works. If its administrator blocks the
 # sign-in (admin_policy_enforced), remove "gmail_read" first, then
-# "gmail_send", from that account.
+# "gmail_send", from that account. "gmail_tidy" lets a standing rule ([standing]
+# below) star, label or archive the one mail it matched, without a click and
+# with an Undo for 7 days. It never joins the account's main sign-in: it has a
+# sign-in of its own (README step 8d), started from the Agents screen. No
+# account has it here; to use it, add it to that account's features, e.g.
+# features = ["calendar", "gmail_send", "gmail_read", "gmail_tidy"]
 [accounts.personal]
 backend = "google"
 features = ["calendar", "gmail_send", "gmail_read"]
@@ -429,3 +434,55 @@ currency = true               # "100 dollars in euros"
 town = ""                     # the weather's town when you name none, e.g. "Oslo" (kept on this PC; sent only to Open-Meteo)
 temperature = "auto"          # "auto" (the Windows region: the US gets Fahrenheit), "celsius" or "fahrenheit"
 calendar = true               # "what's my next meeting", "am I free at 3": from your calendars; titles shown, and said only by the local voice
+
+# Standing agents and rules: jobs you set up from the chat ("agent: ..." or "rule: ..." in the bar) that wake on their
+# own - at a time, every 30 minutes or more, on new mail that matches their filter (looked for every 5 minutes, headers
+# only) or on Run now - read only their own sources and report on the Agents screen (Ctrl+9). They only line up cards
+# (to-dos, events, reply drafts) that wait for your click; a rule may also star, label or archive the one mail it
+# matched, without a click and with an Undo for 7 days, if you set it up so (the account needs "gmail_tidy", above).
+# When a job runs, the text of each mail its filter matched goes to your Claude plan without a click at that moment:
+# only that message, never its whole conversation, with keys and passwords taken out first; the run has no tools and
+# no web. Needs [ask] on. Off here; turn it on for this PC with JARVIS_STANDING_ENABLED=true in .env, then run
+# install-schedule.ps1 again (it adds the "Briefing agents" task). Even then nothing runs until you say yes on the
+# Agents screen's consent card. The values below are the defaults.
+[standing]
+enabled = false
+model = "sonnet"              # agents' runs and the setup runs; "haiku" uses less of your plan
+rule_model = "haiku"          # a rule's checks and dry run: one yes or no and a few values per mail
+max_runs_per_day = 30         # Claude runs a day for every agent and rule together, setups and dry runs too (1..200)
+agent_runs_per_day = 6        # the runs a day a new agent gets as its own cap (1..48)
+rule_batch = 8                # mails a rule judges in one run (1..8)
+rule_checks_per_day = 40      # the mails a day a new rule may judge (1..200)
+tidy_per_day = 40             # tidy-ups each rule may make a day (0..200; 0 = none)
+poll_minutes = 5              # how often each mail job looks for new mail, headers only (5..60)
+min_every_minutes = 30        # the shortest interval an agent may run at (30..1440)
+max_mail_per_run = 20         # mails one agent run reads (1..50)
+mail_chars = 4000             # each matched mail is cut to this many characters (500..12000)
+keep_days = 7                 # reports, receipts and waiting cards are kept this many days on this PC (1..30)
+catch_up_hours = 3            # a timed run missed by up to this many hours (PC off or asleep) runs once (0..12)
+quiet_from = "22:00"          # nothing is said, and a closed Jarvis is not opened, from ...
+quiet_until = "08:00"         # ... until (what waited is told after)
+open_when_closed = true       # false: a check never opens Jarvis; what it found waits for your next open
+timeout_seconds = 120         # one standing run may take this many seconds (30..600)
+
+[look]
+# The new look. "sounds": "soft" (the default) plays a few quiet sounds made in
+# code: heard you, still thinking, a frame lands on the board and a group of
+# frames settles, something new waits for your OK, a frame changed, an approved
+# card done or failed, a frame opened big or put back. They never play while
+# Jarvis is muted, in quiet hours, in focus mode, while a meeting records, while
+# the PC is locked, while Windows says you're busy or a full-screen app runs, or
+# over his voice (dropped, never kept for later); the board's only while its
+# window shows. "off": none, and Settings > Look then has no button for them;
+# with "soft", Settings > Look can turn them off (or on again) on this PC.
+# true / false mean "soft" / "off". "Hey Jarvis"'s chime keeps its own rules.
+# "board": true shows a board of frames beside the conversation once an answer
+# has something to show (its web view starts with the first Ask, never with
+# Jarvis); false keeps Home exactly as it was: no Board button, no hint line,
+# no desk, and the board never starts. "second_screen": true shows Jarvis on
+# your second monitor by default (the ring, the clock, the counts and the
+# board's frames; never mail text); once you use its switch in Settings > Look,
+# your choice there wins on this PC.
+sounds = "soft"
+board = true
+second_screen = false

@@ -103,6 +103,7 @@ def initials(name: str) -> str:
 
 def _label(text: str, role: str, color: str, *, wrap: bool = True, selectable: bool = False) -> QLabel:
     label = hud.make_label(text, holo.font(role), color, wrap=wrap)
+    holo.tag_role(label, role)                       # (the canvas look: a screen title in caps)
     label.setTextFormat(Qt.TextFormat.PlainText)
     if selectable:
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)

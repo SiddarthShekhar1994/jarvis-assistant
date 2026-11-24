@@ -102,6 +102,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from . import atomic
 from .actions import email_address
 from .config import ACCOUNT_FEATURES, register_secret
 
@@ -110,6 +111,7 @@ logger = logging.getLogger(__name__)
 CALENDAR_FEATURE = "calendar"
 GMAIL_FEATURE = "gmail_send"
 GMAIL_READ_FEATURE = "gmail_read"
+TIDY_FEATURE = "gmail_tidy"
 FEATURE_SCOPES: dict[str, tuple[str, ...]] = {
     CALENDAR_FEATURE: ("https://www.googleapis.com/auth/calendar.events",
                        "https://www.googleapis.com/auth/calendar.settings.readonly"),
@@ -118,10 +120,14 @@ FEATURE_SCOPES: dict[str, tuple[str, ...]] = {
     # Read only (a restricted scope): Ask Jarvis reads the threads a request is about. It can
     # neither send nor change mail, and only gmail.GmailReader uses it.
     GMAIL_READ_FEATURE: ("https://www.googleapis.com/auth/gmail.readonly",),
+    # Change labels (a standing rule's tidy-up: star, one user label, archive - only standing.tidy uses it, on the one
+    # message a rule matched). It sits in a sign-in of its own per account (TIDY_TOKEN_PATTERN), never in the
+    # account's main sign-in: executor.account_features leaves it out there.
+    TIDY_FEATURE: ("https://www.googleapis.com/auth/gmail.modify",),
 }
 # What each feature lets Jarvis do, for messages ("Google did not allow Calendar access ...").
 FEATURE_WORDS = {CALENDAR_FEATURE: "Calendar access", GMAIL_FEATURE: "sending email",
-                 GMAIL_READ_FEATURE: "reading email"}
+                 GMAIL_READ_FEATURE: "reading email", TIDY_FEATURE: "tidying email (star, label, archive)"}
 # Asked for with every alias's sign-in (non-sensitive): the id_token then says which Google account
 # it is, so the alias can be bound to it (accounts.json).
 IDENTITY_SCOPES = ("openid", "https://www.googleapis.com/auth/userinfo.email")
@@ -135,6 +141,7 @@ TOKEN_SUB_KEY = "jarvis_account_sub"
 TOKEN_ASKED_KEY = "jarvis_asked_scopes"
 LEGACY_TOKEN = "google_token.json"
 TOKEN_PATTERN = "google_token_{alias}.json"
+TIDY_TOKEN_PATTERN = "google_token_{alias}.tidy.json"   # gmail_tidy's own sign-in (an alias has no dot: never a clash)
 LEGACY_ALIAS = "personal"          # the account google_token.json of older versions belongs to
 SETUP_HINT = "Set up Google sign-in: README step 8"
 SIGN_IN_SUCCESS_MESSAGE = "Jarvis is connected to Google Calendar. You can close this tab."
@@ -243,6 +250,13 @@ def token_path(data_dir: Path, alias: str) -> Path:
     if not valid_alias(alias):
         raise ValueError("not an account alias")
     return Path(data_dir) / TOKEN_PATTERN.format(alias=alias)
+
+
+def tidy_token_path(data_dir: Path, alias: str) -> Path:
+    """<data_dir>\\google_token_<alias>.tidy.json: the alias's tidy-up sign-in (gmail.modify only)."""
+    if not valid_alias(alias):
+        raise ValueError("not an account alias")
+    return Path(data_dir) / TIDY_TOKEN_PATTERN.format(alias=alias)
 
 
 def account_token_path(data_dir: Path, alias: str) -> Path:
@@ -508,7 +522,7 @@ class GoogleAccount:
                  success_message: str | None = None, log: logging.Logger | None = None,
                  refresh: Callable[[Any], None] | None = None,
                  libraries_available: Callable[[], bool] | None = None,
-                 bindings: AccountBindings | None = None) -> None:
+                 bindings: AccountBindings | None = None, persist: bool = True) -> None:
         if token_path is None:
             if data_dir is None:
                 raise ValueError("GoogleAccount needs data_dir or token_path")
@@ -529,6 +543,10 @@ class GoogleAccount:
         self._libraries_hook = libraries_available or (lambda: google_libraries_available())
         # Which Google account the alias is (accounts.json); None for the one-account setup "".
         self._bindings = bindings if alias else None
+        # False: a background run's account (standing agents and rules, in a process of their own): its
+        # credentials live in memory only. A refresh is never saved, a rejected or unusable sign-in is never
+        # deleted (the app shows the problem and the owner signs in there), and it never signs in itself.
+        self.persist = bool(persist)
         self._lock = threading.RLock()
         self._creds: Any = None
         self._granted: list[str] | None = None   # scopes of self._creds (None while not loaded)
@@ -660,6 +678,17 @@ class GoogleAccount:
                                      f"the {self.alias} account; nothing was sent or changed")
         return "", ""
 
+    def still_saved(self) -> bool:
+        """The saved sign-in is still the one this object holds (its refresh token is the file's): False once
+        the owner signed out, disconnected or signed in again since it was read, so a background run that
+        holds an older sign-in changes nothing. Files only; never logs a token."""
+        with self._lock:
+            creds = self._creds
+        held = getattr(creds, "refresh_token", None) if creds is not None else None
+        info = _token_info(self.token_path)
+        saved = info.get("refresh_token") if info is not None else None
+        return bool(held) and isinstance(saved, str) and saved == held
+
     def unknown_account_message(self) -> str:
         """The saved sign-in is a Google account Jarvis has no (or another) binding for."""
         return (f"Jarvis doesn't know which Google account the {self.alias} account's sign-in is; sign in "
@@ -762,6 +791,12 @@ class GoogleAccount:
     # ---- sign-in -----------------------------------------------------------------------
 
     def sign_in(self) -> None:
+        if not self.persist:
+            # A background run never opens a browser: the owner signs in in the app.
+            raise AccountNotSignedIn()
+        self._sign_in()
+
+    def _sign_in(self) -> None:
         """Open the Google sign-in in the browser and save the token.
 
         Blocks until the user finishes or ``open_timeout_s`` passes. Raises AccountSetupError
@@ -892,6 +927,8 @@ class GoogleAccount:
         is in use), the binding is kept as it is and AccountError says so: a token left behind
         without its binding would be an account nobody confirmed (change_problem refuses it
         too, but the sign-in that follows must start fresh)."""
+        if not self.persist:
+            raise AccountError("A background run can't disconnect an account; nothing was changed")
         with self._lock:
             if not self.forget("disconnected", problem=PROBLEM_SIGNED_OUT):
                 who = f"the {self.alias} account's" if self.alias else "the"
@@ -910,6 +947,11 @@ class GoogleAccount:
             self.generation += 1
             if problem != PROBLEM_SIGNED_OUT:
                 self._set_problem(problem, message)
+            if not self.persist:
+                # A background run leaves the saved sign-in alone: the app finds the same problem itself.
+                self._log.info("%s: the sign-in can't be used here (%s); left for the app", self.log_name,
+                               problem or "signed_out")
+                return True
             try:
                 self.token_path.unlink()
             except FileNotFoundError:
@@ -988,16 +1030,23 @@ class GoogleAccount:
         return creds
 
     def _save_token(self, creds: Any, info: dict[str, Any] | None = None) -> None:
-        """Write the token JSON atomically. A failure is logged, not raised."""
+        """Write the token JSON atomically (a temporary file of its own, so two Jarvis processes saving at once
+        never mix their writes). A failure is logged, not raised. A background account keeps it in memory."""
+        if not self.persist:
+            return
         path = self.token_path
-        part = path.with_name(path.name + ".part")
+        part: Path | None = None
         try:
             text = json.dumps(info) if info is not None else creds.to_json()
             path.parent.mkdir(parents=True, exist_ok=True)
-            part.write_text(text, encoding="utf-8")
-            os.replace(part, path)
+            fd, name = tempfile.mkstemp(prefix=f"{path.name}.", suffix=".part", dir=path.parent)
+            part = Path(name)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            atomic.replace(part, path)
         except OSError as exc:
-            _unlink_quietly(part)
+            if part is not None:
+                _unlink_quietly(part)
             self._log.warning("%s: could not save the sign-in (%s); you will be asked to sign in "
                               "again next time", self.log_name, exc.strerror or type(exc).__name__)
 

@@ -10,11 +10,12 @@ Public API
 
 Tokens
     Colours (hex strings): ``VOID``, ``VOID_EDGE``, ``DOCK``, ``TILE``, ``TILE_FOCUS``, ``TILE_AMBER``,
-    ``TILE_OK``, ``TILE_ALERT``, ``RAISED``, ``FIELD``, ``PICTURE``, ``FOCUS``, ``HOLO`` (+ ``_HI``,
+    ``TILE_AMBER_LIT``, ``TILE_OK``, ``TILE_ALERT``, ``RAISED``, ``FIELD``, ``PICTURE``, ``FOCUS``, ``HOLO`` (+ ``_HI``,
     ``_LO``, ``_INK``), ``INK_1`` .. ``INK_4``, ``INK_KICKER``, ``AMBER`` (+ ``_HI``, ``_LO``, ``_INK``,
     ``_TX``, ``_TX2``), ``OK``, ``OK_INK``, ``ALERT`` (+ ``_HI``, ``_LO``, ``_TX``, ``_TX2``, ``_INK``),
-    ``STEEL``. Translucent tokens (QColor): ``GRID``, ``SCAN``, ``SCAN_AMBER``, ``LINE_FAINT``,
-    ``LINE``, ``LINE_STRONG``, ``LINE_FOCUS``, ``LINE_INPUT``, ``AMBER_LINE``.
+    ``STEEL``; the second screen's ``OLED_BLACK`` and ``OLED_INK``. Translucent tokens (QColor): ``GRID``, ``SCAN``, ``SCAN_AMBER``, ``LINE_FAINT``,
+    ``LINE``, ``LINE_STRONG``, ``LINE_FOCUS``, ``LINE_INPUT``, ``AMBER_LINE``; the board's ``FRAME_EDGE``, ``CUE``,
+    ``CUE_AMBER``. (The board's page gets all of them, written out as CSS by board.scheme.tokens_css.)
     ``alpha(color, a) -> QColor``; ``mix(a, b, t) -> QColor``.
     Spacing ``SPACE`` (2xs .. 6xl) and the named sizes (``DOCK_WIDTH``, ``HEADER_HEIGHT``, ...);
     radii ``RADIUS_*``.
@@ -82,13 +83,14 @@ from PySide6.QtGui import (
     QFont,
     QFontMetricsF,
     QGuiApplication,
+    QLinearGradient,
     QPainter,
     QPainterPath,
     QPen,
     QPixmap,
     QRadialGradient,
 )
-from PySide6.QtWidgets import QAbstractButton, QSizePolicy, QWidget
+from PySide6.QtWidgets import QAbstractButton, QApplication, QSizePolicy, QWidget
 
 from . import hud
 
@@ -104,6 +106,7 @@ DOCK = "#060A0E"
 TILE = "#091318"
 TILE_FOCUS = "#0A1A20"
 TILE_AMBER = "#141310"
+TILE_AMBER_LIT = "#18160F"     # the board: a lit frame that waits on the owner (DESIGN-SPEC 10)
 TILE_OK = "#080F11"
 TILE_ALERT = "#170F12"
 RAISED = "#0B141B"
@@ -138,6 +141,10 @@ ALERT_TX = "#FF9A8C"
 ALERT_TX2 = "#FFD9D3"
 ALERT_INK = "#1F0705"
 STEEL = "#6C8A95"
+# The second screen (the new look, part 7; DESIGN-SPEC 6 and 10): its true black, and its softened white (OLED care:
+# nothing there is whiter than this).
+OLED_BLACK = "#000000"
+OLED_INK = "#CFE6EB"
 
 
 def alpha(color: str | QColor, a: float) -> QColor:
@@ -164,6 +171,11 @@ LINE_STRONG = alpha(HOLO, 0.33)
 LINE_FOCUS = alpha(HOLO, 0.55)
 LINE_INPUT = alpha(HOLO, 0.50)
 AMBER_LINE = alpha(AMBER, 0.45)
+# The board (DESIGN-SPEC 10): a frame's edge (LINE would turn nine stacked frames into a grid of boxes, LINE_FAINT
+# vanishes on TILE), and the cue line in its frame's colour.
+FRAME_EDGE = alpha(HOLO, 0.14)
+CUE = alpha(HOLO_HI, 0.55)
+CUE_AMBER = alpha(AMBER_HI, 0.75)
 
 # --------------------------------------------------------------------------
 # Spacing and shape (spec 3, 4)
@@ -247,6 +259,8 @@ ROLES: dict[str, TypeRole] = {
     "dock_tag": TypeRole(_M, 9, 12, 500, 0.14, caps=True),        # the Dock's Desktop: its HUD tag
     "dock_key": TypeRole(_M, 9, 12, 500, 0.06),                   # ... the HUD key's keycaps under it
     "dock_hint": TypeRole(_M, 10, 14, 400, 0.0),                  # ... and "switches"
+    "frame_title": TypeRole(_D, 15, 20, 500, 0.01),               # a board frame's title (tile_title wraps too often)
+    "frame_time": TypeRole(_M, 12, 16, 500, 0.04, tabular=True),  # a board row's time ("10:00-10:30")
 }
 _FONT_MAKERS: dict[str, Callable[[int, int, float], QFont]] = {
     _D: hud.display_font, _B: hud.body_font, _M: hud.mono_font,
@@ -459,10 +473,78 @@ def refresh_reduced_motion() -> None:
 
 GRID_STEP = 30
 
+# --------------------------------------------------------------------------
+# The canvas look (PLAN-canvas part 4): while Home is the canvas, every other screen wears the canvas's frame style -
+# the black ground, square tiles with a bright cyan edge and an inner glow, corner ticks on what is in focus, amber
+# only for what needs the owner, and the mock's small mono caps buttons. ReadingView.set_canvas turns it on and off;
+# the old hologram look is untouched while it is off (the fallback, and every window without the canvas).
+# --------------------------------------------------------------------------
+
+CANVAS_BLACK = "#000000"
+CANVAS_EDGE = QColor(175, 240, 255, 204)      # the frames' outline (board.css --frame-edge)
+CANVAS_EDGE_HI = QColor(255, 255, 255)        # ... hovered or in focus
+CANVAS_LINE = QColor(143, 235, 255, 77)       # a quiet edge (--line)
+CANVAS_GLOW = (53, 211, 240)                  # the glow (--g)
+CANVAS_GLOW_AMBER = (245, 177, 74)            # ... of what waits (--ga)
+CANVAS_AMBER = "#F5B14A"
+CANVAS_AMBER_HI = "#FFD08A"
+CANVAS_INK = "#D8F3F8"                        # a button's words (the mock's .btn)
+CANVAS_TICK = 10.0                            # a corner tick's leg
+CANVAS_RADIUS = 1.0                           # the mock's corners (border-radius: 1px)
+CANVAS_CAPS_ROLES = ("screen_title",)         # roles the canvas sets in caps, bolder (the mock's .h: Chakra 700 caps)
+_canvas_look = False
+
+
+def tag_role(widget: QWidget, role: str) -> None:
+    """Remember ``widget``'s type role, so the canvas look can restyle it (its screen titles in caps) and give it back;
+    a widget made while the look is on takes it at once."""
+    widget.setProperty("holoRole", role)
+    _role_look(widget)
+
+
+def _role_look(widget: QWidget) -> None:
+    role = widget.property("holoRole")
+    if role not in CANVAS_CAPS_ROLES:
+        return
+    current = QFont(widget.font())
+    current.setCapitalization(QFont.Capitalization.AllUppercase if _canvas_look
+                              else QFont.Capitalization.MixedCase)
+    current.setWeight(QFont.Weight(700 if _canvas_look else ROLES[role].weight))
+    if current != widget.font():
+        widget.setFont(current)
+
+
+def canvas_look() -> bool:
+    """The canvas look is on (Home is the canvas)."""
+    return _canvas_look
+
+
+def set_canvas_look(on: bool) -> None:
+    """Turn the canvas look on or off: the app's stylesheet follows and every widget measures and paints again."""
+    global _canvas_look
+    on = bool(on)
+    if on == _canvas_look:
+        return
+    _canvas_look = on
+    app = QApplication.instance()
+    if app is None:
+        return
+    if app.styleSheet():                      # (the app's theme is on: hud.apply_theme)
+        app.setStyleSheet(hud.stylesheet())
+    for widget in app.allWidgets():
+        if isinstance(widget, (HoloButton, ActionChip)):
+            widget.updateGeometry()
+        _role_look(widget)
+        widget.update()
+
 
 def paint_ground(painter: QPainter, rect: QRectF | QRect) -> None:
-    """``void``, the 1 px triangle grid every 30 px at 0 / 60 / 120 degrees and the vignette."""
+    """``void``, the 1 px triangle grid every 30 px at 0 / 60 / 120 degrees and the vignette (the canvas look: the
+    canvas's plain black)."""
     rect = QRectF(rect)
+    if _canvas_look:
+        painter.fillRect(rect, QColor(CANVAS_BLACK))
+        return
     painter.save()
     try:
         painter.fillRect(rect, QColor(VOID))
@@ -503,11 +585,11 @@ class GroundCache:
     """The window ground as one pixmap per (size, device pixel ratio); widgets paint slices of it."""
 
     def __init__(self) -> None:
-        self._key: tuple[int, int, float] | None = None
+        self._key: tuple[int, int, float, bool] | None = None
         self._pixmap: QPixmap | None = None
 
     def pixmap(self, size: QSize, dpr: float = 1.0) -> QPixmap:
-        key = (size.width(), size.height(), round(dpr, 3))
+        key = (size.width(), size.height(), round(dpr, 3), _canvas_look)
         if self._pixmap is None or self._key != key:
             pixmap = QPixmap(max(1, round(size.width() * dpr)), max(1, round(size.height() * dpr)))
             pixmap.setDevicePixelRatio(dpr)
@@ -656,9 +738,13 @@ def tile_path(rect: QRectF, radius: float) -> QPainterPath:
 
 def paint_tile(painter: QPainter, rect: QRectF | QRect, state: str = TILE_DEFAULT, *,
                opacity: float = 1.0) -> TileStyle:
-    """A tile's body: fill + 1 px border + scanlines + corner brackets. Returns its style (for the text)."""
+    """A tile's body: fill + 1 px border + scanlines + corner brackets. Returns its style (for the text). The canvas
+    look paints it as a canvas frame (paint_canvas_tile)."""
     style = TILE_STYLES.get(state, TILE_STYLES[TILE_DEFAULT])
     rect = QRectF(rect)
+    if _canvas_look:
+        paint_canvas_tile(painter, rect, state, opacity=opacity)
+        return style
     painter.save()
     try:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -680,6 +766,124 @@ def paint_tile(painter: QPainter, rect: QRectF | QRect, state: str = TILE_DEFAUL
     finally:
         painter.restore()
     return style
+
+
+@dataclass(frozen=True)
+class CanvasFrameLook:
+    """A canvas frame: its fill, its edge, its glow's colour and strength (0: none), and its corner ticks."""
+
+    fill: QColor
+    edge: QColor
+    glow: tuple[int, int, int]
+    strength: float
+    tick: QColor | None
+    corners: str
+
+
+_CANVAS_FILL = QColor(3, 10, 13, 240)            # board.css --tile
+_CANVAS_FILL_FOCUS = QColor(5, 19, 25, 245)      # --tile-focus
+_CANVAS_FILL_AMBER = QColor(14, 9, 3, 242)       # --tile-amber
+_CANVAS_FILL_ALERT = QColor(17, 6, 5, 242)       # --tile-alert
+CANVAS_TILES: dict[str, CanvasFrameLook] = {
+    TILE_DEFAULT: CanvasFrameLook(_CANVAS_FILL, CANVAS_EDGE, CANVAS_GLOW, 1.0, None, BRACKETS_NONE),
+    TILE_FOCUSED: CanvasFrameLook(_CANVAS_FILL_FOCUS, CANVAS_EDGE_HI, CANVAS_GLOW, 1.5, CANVAS_EDGE_HI, BRACKETS_ALL),
+    TILE_NEEDS: CanvasFrameLook(_CANVAS_FILL_AMBER, QColor(CANVAS_AMBER), CANVAS_GLOW_AMBER, 1.0,
+                                QColor(CANVAS_AMBER_HI), BRACKETS_DIAGONAL),
+    TILE_NEEDS_FOCUS: CanvasFrameLook(_CANVAS_FILL_AMBER, QColor(CANVAS_AMBER), CANVAS_GLOW_AMBER, 1.3,
+                                      QColor(CANVAS_AMBER_HI), BRACKETS_ALL),
+    TILE_NEEDS_SELECTED: CanvasFrameLook(_CANVAS_FILL_AMBER, QColor(CANVAS_AMBER_HI), CANVAS_GLOW_AMBER, 1.7,
+                                         QColor("#FFFFFF"), BRACKETS_ALL),
+    TILE_DONE: CanvasFrameLook(_CANVAS_FILL, alpha(OK, 0.40), (98, 230, 176), 0.4, None, BRACKETS_NONE),
+    TILE_ERROR: CanvasFrameLook(_CANVAS_FILL_ALERT, alpha(ALERT, 0.75), (255, 107, 94), 0.8, QColor(ALERT_HI),
+                                BRACKETS_DIAGONAL),
+    TILE_INFO: CanvasFrameLook(_CANVAS_FILL, CANVAS_LINE, CANVAS_GLOW, 0.0, None, BRACKETS_NONE),
+    TILE_STEEL: CanvasFrameLook(_CANVAS_FILL, alpha(STEEL, 0.55), CANVAS_GLOW, 0.0, None, BRACKETS_NONE),
+}
+# A screen's own panel (Settings, Memory, Agents...): a resting frame with its four corner ticks in its edge's light.
+CANVAS_PANEL = CanvasFrameLook(_CANVAS_FILL, CANVAS_EDGE, CANVAS_GLOW, 1.0, QColor(255, 255, 255, 150), BRACKETS_ALL)
+# A selected row in a screen's list (Settings' groups): lit, square, no ticks.
+CANVAS_SELECTED = CanvasFrameLook(QColor(53, 211, 240, 26), CANVAS_EDGE, CANVAS_GLOW, 0.8, None, BRACKETS_NONE)
+# A drawer over the canvas (History, the Day): an opaque frame with its corner ticks.
+CANVAS_DRAWER = CanvasFrameLook(QColor(2, 8, 11), CANVAS_EDGE, CANVAS_GLOW, 1.2, QColor(255, 255, 255, 170),
+                                BRACKETS_ALL)
+
+
+def canvas_tone_frame(color: str | QColor) -> CanvasFrameLook:
+    """A row's frame in the canvas look whose edge takes the row's tone (the hologram's coloured bar at the left is
+    not drawn): cyan the frames' own edge, amber what waits, steel a quiet one with no glow."""
+    c = QColor(color)
+    if c == QColor(HOLO):
+        return CanvasFrameLook(_CANVAS_FILL, CANVAS_EDGE, CANVAS_GLOW, 0.9, None, BRACKETS_NONE)
+    if c == QColor(STEEL):
+        return CanvasFrameLook(_CANVAS_FILL, alpha(STEEL, 0.55), CANVAS_GLOW, 0.0, None, BRACKETS_NONE)
+    rgb = (c.red(), c.green(), c.blue())
+    fill = _CANVAS_FILL_AMBER if c == QColor(AMBER) else _CANVAS_FILL
+    return CanvasFrameLook(fill, alpha(c, 0.8), rgb, 0.8, None, BRACKETS_NONE)
+
+
+CANVAS_GLOW_DEPTH = 18.0     # the inner glow's reach (board.css: inset 0 0 22px)
+
+
+def paint_canvas_glow(painter: QPainter, rect: QRectF, rgb: tuple[int, int, int], strength: float, *,
+                      depth: float = CANVAS_GLOW_DEPTH) -> None:
+    """The canvas frame's inner glow: light falling off from each edge inward (four gradient strips, no blur)."""
+    if strength <= 0.0 or rect.width() < 4 or rect.height() < 4:
+        return
+    depth = min(depth, rect.width() / 2, rect.height() / 2)
+    top = QColor(*rgb, max(0, min(255, round(255 * 0.11 * strength))))
+    clear = QColor(*rgb, 0)
+    for edge in ("top", "bottom", "left", "right"):
+        if edge == "top":
+            band, start, end = QRectF(rect.left(), rect.top(), rect.width(), depth), rect.topLeft(), \
+                QPointF(rect.left(), rect.top() + depth)
+        elif edge == "bottom":
+            band, start, end = QRectF(rect.left(), rect.bottom() - depth, rect.width(), depth), rect.bottomLeft(), \
+                QPointF(rect.left(), rect.bottom() - depth)
+        elif edge == "left":
+            band, start, end = QRectF(rect.left(), rect.top(), depth, rect.height()), rect.topLeft(), \
+                QPointF(rect.left() + depth, rect.top())
+        else:
+            band, start, end = QRectF(rect.right() - depth, rect.top(), depth, rect.height()), rect.topRight(), \
+                QPointF(rect.right() - depth, rect.top())
+        gradient = QLinearGradient(start, end)
+        gradient.setColorAt(0.0, top)
+        gradient.setColorAt(0.35, QColor(*rgb, top.alpha() // 3))
+        gradient.setColorAt(1.0, clear)
+        painter.fillRect(band, QBrush(gradient))
+
+
+def paint_canvas_ticks(painter: QPainter, rect: QRectF, color: QColor, corners: str = BRACKETS_ALL, *,
+                       leg: float = CANVAS_TICK, width: float = 1.5) -> None:
+    """The canvas frame's corner ticks: square L marks on the corners (inside ``rect``)."""
+    paint_brackets(painter, rect, color, leg=leg, radius=0.0, corners=corners, width=width)
+
+
+def paint_canvas_frame(painter: QPainter, rect: QRectF | QRect, look: CanvasFrameLook, *,
+                       opacity: float = 1.0) -> None:
+    """A canvas frame in ``rect``: square, its fill, its inner glow, a 1 px bright edge, its ticks."""
+    rect = QRectF(rect)
+    painter.save()
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        painter.setOpacity(painter.opacity() * opacity)
+        painter.fillRect(rect, look.fill)
+        paint_canvas_glow(painter, rect.adjusted(1, 1, -1, -1), look.glow, look.strength)
+        painter.setPen(QPen(look.edge, 1.0))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(rect.adjusted(0.5, 0.5, -0.5, -0.5))
+        if look.tick is not None:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            paint_canvas_ticks(painter, rect, look.tick, look.corners)
+    finally:
+        painter.restore()
+
+
+def paint_canvas_tile(painter: QPainter, rect: QRectF | QRect, state: str = TILE_DEFAULT, *,
+                      opacity: float = 1.0) -> CanvasFrameLook:
+    """A tile of ``state`` in the canvas look (paint_tile's canvas form). Returns its look."""
+    look = CANVAS_TILES.get(state, CANVAS_TILES[TILE_DEFAULT])
+    paint_canvas_frame(painter, rect, look, opacity=opacity)
+    return look
 
 # --------------------------------------------------------------------------
 # Icons (24-unit viewBox stroke glyphs)
@@ -863,17 +1067,48 @@ ICONS: dict[str, tuple[str, ...]] = {
     # Meetings (a microphone; a record dot).
     "meetings": ("M12 3.5a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0v-5a3 3 0 0 0-3-3z", "M6 11a6 6 0 0 0 12 0",
                  "M12 17v3.5M8.5 20.5h7"),
+    # Agents (the standing agents and rules: a clock whose hand comes round again).
+    "agents": ("M20 12a8 8 0 1 1-2.45-5.75", "M20 4.5v4.5h-4.5", "M12 8v4l2.6 1.6"),
     "record": ("M12 6a6 6 0 1 0 0 12a6 6 0 1 0 0-12z",),
+    # Documents (build plan item 5: a page with its folded corner over a second page).
+    "documents": ("M9 3.5h7l3.5 3.5v10.5a.5.5 0 0 1-.5.5H9a.5.5 0 0 1-.5-.5V4a.5.5 0 0 1 .5-.5z", "M16 3.5V7h3.5",
+                  "M5.5 7.5v12.5a.5.5 0 0 0 .5.5h9", "M11 11h5.5M11 14h4"),
     # Desktop (the Switch prototype's monitor: the Dock's switch to the HUD).
     "desktop": ("M4.5 4.5h15a1.5 1.5 0 0 1 1.5 1.5v8.5a1.5 1.5 0 0 1-1.5 1.5h-15a1.5 1.5 0 0 1-1.5-1.5V6"
                 "a1.5 1.5 0 0 1 1.5-1.5z", "M8.5 20h7M12 16v4"),
     # The HUD's "Bring Jarvis back" (Switch.dc.html: a window with its title bar).
     "window": ("M5.5 4.5h13a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2z", "M3.5 9h17",
                "M6.5 6.8h.01M9 6.8h.01"),
+    # The board (the new look): a frame's Pin and Open big.
+    "pin": ("M9.5 4h5", "M10.5 4v4.5l-3 3.5h9l-3-3.5V4", "M12 12v8"),
+    "expand": ("M14 4h6v6", "M10 20H4v-6", "M20 4l-6 6", "M4 20l6-6"),
+    # ... and its kinds' glyphs (DESIGN-SPEC 3.2: a mail, a mail list, to-dos, a picture), and the second screen's
+    # "Text hidden on this screen" (an eye, struck through).
+    "mail": ("M5.5 6h13a2 2 0 0 1 2 2v8.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z", "M4 7.5l8 6 8-6"),
+    "inbox": ("M4 13.5l2.5-8h11l2.5 8v5H4z", "M4 13.5h4.5l1 2h5l1-2H20"),
+    "todos": ("M5 4.5h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1z", "M13.5 7.5H20",
+              "M4.5 16l2 2 3.5-4", "M13.5 16.5H20"),
+    "image": ("M5.5 5h13a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z",
+              "M7.4 10a1.6 1.6 0 1 0 3.2 0a1.6 1.6 0 1 0-3.2 0z", "M20 15.5l-4.5-4.5L7 19"),
+    "hidden": ("M3 12c2.2-3.6 5.4-5.5 9-5.5s6.8 1.9 9 5.5c-2.2 3.6-5.4 5.5-9 5.5S5.2 15.6 3 12z",
+               "M9.5 12a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0z", "M4.5 19.5l15-15"),
+    # The board (part 5a): a panel beside a column - the header's Board button, "9 on the board", a turn's frames.
+    "board": ("M5.5 5h13a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z", "M10 5v14",
+              "M13 9.5h4.5M13 13h4.5"),
+    # Part 6, Ask's typed frames (the design's own glyphs): a chart's bars on their axis, a table's grid, a timeline's
+    # dates on a line, and maths' sigma.
+    "chart": ("M4 5v15h16", "M7.5 9h6M7.5 13h10M7.5 17h4"),
+    "table": ("M5 5h14a1.5 1.5 0 0 1 1.5 1.5v11a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5v-11A1.5 1.5 0 0 1 5 5z",
+              "M3.5 9.5h17M9.5 5v14M3.5 14.2h17"),
+    "timeline": ("M3 12h18", "M4 12a2 2 0 1 0 4 0a2 2 0 1 0-4 0z", "M11 12a2 2 0 1 0 4 0a2 2 0 1 0-4 0z",
+                 "M17.8 12a1.2 1.2 0 1 0 2.4 0a1.2 1.2 0 1 0-2.4 0z"),
+    "maths": ("M17 5H7l6 7-6 7h10",),
 }
 FILLED_ICONS: dict[str, str] = {
     "play": "M8 5.5v13l10.5-6.5z",
     "play_lg": "M7.5 5.2v13.6L18.5 12z",
+    "diamond": "M12 4l8 8-8 8-8-8z",     # waits on the owner: a shape as well as a colour (the board, the chips)
+    "delta": "M12 6l6 11H6z",            # part 6: a changed figure's delta line ("+500 Software · was 2.9k on Friday")
 }
 
 
@@ -945,7 +1180,8 @@ def status_badge_width(text: str, dot: bool = False) -> float:
 
 def paint_status_badge(painter: QPainter, left_center: QPointF, text: str, tone: str = TONE_CYAN, *,
                        dot: bool = False) -> float:
-    """A status badge (height 20, radius 4, 1 px border at 45 %, fill 8 %); returns its width."""
+    """A status badge (height 20, radius 4 - square in the canvas look, as the mock's - 1 px border at 45 %, fill
+    8 %); returns its width."""
     signal, ink = _TONES.get(tone, _TONES[TONE_CYAN])
     width = status_badge_width(text, dot)
     rect = QRectF(left_center.x(), left_center.y() - BADGE_HEIGHT / 2, width, BADGE_HEIGHT)
@@ -954,7 +1190,8 @@ def paint_status_badge(painter: QPainter, left_center: QPointF, text: str, tone:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setPen(QPen(alpha(signal, 0.45), 1.0))
         painter.setBrush(alpha(signal, 0.08))
-        painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), RADIUS_BADGE, RADIUS_BADGE)
+        radius = CANVAS_RADIUS if _canvas_look else RADIUS_BADGE
+        painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
         x = rect.left() + 7
         if dot:
             painter.setPen(Qt.PenStyle.NoPen)
@@ -1131,6 +1368,65 @@ BUTTON_LOOKS: dict[str, ButtonLook] = {
 }
 
 
+def _canvas_button(rgb: tuple[int, int, int], fill: float, border: QColor, label: str, hover_fill: float,
+                   hover_border: QColor, hover_label: str) -> ButtonLook:
+    def wash(a: float) -> QColor:
+        return QColor(*rgb, round(255 * a))
+
+    return ButtonLook((wash(fill), border, QColor(label)), (wash(hover_fill), hover_border, QColor(hover_label)),
+                      (wash(hover_fill + 0.08), hover_border, QColor(hover_label)), None, 600)
+
+
+# The canvas look's buttons: the mock's .btn (a square outline with a soft glow, small mono caps), amber only for what
+# the owner commits to, coral for what cannot be undone. Links stay links.
+_AMBER_RGB, _ALERT_RGB = (245, 177, 74), (255, 107, 94)
+CANVAS_BUTTON_LOOKS: dict[str, ButtonLook] = {
+    GHOST: _canvas_button(CANVAS_GLOW, 0.04, QColor(143, 235, 255, 178), CANVAS_INK, 0.12, CANVAS_EDGE_HI,
+                          "#FFFFFF"),
+    ICON: _canvas_button(CANVAS_GLOW, 0.04, QColor(143, 235, 255, 128), CANVAS_INK, 0.12, CANVAS_EDGE_HI, "#FFFFFF"),
+    GO: _canvas_button(CANVAS_GLOW, 0.18, QColor("#8FEBFF"), "#FFFFFF", 0.28, CANVAS_EDGE_HI, "#FFFFFF"),
+    AMBER_COMMIT: _canvas_button(_AMBER_RGB, 0.24, QColor(CANVAS_AMBER), "#FFE2B0", 0.34,
+                                 QColor(CANVAS_AMBER_HI), "#FFFFFF"),
+    AMBER_GHOST: _canvas_button(_AMBER_RGB, 0.04, QColor(245, 177, 74, 153), "#FFE2B0", 0.12,
+                                QColor(CANVAS_AMBER_HI), "#FFFFFF"),
+    DANGER: _canvas_button(_ALERT_RGB, 0.16, QColor(ALERT), ALERT_TX, 0.26, QColor(ALERT_HI), "#FFFFFF"),
+    DANGER_GHOST: _canvas_button(_ALERT_RGB, 0.04, alpha(ALERT, 0.6), ALERT_TX, 0.12, QColor(ALERT_HI), "#FFFFFF"),
+    LINK: BUTTON_LOOKS[LINK],
+    LINK_CYAN: BUTTON_LOOKS[LINK_CYAN],
+}
+CANVAS_BUTTON_GLOW: dict[str, tuple[tuple[int, int, int], float]] = {
+    GHOST: (CANVAS_GLOW, 0.25), ICON: (CANVAS_GLOW, 0.18), GO: (CANVAS_GLOW, 0.45),
+    AMBER_COMMIT: (_AMBER_RGB, 0.45), AMBER_GHOST: (_AMBER_RGB, 0.3), DANGER: (_ALERT_RGB, 0.35),
+    DANGER_GHOST: (_ALERT_RGB, 0.25),
+}
+CANVAS_BUTTON_TRACKING = 0.16      # em (the mock's .btn: .18em at 9.5 px; a little less at 11 px)
+
+
+def button_look(variant: str) -> ButtonLook:
+    """The variant's look now (the canvas look's own while it is on)."""
+    table = CANVAS_BUTTON_LOOKS if _canvas_look else BUTTON_LOOKS
+    return table.get(variant, table[GHOST])
+
+
+def canvas_button_font(small: bool = False) -> QFont:
+    """The canvas look's button words: JetBrains Mono 600, caps (the caller upper-cases), wide tracking."""
+    return hud.mono_font(10 if small else 11, 600, CANVAS_BUTTON_TRACKING)
+
+
+def paint_canvas_button_glow(painter: QPainter, rect: QRectF, variant: str, hover: float = 0.0) -> None:
+    """The mock's ``box-shadow: 0 0 8px``: two soft rings just outside a canvas button (inside its ring margin)."""
+    rgb, strength = CANVAS_BUTTON_GLOW.get(variant, (CANVAS_GLOW, 0.0))
+    strength *= 1.0 + 0.6 * hover
+    if strength <= 0.0:
+        return
+    painter.save()
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    for grow, width, share in ((1.5, 2.0, 0.55), (3.0, 2.0, 0.22)):
+        painter.setPen(QPen(QColor(*rgb, max(0, min(255, round(255 * strength * share)))), width))
+        painter.drawRect(rect.adjusted(-grow + 0.5, -grow + 0.5, grow - 0.5, grow - 0.5))
+    painter.restore()
+
+
 class HoloButton(QAbstractButton):
     """One button for every variant of spec 6 (QPainter only).
 
@@ -1189,12 +1485,29 @@ class HoloButton(QAbstractButton):
     # ---- geometry -------------------------------------------------------------
 
     def _font(self) -> QFont:
+        if _canvas_look and self._variant not in (LINK, LINK_CYAN):
+            return canvas_button_font(self._size == SIZE_SM)
         look = BUTTON_LOOKS[self._variant]
         role = "button_sm" if self._size == SIZE_SM else "button"
         return font(role, 600 if look.weight == 600 else None)
 
+    def shown_text(self) -> str:
+        """The words as drawn (the canvas look: caps)."""
+        if _canvas_look and self._variant not in (LINK, LINK_CYAN):
+            return self.text().upper()
+        return self.text()
+
     def _round(self) -> bool:
+        """Sized as a disc (an icon button, a large one); the canvas look draws an icon button square (_radius)."""
         return self._variant == ICON or self._size == SIZE_LG
+
+    def _radius(self, rect: QRectF) -> float:
+        """The drawn corner: round buttons stay round; the canvas look squares the rest, icon buttons too."""
+        if _canvas_look and (self._variant == ICON or not self._round()):
+            return 1.0
+        if self._round():
+            return rect.height() / 2
+        return RADIUS_BUTTON_SM if self._size == SIZE_SM else RADIUS_BUTTON
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
         m = 2 * self.MARGIN
@@ -1207,7 +1520,7 @@ class HoloButton(QAbstractButton):
         metrics = QFontMetricsF(self._font())
         pad = 16 if self._size == SIZE_MD else 12
         lead = (pad - 3 if self._size == SIZE_MD else pad - 2) if self._icon else pad
-        width = lead + pad + metrics.horizontalAdvance(self.text()) + (24 if self._icon else 0)
+        width = lead + pad + metrics.horizontalAdvance(self.shown_text()) + (24 if self._icon else 0)
         return QSize(max(64, math.ceil(width)) + m, self._size + m)
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
@@ -1266,7 +1579,7 @@ class HoloButton(QAbstractButton):
 
     def colors(self) -> tuple[QColor, QColor, QColor]:
         """(fill, border, label) for the current hover / pressed state."""
-        look = BUTTON_LOOKS[self._variant]
+        look = button_look(self._variant)
         if self.isDown() and self.isEnabled():
             return look.pressed
         if self._hover <= 0.0:
@@ -1274,7 +1587,7 @@ class HoloButton(QAbstractButton):
         return tuple(mix(a, b, self._hover) for a, b in zip(look.rest, look.hover))  # type: ignore[return-value]
 
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
-        look = BUTTON_LOOKS[self._variant]
+        look = button_look(self._variant)
         fill, border, label = self.colors()
         rect = self.button_rect()
         painter = QPainter(self)
@@ -1282,8 +1595,9 @@ class HoloButton(QAbstractButton):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             if not self.isEnabled():
                 painter.setOpacity(0.45)
-            radius = rect.height() / 2 if self._round() else (RADIUS_BUTTON_SM if self._size == SIZE_SM
-                                                               else RADIUS_BUTTON)
+            radius = self._radius(rect)
+            if _canvas_look and radius <= 1.0:
+                paint_canvas_button_glow(painter, rect, self._variant, self._hover if self.isEnabled() else 0.0)
             if look.ring is not None and self._hover > 0.0 and self.isEnabled():
                 ring = QColor(look.ring)
                 ring.setAlphaF(ring.alphaF() * self._hover)
@@ -1319,9 +1633,10 @@ class HoloButton(QAbstractButton):
             box = QRectF(x + lead, rect.center().y() - 8, 16, 16)
             paint_icon(painter, box, self._icon, label, stroke=1.9)
             text_rect = QRectF(box.right() + 8, rect.top(), rect.right() - box.right() - 8, rect.height())
-            painter.drawText(text_rect, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), self.text())
+            painter.drawText(text_rect, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                             self.shown_text())
         else:
-            painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), self.text())
+            painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), self.shown_text())
 
 # --------------------------------------------------------------------------
 # Action chip (spec 7)
@@ -1339,17 +1654,21 @@ class ActionChip(QAbstractButton):
     """The pill on Home ("Briefing ready" or "2 need your OK" + a chevron): 32 high, the chevron trailing.
 
     ``ping`` adds the leading cyan dot that pings three times when the chip appears (not in
-    reduced motion). Same ``MARGIN`` convention as HoloButton.
+    reduced motion). An amber chip leads with the drawn diamond (the new look: what waits on the owner is a shape as
+    well as a colour, everywhere); ``icon`` leads with that glyph instead ("9 on the board": the board's).
+    Same ``MARGIN`` convention as HoloButton.
     """
 
     MARGIN = 4
     HEIGHT = 32
+    LEAD = 15                       # the leading mark (dot, diamond or glyph) and its gap
 
-    def __init__(self, text: str = "", tone: str = CHIP_CYAN, *, ping: bool = False,
+    def __init__(self, text: str = "", tone: str = CHIP_CYAN, *, ping: bool = False, icon: str | None = None,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._tone = tone if tone in _CHIP_LOOKS else CHIP_CYAN
         self._ping = ping
+        self._icon = icon if icon in ICONS else None
         self._hover = 0.0
         self._focus_ring = False
         self._ping_progress = -1.0
@@ -1393,9 +1712,17 @@ class ActionChip(QAbstractButton):
         self._hover = value
         self.update()
 
+    def _lead(self) -> str:
+        """The leading mark: "dot" (ping), "diamond" (amber), "icon" or "" (none)."""
+        if self._ping:
+            return "dot"
+        if self._tone == CHIP_AMBER:
+            return "diamond"
+        return "icon" if self._icon else ""
+
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
         metrics = QFontMetricsF(font("button_sm"))
-        width = 13 + (15 if self._ping else 0) + metrics.horizontalAdvance(self.text()) + 8 + 13 + 10
+        width = 13 + (self.LEAD if self._lead() else 0) + metrics.horizontalAdvance(self.text()) + 8 + 13 + 10
         return QSize(math.ceil(width) + 2 * self.MARGIN, self.HEIGHT + 2 * self.MARGIN)
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
@@ -1436,7 +1763,7 @@ class ActionChip(QAbstractButton):
         border, fill, label, hover_fill, hover_label = _CHIP_LOOKS[self._tone]
         m = self.MARGIN
         rect = QRectF(self.rect()).adjusted(m, m, -m, -m)
-        radius = rect.height() / 2
+        radius = 1.0 if _canvas_look else rect.height() / 2       # (the canvas look: square, as its frames)
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -1444,13 +1771,19 @@ class ActionChip(QAbstractButton):
             painter.setBrush(mix(fill, hover_fill, self._hover))
             painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
             x = rect.left() + 13
-            if self._ping:
+            lead = self._lead()
+            if lead == "dot":
                 center = QPointF(x + 3.5, rect.center().y())
                 paint_ping(painter, center, self._ping_progress)
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(QColor(HOLO))
                 painter.drawEllipse(center, 3.5, 3.5)
-                x += 15
+            elif lead == "diamond":       # waits on the owner: the drawn diamond, not a dot
+                paint_icon(painter, QRectF(x - 1, rect.center().y() - 5, 10, 10), "diamond", AMBER)
+            elif lead == "icon":
+                paint_icon(painter, QRectF(x - 2, rect.center().y() - 6.5, 13, 13), self._icon or "", HOLO_LO)
+            if lead:
+                x += self.LEAD
             ink = mix(label, hover_label, self._hover)
             painter.setFont(font("button_sm"))
             painter.setPen(ink)
@@ -1484,19 +1817,25 @@ def paint_button_face(painter: QPainter, rect: QRectF, variant: str, *, hover: b
     """A spec 6 button drawn into ``rect`` (the button itself, without ring room) for widgets that keep their
     own class (the approval card's buttons): the variant's fill, border and label, the 3 px hover ring of a
     commit / go / danger button, 45 % when disabled and the keyboard focus ring. A link is its text alone."""
-    look = BUTTON_LOOKS.get(variant, BUTTON_LOOKS[GHOST])
+    look = button_look(variant)
     if down and enabled:
         fill, border, label = look.pressed
     elif hover and enabled:
         fill, border, label = look.hover
     else:
         fill, border, label = look.rest
-    radius = RADIUS_BUTTON_SM if small else RADIUS_BUTTON
+    link = variant in (LINK, LINK_CYAN)
+    canvas = _canvas_look and not link
+    radius = 1.0 if canvas else (RADIUS_BUTTON_SM if small else RADIUS_BUTTON)
+    if canvas:
+        text = text.upper()
     painter.save()
     try:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         if not enabled:
             painter.setOpacity(painter.opacity() * 0.45)
+        if canvas:
+            paint_canvas_button_glow(painter, rect, variant, 1.0 if hover and enabled else 0.0)
         if look.ring is not None and hover and enabled:
             painter.setPen(QPen(look.ring, 3.0))
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -1504,9 +1843,11 @@ def paint_button_face(painter: QPainter, rect: QRectF, variant: str, *, hover: b
         painter.setPen(QPen(border, 1.0) if border.alpha() else Qt.PenStyle.NoPen)
         painter.setBrush(fill)
         painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
-        link = variant in (LINK, LINK_CYAN)
-        use = QFont(text_font) if text_font is not None else font("button_sm" if small else "button",
-                                                                    600 if look.weight == 600 else None)
+        if canvas:
+            use = canvas_button_font(small)
+        else:
+            use = QFont(text_font) if text_font is not None else font("button_sm" if small else "button",
+                                                                        600 if look.weight == 600 else None)
         use.setUnderline(link)
         painter.setFont(use)
         painter.setPen(label)

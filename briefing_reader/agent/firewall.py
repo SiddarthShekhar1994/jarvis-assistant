@@ -11,7 +11,9 @@ never the size of the taint set, which a note holding only short words leaves em
     ReadWords()                  runs of other people's words this run has read: feed(text), holds(line)
     looks_encoded(query)         a query that looks like data rather than words
     decoded_forms(text)          ``text`` and what it decodes to, percent-encoded any number of times
-    WebFirewall(book)            policy.Firewall for the web tools:
+    WebFirewall(book, link_of=)  policy.Firewall for the web tools (and a drive click on a link: ``link_of(ref)``, the
+                                 address that link opens, agent.drive.DriveSession.link_address, is judged exactly as
+                                 open_page's; any other drive call goes to the owner's Send card instead):
         attach(ask)              how it asks the owner: the run's ask_web(text, choices, on_answer)
         owner_said(words, answer=)   the owner's words: what is not tainted now never taints, and while the run holds
                                  nothing private their addresses count as seen; said() gives them back, joined, and
@@ -88,7 +90,9 @@ has read only the calendar, contacts, notes or names) a paraphrase, a word with 
 go out with no card, and a strict run still passes anything spelled in common words (an acrostic, yes and no as bits, a
 letter's case, one mark on a word, the runs of marks ordinary writing uses). A page can offer links whose choice says
 something (each is an address seen). The address rule and the window's having no way to type or post are the strong
-parts; this is a net under them, not a proof.
+parts; this is a net under them, not a proof. Once the drive tools are on (agent.drive), the seal is the strong part in
+place of "no way to type or post": nothing typed into a page can leave this PC before the owner's click on its Send
+card, which shows every value exactly and tags the ones this taint set hits (taint.hits, handed to the card's plan).
 """
 
 from __future__ import annotations
@@ -485,7 +489,7 @@ def _declined_key(call: tuple[str, str]) -> tuple[str, str]:
     name, exact = call
     if name == "web_search":
         return name, " ".join(exact.split()).casefold()
-    if name in ("open_page", "open_thing", "fetch_text"):
+    if name in ("open_page", "open_thing", "fetch_text", "click"):
         return ADDRESS_KEY, normalize_url(exact.partition(FETCH_JOIN)[0])
     return call
 
@@ -842,8 +846,10 @@ class WebFirewall:
     """See the module docs. Thread-safe: its own lock is never held while it asks the run, and the run may tell it the
     answer while holding the run's."""
 
-    def __init__(self, book: AddressBook, taint: TaintSet | None = None) -> None:
+    def __init__(self, book: AddressBook, taint: TaintSet | None = None,
+                 link_of: Callable[[Any], str] | None = None) -> None:
         self.book = book
+        self.link_of = link_of           # a drive click's ref -> the address its link opens ("" for no link)
         self.taint = taint if taint is not None else TaintSet()
         self._lock = threading.Lock()
         self._ask: Callable[[str, tuple[str, ...], Callable[[bool], None]], bool] | None = None
@@ -964,6 +970,13 @@ class WebFirewall:
             if isinstance(address, str) and isinstance(question, str) and question.strip() \
                     and len(question) <= FETCH_QUESTION_CAP and not web_link_problem(address):
                 return FETCH_CARD, f"{address}{FETCH_JOIN}{' '.join(question.split())}"
+        if tool.name == "click" and self.link_of is not None:     # a link opens a page: open_page's rules
+            try:
+                address = self.link_of(args.get("ref"))
+            except Exception:  # noqa: BLE001 - no address read: the click itself refuses what it can't open
+                address = ""
+            if isinstance(address, str) and address and not web_link_problem(address):
+                return OPEN_CARD, address
         if tool.name == "open_thing":         # a site, under open_page's rules; a ref leaves this PC for nothing
             address = args.get("site")
             if isinstance(address, str) and address and not web_link_problem(address):

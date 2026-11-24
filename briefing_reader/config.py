@@ -1,6 +1,6 @@
 """Configuration, application paths and logging for briefing-reader.
 
-Settings come from three places:
+Settings come from four places:
 
 * ``.env`` in the project folder, loaded into the process environment without
   overriding variables that are already set: ``NOTION_TOKEN`` and
@@ -14,7 +14,9 @@ Settings come from three places:
   agenda, display, Ask Jarvis (``[ask]``, off by default), assistant (``[assistant]``: how
   Jarvis speaks on his own), LIVE view (``[live]``: the tab that shows every step Jarvis
   takes, on screen only) and screen (``[ui]``: how much the hologram moves) options. Which
-  Google account an alias is never goes here: the sign-ins live in %LOCALAPPDATA%\\briefing-reader.
+  Google account an alias is never goes here: the sign-ins live in %LOCALAPPDATA%\\briefing-reader;
+* ``settings.json`` in that data folder (overrides.py): the comfort settings changed in the app's Settings, merged
+  into config.toml's values before the parsers run (config.toml < settings.json; never an ``enabled``).
 
 A bad setting never stops the app: invalid values are logged as warnings and
 replaced by their defaults. The Notion token is never logged. As soon as it is
@@ -91,12 +93,16 @@ MOTION_LIVELY = "lively"       # [ui] motion: screen changes wipe and assemble, 
 MOTION_CALM = "calm"           # slower, fewer effects (fades only)
 MOTION_OFF = "off"             # no entrance or transition effects
 MOTION_CHOICES = (MOTION_LIVELY, MOTION_CALM, MOTION_OFF)
+SOUNDS_SOFT = "soft"           # [look] sounds: Jarvis's soft sounds made in code (sounds.py)
+SOUNDS_OFF = "off"             # none of them ("Hey Jarvis"'s chime keeps its own rules)
+SOUNDS_CHOICES = (SOUNDS_SOFT, SOUNDS_OFF)
 # What an account may do (google_auth.FEATURE_SCOPES has the scopes of each): "calendar" answers
 # invitations and moves or cancels events; "gmail_send" sends the replies and emails you approve;
 # "gmail_read" lets Ask Jarvis read the Gmail threads your request is about (read only; never used
 # to send, and nothing it reads is saved or logged); with the productivity bundle it also covers the
 # follow-up list's header scan (headers only, last 14 days), meeting prep reads and nudge drafts.
-ACCOUNT_FEATURES = ("calendar", "gmail_send", "gmail_read")
+# gmail_tidy: a standing rule may star, label or archive the mail it matched (its own sign-in per account).
+ACCOUNT_FEATURES = ("calendar", "gmail_send", "gmail_read", "gmail_tidy")
 BACKEND_GOOGLE = "google"
 BACKEND_COMPOSIO = "composio"     # accepted, but not built into this version
 ACCOUNT_BACKENDS = (BACKEND_GOOGLE, BACKEND_COMPOSIO)
@@ -106,7 +112,8 @@ UNDO_SECONDS_RANGE = (3, 30)
 _MISSING = object()
 _KNOWN_TABLES = ("voice", "prompt", "polling", "sections", "notion", "calendar", "actions",
                  "accounts", "schedule", "hotkey", "agenda", "display", "ask", "research", "assistant", "live",
-                 "productivity", "ui", "meetings", "desktop", "agent", "talk", "instant")
+                 "productivity", "ui", "meetings", "desktop", "agent", "talk", "instant", "standing", "look",
+                 "docs")
 # Library loggers kept at WARNING, also under --debug. The Google sign-in libraries log the
 # authorization code, the access token and the refresh token at DEBUG (requests_oauthlib),
 # before Jarvis could register them for redaction, so they never get DEBUG here.
@@ -136,6 +143,7 @@ class VoiceConfig:
     engine: str = VOICE_ENGINE_LOCAL          # VOICE_ENGINES: "local" (this PC) or "online" (Microsoft's edge-tts)
     local_voice: str = DEFAULT_LOCAL_VOICE    # one of LOCAL_VOICES
     keep_warm_minutes: int = 0                # the local voice is let go after this many quiet minutes; 0 = never
+    quiet_in_calls: bool = True               # captions only while another app uses the microphone (calls.py)
 
 
 @dataclass(frozen=True)
@@ -266,6 +274,18 @@ class UiConfig:
     "Show animations in Windows" off counts as off too). true / false are read as "lively" / "off"."""
 
     motion: str = MOTION_LIVELY
+
+
+@dataclass(frozen=True)
+class LookConfig:
+    """``[look]``: the new look's switches. ``sounds`` is "soft" (the few soft sounds made in code, silent whenever
+    quiet is wanted) or "off" (true / false read as "soft" / "off"); Settings > Look can also turn them off on this
+    PC. ``board`` false keeps Home as it was (no board beside the conversation). ``second_screen`` true shows Jarvis
+    on a second monitor (also Settings > Look)."""
+
+    sounds: str = SOUNDS_SOFT
+    board: bool = True
+    second_screen: bool = False
 
 
 # Ask Jarvis ([ask]): the planner is your own signed-in Claude Code CLI on your claude.ai plan.
@@ -452,7 +472,8 @@ class DesktopConfig:
 
 
 # Jarvis, a true agent ([agent]): a task worked out step by step by the owner's Claude Code over Jarvis's own tools.
-AGENT_RANGES = {"max_turns": (5, 1000), "max_minutes": (1, 240), "tasks_per_day": (1, 200)}
+AGENT_RANGES = {"max_turns": (5, 1000), "max_minutes": (1, 240), "tasks_per_day": (1, 200),
+                "max_pages": (5, 400), "max_actions": (10, 1000), "max_sends": (1, 50)}
 AGENT_EFFORTS = ("", "low", "medium", "high", "xhigh", "max")      # "" = Claude Code's default
 AGENT_SEARCH_ENGINES = ("duckduckgo", "bing", "google")
 # What a task may read of the owner's things ([agent] private): an entry that is none of these grants nothing.
@@ -476,11 +497,59 @@ class AgentConfig:
     workspace: str = field(default="", repr=False)   # "" = Jarvis\Workspace in your user folder; never under OneDrive
     private: tuple[str, ...] = AGENT_PRIVATE         # what a task may read of the owner's things (AGENT_PRIVATE)
     speak_private: bool = False    # true: a line that may hold something private is said too (agent_ui.spoken: off)
+    # Filling in pages (build plan item 7): only once the owner's Turn on covers it (consent version 4, desktop_ui).
+    drive: bool = True             # false: a task never types into a page, whatever the owner's OK
+    max_pages: int = 40            # pages a task opens before "Keep going?" (5..400)
+    max_actions: int = 150         # ... page actions: typing, choosing, clicking, scrolling, tabs (10..1000)
+    max_sends: int = 5             # ... Send cards (1..50)
+
+
+# Standing agents and rules ([standing], owner answers 2026-11-12): jobs that wake on their own and only propose.
+STANDING_RANGES = {"max_runs_per_day": (1, 200), "agent_runs_per_day": (1, 48), "rule_batch": (1, 8),
+                   "rule_checks_per_day": (1, 200), "tidy_per_day": (0, 200), "poll_minutes": (5, 60),
+                   "min_every_minutes": (30, 1440), "max_mail_per_run": (1, 50), "mail_chars": (500, 12000),
+                   "keep_days": (1, 30), "catch_up_hours": (0, 12), "timeout_seconds": (30, 600)}
+
+
+@dataclass(frozen=True)
+class StandingConfig:
+    """``[standing]``: standing agents and rules (off by default; JARVIS_STANDING_ENABLED overrides ``enabled``; they
+    also need [ask] on, for the owner's Claude Code). Each run is a planner mode with no tools: Jarvis reads the job's
+    sources himself, the run only proposes cards and writes a report, and a rule may star, label or archive the mail it
+    matched (the owner's choice of 2026-11-12, with an Undo receipt each). ``max_runs_per_day`` caps every Claude run of
+    every job together, by local date; ``agent_runs_per_day`` is each agent's own default cap; a rule checks at most
+    ``rule_batch`` mails in one run and ``rule_checks_per_day`` mails a day, and tidies at most ``tidy_per_day``. New
+    mail is looked for every ``poll_minutes`` (headers only), an interval job runs at most every
+    ``min_every_minutes``; a run missed by up to ``catch_up_hours`` runs once at wake. Reports, receipts and waiting
+    cards are kept ``keep_days`` on this PC. Between ``quiet_from`` and ``quiet_until`` nothing is said and Jarvis
+    never opens by himself; ``open_when_closed`` false keeps him closed at any time (the items wait for the next open).
+    """
+
+    enabled: bool = False
+    model: str = "sonnet"            # an agent's runs
+    rule_model: str = "haiku"        # a rule's checks (one yes/no and typed values per mail)
+    max_runs_per_day: int = 30
+    agent_runs_per_day: int = 6
+    rule_batch: int = 8
+    rule_checks_per_day: int = 40
+    tidy_per_day: int = 40
+    poll_minutes: int = 5
+    min_every_minutes: int = 30
+    max_mail_per_run: int = 20
+    mail_chars: int = 4000
+    keep_days: int = 7
+    catch_up_hours: int = 3
+    quiet_from: str = "22:00"
+    quiet_until: str = "08:00"
+    open_when_closed: bool = True
+    timeout_seconds: int = 120
 
 
 DEFAULT_TALK_KEY = "ctrl+alt+space"   # owner decision 2026-11-09: tap it, speak, and a short quiet ends the talk
 TALK_MODELS = ("small.en", "base.en", "medium.en", "distil-large-v3")   # faster-whisper models (default: small.en)
 SPEECH_DEVICES = ("auto", "cpu")     # "auto": an NVIDIA GPU when it works (gpu.py), else the CPU; "cpu": never the GPU
+# Live captions while the owner talks (talk.CaptionPump): "auto" while the speech process runs on the GPU, "on", "off"
+LIVE_CAPTIONS = ("auto", "on", "off")
 TALK_RANGES = {"keep_warm_minutes": (1, 120), "quiet_ms": (300, 2000)}
 TALK_HINTS_MAX = 20                  # names the speech model should expect ("Jarvis" is always one)
 TALK_HINT_CHARS = 40
@@ -524,6 +593,18 @@ class TalkConfig:
     keep_warm_minutes: int = 10     # the speech model stays loaded this long after the last talk (1..120)
     quiet_ms: int = 500             # this much quiet after speech ends a talk (300..2000 ms)
     hints: tuple[str, ...] = ()     # names the speech model should expect, besides "Jarvis" (at most 20)
+    live_captions: str = "auto"     # one of LIVE_CAPTIONS: partial words on screen while the owner talks
+
+
+@dataclass(frozen=True)
+class DocsConfig:
+    """``[docs]``: documents and datasheets kept on this PC (build plan item 5; on by default; the table may be absent
+    from config.toml: these defaults hold). What the owner types is written at once; what Jarvis writes (an Ask, a
+    standing agent's run) waits as a change to Keep. ``export_folder`` ("" = Jarvis\\Exports in the user folder) is
+    only where an export's file picker starts; a folder OneDrive syncs is asked about first."""
+
+    enabled: bool = True
+    export_folder: str = field(default="", repr=False)
 
 
 @dataclass(frozen=True)
@@ -560,6 +641,13 @@ class Config:
     agent: AgentConfig = field(default_factory=AgentConfig)
     talk: TalkConfig = field(default_factory=TalkConfig)
     instant: InstantConfig = field(default_factory=InstantConfig)
+    standing: StandingConfig = field(default_factory=StandingConfig)
+    look: LookConfig = field(default_factory=LookConfig)
+    docs: DocsConfig = field(default_factory=DocsConfig)
+    # Settings changed in the app (overrides.py: settings.json in the data folder, merged before the parsers): the
+    # "table.key" names in use here, and what config.toml alone gives each of them. hash=False keeps Config hashable.
+    overridden: frozenset[str] = frozenset()
+    toml_values: Mapping[str, Any] = field(default_factory=_empty_mapping, hash=False)
 
     @property
     def notion_url(self) -> str:
@@ -658,6 +746,18 @@ def load_config(project_root: Path | None = None, *,
             logger.warning("config.toml: unknown setting %r ignored", name)
 
     data_dir = _data_dir_from(environ)
+    # Settings changed in the app win over config.toml (never over .env's JARVIS_*_ENABLED: no enabled is editable);
+    # merged here, before the parsers, so they pass the same checks. A bad value was left out by overrides.load.
+    from . import overrides
+
+    try:
+        changed_here = overrides.load(overrides.settings_file(data_dir))
+    except Exception as exc:  # noqa: BLE001 - load handles the file's own errors; nothing here may stop a start
+        logger.warning("Settings: settings.json was not used (%s); config.toml as it is", type(exc).__name__)
+        changed_here = {}
+    doc, overridden, toml_values = overrides.apply(doc, changed_here)
+    if overridden:
+        logger.info("Settings: %d value(s) changed here", len(overridden))
     hotkey = _parse_hotkey(doc)
     desktop = _parse_desktop(doc, environ, hotkey.combo)
     return Config(
@@ -691,6 +791,11 @@ def load_config(project_root: Path | None = None, *,
         agent=_parse_agent(doc, environ),
         talk=_parse_talk(doc, environ, hotkey.combo, desktop.hud_key),
         instant=_parse_instant(doc, environ),
+        standing=_parse_standing(doc, environ),
+        look=_parse_look(doc),
+        docs=_parse_docs(doc),
+        overridden=overridden,
+        toml_values=MappingProxyType(toml_values),
     )
 
 
@@ -961,6 +1066,7 @@ def _parse_voice(doc: Mapping[str, Any]) -> VoiceConfig:
         engine=r.choice("engine", d.engine, VOICE_ENGINES),
         local_voice=r.choice("local_voice", d.local_voice, LOCAL_VOICES),
         keep_warm_minutes=r.integer("keep_warm_minutes", d.keep_warm_minutes, *KEEP_WARM_RANGE),
+        quiet_in_calls=r.boolean("quiet_in_calls", d.quiet_in_calls),
     )
 
 
@@ -1141,6 +1247,20 @@ def _parse_ui(doc: Mapping[str, Any]) -> UiConfig:
     if isinstance(raw, bool):
         return UiConfig(motion=MOTION_LIVELY if raw else MOTION_OFF)
     return UiConfig(motion=r.choice("motion", d.motion, MOTION_CHOICES))
+
+
+def _parse_look(doc: Mapping[str, Any]) -> LookConfig:
+    """``[look]``: ``sounds`` (any case; true -> "soft", false -> "off"), ``board`` and ``second_screen``
+    (booleans); anything else is the default."""
+    d = LookConfig()
+    r = _TableReader(doc, "look", _field_names(LookConfig))
+    raw = r._get("sounds")
+    if isinstance(raw, bool):
+        sounds = SOUNDS_SOFT if raw else SOUNDS_OFF
+    else:
+        sounds = r.choice("sounds", d.sounds, SOUNDS_CHOICES)
+    return LookConfig(sounds=sounds, board=r.boolean("board", d.board),
+                      second_screen=r.boolean("second_screen", d.second_screen))
 
 
 ASK_ENABLED_ENV = "JARVIS_ASK_ENABLED"
@@ -1362,7 +1482,11 @@ def _parse_agent(doc: Mapping[str, Any], environ: Mapping[str, str] | None = Non
                        tasks_per_day=r.integer("tasks_per_day", d.tasks_per_day, *AGENT_RANGES["tasks_per_day"]),
                        search_engine=r.choice("search_engine", d.search_engine, AGENT_SEARCH_ENGINES),
                        workspace=workspace, private=private,
-                       speak_private=r.boolean("speak_private", d.speak_private))
+                       speak_private=r.boolean("speak_private", d.speak_private),
+                       drive=r.boolean("drive", d.drive),
+                       max_pages=r.integer("max_pages", d.max_pages, *AGENT_RANGES["max_pages"]),
+                       max_actions=r.integer("max_actions", d.max_actions, *AGENT_RANGES["max_actions"]),
+                       max_sends=r.integer("max_sends", d.max_sends, *AGENT_RANGES["max_sends"]))
 
 
 TALK_ENABLED_ENV = "JARVIS_TALK_ENABLED"
@@ -1404,7 +1528,7 @@ def _parse_talk(doc: Mapping[str, Any], environ: Mapping[str, str] | None = None
                       keep_warm_minutes=r.integer("keep_warm_minutes", d.keep_warm_minutes,
                                                   *TALK_RANGES["keep_warm_minutes"]),
                       quiet_ms=r.integer("quiet_ms", d.quiet_ms, *TALK_RANGES["quiet_ms"]),
-                      hints=tuple(hints))
+                      hints=tuple(hints), live_captions=r.choice("live_captions", d.live_captions, LIVE_CAPTIONS))
 
 
 INSTANT_ENABLED_ENV = "JARVIS_INSTANT_ENABLED"
@@ -1425,6 +1549,39 @@ def _parse_instant(doc: Mapping[str, Any], environ: Mapping[str, str] | None = N
                          currency=r.boolean("currency", d.currency), town=" ".join(town.split()),
                          temperature=r.choice("temperature", d.temperature, INSTANT_TEMPERATURES),
                          calendar=r.boolean("calendar", d.calendar))
+
+
+STANDING_ENABLED_ENV = "JARVIS_STANDING_ENABLED"
+
+
+def _parse_standing(doc: Mapping[str, Any], environ: Mapping[str, str] | None = None) -> StandingConfig:
+    """``[standing]`` from config.toml; ``JARVIS_STANDING_ENABLED`` (e.g. in the gitignored ``.env``) overrides
+    ``enabled`` both ways, like JARVIS_AGENT_ENABLED. Bad values fall back to the defaults with a warning."""
+    d = StandingConfig()
+    r = _TableReader(doc, "standing", _field_names(StandingConfig))
+    enabled = _enabled_override(r.boolean("enabled", d.enabled), environ, STANDING_ENABLED_ENV, "standing.enabled")
+    numbers = {key: r.integer(key, getattr(d, key), low, high) for key, (low, high) in STANDING_RANGES.items()}
+    return StandingConfig(enabled=enabled, model=r.string("model", d.model, pattern=_MODEL_RE),
+                          rule_model=r.string("rule_model", d.rule_model, pattern=_MODEL_RE),
+                          quiet_from=r.time_of_day("quiet_from", d.quiet_from),
+                          quiet_until=r.time_of_day("quiet_until", d.quiet_until),
+                          open_when_closed=r.boolean("open_when_closed", d.open_when_closed), **numbers)
+
+
+def _parse_docs(doc: Mapping[str, Any]) -> DocsConfig:
+    """``[docs]`` from config.toml, or the defaults when the table is absent (the repo's config.toml has none: the
+    installed copy keeps its own). A bad export_folder (not a full folder path) is the default; the warning names the
+    setting only (it may be a folder path)."""
+    d = DocsConfig()
+    r = _TableReader(doc, "docs", _field_names(DocsConfig), echo=False)
+    raw = r._get("export_folder")
+    folder = d.export_folder
+    if isinstance(raw, str) and (not raw.strip() or _absolute_folder(raw.strip())):
+        folder = raw.strip()
+    elif raw is not _MISSING:
+        logger.warning("config.toml: docs.export_folder is not a full folder path; using the default (Jarvis\\Exports "
+                       "in your user folder)")
+    return DocsConfig(enabled=r.boolean("enabled", d.enabled), export_folder=folder)
 
 
 def _parse_assistant(doc: Mapping[str, Any]) -> AssistantConfig:

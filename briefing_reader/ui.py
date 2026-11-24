@@ -79,6 +79,7 @@ from PySide6.QtCore import (
     QRect,
     QRectF,
     QSize,
+    QSizeF,
     Qt,
     QTimer,
     QUrl,
@@ -122,17 +123,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import (alive, approvals_view, brief_view, briefing_view, context_view, find_view, followups_view, live_view,
-               meetings_view, memory_view, offer_view, plan_view, settings_view, states_view, transcript_view,
-               voice_fx)
+from . import (alive, approvals_view, batch, brief_view, briefing_view, context_view, docs_view, find_view,
+               followups_view, live_view, meetings_view, memory_view, offer_view, plan_view, settings_view,
+               standing_view, states_view, transcript_view, voice_fx)
+from . import canvas_view, desk_view, overrides
 from . import dock as dock_mod
-from . import holo, home, hud
+from . import holo, home, hud, window_chrome
+from .board import view as board_view
 from . import live as _live
 from . import orb as orb_mod
 from . import pictures as _pictures
 from .actions import (
     CALENDAR,
     CANCEL,
+    DECIDED_STATUSES,
     DONE_TEXT,
     EMAIL,
     MAX_RECIPIENTS,
@@ -143,6 +147,9 @@ from .actions import (
     SEND_TEXT,
     SOURCE_ASK,
     SOURCE_BRIEFING,
+    SOURCE_CAPTURE,
+    SOURCE_STANDING,
+    STANDING_MODES,
     STATUS_CREATED,
     STATUS_DENIED,
     STATUS_DONE,
@@ -153,8 +160,12 @@ from .actions import (
     STATUS_SENT,
     STATUS_UNKNOWN,
     TODO,
+    UNSUBSCRIBE,
+    MODE_STANDING_AGENT,
+    MODE_STANDING_RULE,
     CLOSED_FIRST_CANCEL_MESSAGE,
     CLOSED_FIRST_MESSAGE,
+    CLOSED_FIRST_UNSUBSCRIBE_MESSAGE,
     UNDO_INTERRUPTED,
     UNDO_INTERRUPTED_NOTE,
     ActionStore,
@@ -192,9 +203,10 @@ from .agenda import (
 )
 from .ask import desktop_mode
 from .ask.dayplan import PART_DAY, hours_text
-from .ask.modes import (MODE_DESKTOP, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP, MODE_TITLES, ORIGIN_BRIEF,
-                        ORIGIN_CHOICE, ORIGIN_LIST, ORIGIN_OFFER, ORIGIN_TYPED, ModeInputs, ModeRequest, block_line,
-                        todo_facts)
+from .ask.modes import (MODE_CAPTURE, MODE_DESKTOP, MODE_DOC, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP,
+                        MODE_REVISE, MODE_TITLES, ORIGIN_BRIEF, ORIGIN_CHOICE, ORIGIN_LIST, ORIGIN_OFFER, ORIGIN_TYPED, ModeInputs,
+                        ModeRequest, RevisionJob, block_line, todo_facts)
+from .ask.planner import REVISE_HELD, REVISE_QUESTION
 from .ask.routes import ROUTE_MEMORY_FORGET, ROUTE_MEMORY_SAVE, ROUTE_MEMORY_SHOW, RouteFlags
 from .ask.validate import ALREADY_LISTED
 from .config import CONFIG_FILE_NAME, DEFAULT_ACCOUNT, PROJECT_ROOT, AgendaConfig, Config
@@ -203,6 +215,7 @@ from .conversation import recent as recent_turns
 from .executor import (
     DISCONNECT_FAILED_MESSAGE,
     NEW_RECIPIENT_NOTE,
+    UNSUBSCRIBE_LINK_NOTE,
     STAGE_SIGNED_IN,
     STAGE_SIGNIN,
     STAGE_WORKING,
@@ -238,6 +251,7 @@ from .gcal import (
     CalendarNotSignedIn,
     CalendarSetupError,
     GoogleCalendar,
+    local_timezone,
     wall_in_zone,
 )
 from .google_auth import (
@@ -277,6 +291,7 @@ from .models import (
     LAUNCH_OPEN,
     LAUNCH_READ,
     LAUNCH_SCHEDULED,
+    LAUNCH_STANDING,
     Briefing,
     BriefingHeader,
     Freshness,
@@ -634,7 +649,7 @@ def _keeps_space(widget: QWidget | None) -> bool:
     """Space belongs to this focus widget, not to the reading view's play / pause shortcut: a
     button (pressed, then clicked on release) or a text field such as Ask Jarvis's bar (it types a
     space). The read-only transcript is neither, so Space there still plays and pauses."""
-    if isinstance(widget, (QAbstractButton, QLineEdit, QPlainTextEdit)):
+    if isinstance(widget, (QAbstractButton, QLineEdit, QPlainTextEdit)) or board_view.keeps_space(widget):
         return True
     return isinstance(widget, QTextEdit) and not widget.isReadOnly()
 
@@ -1029,8 +1044,10 @@ SCREEN_APPROVALS = 4
 SCREEN_FOLLOWUPS = 5
 SCREEN_SETTINGS = 6
 SCREEN_MEETINGS = 7                 # [meetings]: the recorded meetings and the start card
+SCREEN_AGENTS = 8                   # [standing]: the standing agents and rules, their receipts and reports
+SCREEN_DOCS = 9                     # [docs]: the documents and datasheets kept on this PC (build plan item 5)
 SCREENS = (SCREEN_HOME, SCREEN_BRIEFING, SCREEN_LIVE, SCREEN_MEMORY, SCREEN_APPROVALS, SCREEN_FOLLOWUPS,
-           SCREEN_SETTINGS, SCREEN_MEETINGS)
+           SCREEN_SETTINGS, SCREEN_MEETINGS, SCREEN_AGENTS, SCREEN_DOCS)
 # The motion prototype: the Dock shows each screen's name from this reading-view width (a window of about
 # 1,036 px: the main column keeps the 824 px of the smallest window), and folds to glyphs below it.
 DOCK_LABELS_FROM = holo.DOCK_WIDTH_LABELLED + 824
@@ -1043,7 +1060,7 @@ _FIND_ICONS = {dock_mod.HOME: "home", **dock_mod.GLYPHS}
 _SCREEN_SLOTS = {SCREEN_HOME: dock_mod.HOME, SCREEN_BRIEFING: dock_mod.BRIEFING, SCREEN_LIVE: dock_mod.LIVE,
                  SCREEN_MEMORY: dock_mod.MEMORY, SCREEN_APPROVALS: dock_mod.APPROVALS,
                  SCREEN_FOLLOWUPS: dock_mod.FOLLOWUPS, SCREEN_SETTINGS: dock_mod.SETTINGS,
-                 SCREEN_MEETINGS: dock_mod.MEETINGS}
+                 SCREEN_MEETINGS: dock_mod.MEETINGS, SCREEN_AGENTS: dock_mod.AGENTS, SCREEN_DOCS: dock_mod.DOCS}
 _SLOT_SCREENS = {slot: screen for screen, slot in _SCREEN_SLOTS.items()}
 _LIST_HEIGHT_MAX = 100_000          # ... whose cards take the screen's whole height
 # Statuses the Briefing screen's transport already says (its quiet line leaves them out).
@@ -1067,6 +1084,15 @@ MOMENT_PLAN = "plan"                 # Home's plan moment (plan_view.PlanStage, 
 MOMENT_BRIEF = "brief"               # Home's brief moment (brief_view.BriefStage, HOLOGRAM_SPEC 16.5)
 DAY_VIEW_TITLE = "Day view"
 TRANSCRIPT_TITLE = "Transcript"
+BOARD_TITLE = "Board"                # the board as a drawer (the safety net of a frames area under 360 px)
+BOARD_SHORTCUT = "Ctrl+B"            # the new look: fold the board away and back (the header's Board button)
+
+
+def board_chip_text(count: int) -> str:
+    """Folded Home's chip that brings the board back: "9 on the board" (DESIGN-SPEC 2.4)."""
+    return f"{max(0, int(count))} on the board"
+
+
 # What the hero orb shows for the old activity states (spec 12.6).
 _ORB_BASE = {hud.ORB_SPEAKING: orb_mod.SPEAKING, hud.ORB_WORKING: orb_mod.THINKING,
              hud.ORB_LISTENING: orb_mod.LISTENING, hud.ORB_WAITING: orb_mod.WAITING}
@@ -1079,6 +1105,7 @@ ERROR_MAIL = "mail:"                    # + the card's action id: Gmail refused 
 BRIEFING_ERROR = states_view.ErrorInfo(ERROR_BRIEFING, "Not loaded", "Couldn't load your briefing.",
                                        states_view.RETRY_TEXT)
 SIGN_IN_SENTENCE = "Claude Code isn't signed in."
+SIDE_CHIP_CAP = 44                      # the desk's side chip: the tile's words, cut to this many characters
 SIGN_IN_HELP = "Sign Claude Code in to your claude.ai plan, then ask again."
 MAIL_REFUSED_SENTENCE = "Gmail refused the {what}."
 
@@ -1089,6 +1116,35 @@ def needs_ok_chip(count: int) -> str:
 SHOW_WINDOW_TEXT = live_view.SHOW_WINDOW_TEXT
 BRING_BACK_TEXT = live_view.BRING_BACK_TEXT
 SEE_STEPS_TEXT = "See every step"                    # the link under an Ask's answer in the conversation
+# Canvas part 3: the ask line's status line never repeats what the caption carried (ReadingView.caption_said).
+CAPTION_CARRIED = 6                  # the caption's last lines kept for the check
+CAPTION_MATCH = 10                   # a line's first words that must be found as they are, in order
+_WORD = re.compile(r"\w+")
+
+
+def _caption_words(text: str) -> list[str]:
+    """A line's words for the canvas's check: letters and digits only, lower case (punctuation, marks and a source's
+    [1] apart, as the caption and the status line may write them)."""
+    return [word for word in _WORD.findall((text or "").casefold()) if not word.isdigit() or len(word) > 1]
+
+
+def _words_run(part: list[str], whole: list[str]) -> bool:
+    """``part`` (not empty) stands in ``whole`` as it is, in order."""
+    size = len(part)
+    return 0 < size <= len(whole) and any(whole[at:at + size] == part for at in range(len(whole) - size + 1))
+
+
+def _words_carried(words: list[str], carried: list[list[str]]) -> bool:
+    """These words are what the caption carried: its line's first words stand in them, or they stand in its line."""
+    if not words:
+        return False
+    for line in carried:
+        if len(line) < 3 or len(words) < 3:     # a line of a word or two: only the same words
+            if line == words:
+                return True
+        elif _words_run(line[:CAPTION_MATCH], words) or _words_run(words[:CAPTION_MATCH], line):
+            return True
+    return False
 
 
 def _error_rank(key: str) -> tuple[int, str]:
@@ -1148,6 +1204,35 @@ class ReadingView(QWidget):
     The old transcript panel (``transcript_panel``: the briefing's transcript with its step chips and LIVE
     marker, ``text``) and the hidden STATUS values (``status_panel``) are kept for the app's state; neither is
     shown since round 2.
+
+    The new look's desk (part 5a; desk_ui.DeskController feeds it, desk_view draws it): while the board can be
+    (``set_board_available``: [look] board on) the header's Board button, Ctrl+B (``toggle_board``) and empty Home's
+    hint line (``set_board_hint``: "When I find something to show you ...", until the owner has seen the board three
+    times); once the board holds frames (``set_board_count``) Home shows ``desk()`` instead of its stage - the
+    conversation column (the ring's head, the turns from the Transcript's own entries, the chip row and the command
+    bar moved into it: the amber chip first) beside the board's one view (``set_board_view``), the ring flying to the
+    column head as it forms (``deskShown(True)``). Ctrl+B and the button fold it (Home's stage with "9 on the board",
+    ``board_chip``) and bring it back; a moment (the plan, the brief) takes the stage while it shows; under a 360 px
+    frames area the board is a drawer (``board_drawer``). ``board_count()`` is the HUD's "9 on the board";
+    ``open_card(action_id)``: Approvals at that card (the board's go_approvals). Part 5b: F6 / Shift+F6
+    (``cycle_focus``) go round the desk - the ask bar, the conversation (``focus_conversation``), the board and its
+    index strip (``boardFocusRequested``: the page's own parts) - and Esc in the board or the conversation comes back to
+    the ask bar (``focus_ask_bar``). Part 5c: ``set_board_held`` keeps the desk while a Clear's Bring back is offered
+    with nothing left on the board (the header's count says 0); ``set_frame_lit`` halves every ring's core glow while
+    a frame is lit (``glow_share()``: the HUD's ring follows through glanceChanged); open big's native dim of the Dock
+    and the header (``set_chrome_dim``) and ``set_board_big`` (F6 then skips the covered conversation).
+
+    The canvas (PLAN-canvas part 1; canvas_ui.CanvasController turns it on with ``set_canvas(True)`` while ``[look]
+    board`` is on and the board's page can be): Home is ``canvas_page()`` (canvas_view.CanvasPage) - the board's one
+    view over the whole of Home, with the ask line (``command_bar`` in its canvas look), the caption band and the chip
+    row at its bottom centre and the one offer / error tile at its left. No Dock in canvas mode and no header on Home
+    (the page draws the corners' controls); every other screen, and a moment (the plan, the brief), opens over the
+    canvas as it is today, with the header and its Back (``header.back_button``; Esc does the same: ``go_home``). The
+    desk never forms: ``desk_shown()`` then means "the board shows frames on the canvas" (deskShown still says so),
+    ``desk_page()`` stays None, Ctrl+B folds the board away and brings it back, F6 goes the ask line, the board, its
+    strip and the corner buttons. ``mic_level()`` / ``voice_level()`` are what the orb in the page follows.
+    ``set_canvas(False)`` (the page could not start, or its renderer died for good): Home exactly as before the
+    canvas - the Dock, the header, the native ring, and the read-only tiles in the desk.
     """
 
     playPause = Signal()
@@ -1187,6 +1272,16 @@ class ReadingView(QWidget):
     glanceChanged = Signal()     # Briefing ready, N need your OK, REC or the look changed (the desktop HUD's mirror)
     taskChipClicked = Signal()   # Home's chip of a task (agent_feed; only while [agent] is on)
     taskStopClicked = Signal()   # ... and its Stop
+    # The new look's desk (part 5a; desk_ui.DeskController feeds it): the desk formed (True) or Home went back to its
+    # stage (False); a turn's "4 frames on the board" (its entry id); the desk's layout changed (compact or not).
+    deskShown = Signal(bool)
+    boardTokenClicked = Signal(int)
+    deskLayoutChanged = Signal()
+    # Part 5b: F6's cycle reached the board - "board" / "strip" (into the page), "next" / "prev" (on from where the
+    # focus is in it); the desk controller hands it to the page (board.view.BoardView.focus_part).
+    boardFocusRequested = Signal(str)
+    # The canvas (PLAN-canvas part 1): canvas mode went on (True) or off (False: the fallback); the window follows.
+    canvasChanged = Signal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -1237,6 +1332,25 @@ class ReadingView(QWidget):
         find.setAutoRepeat(False)
         find.activated.connect(self.open_find)
         self._shortcuts.append(find)
+        # The new look: Ctrl+B folds the board away and brings it back (only while the board can be).
+        self._board_shortcut = QShortcut(QKeySequence(BOARD_SHORTCUT), self)
+        self._board_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._board_shortcut.setAutoRepeat(False)
+        self._board_shortcut.setEnabled(False)
+        self._board_shortcut.activated.connect(self.toggle_board)
+        self._shortcuts.append(self._board_shortcut)
+        # F6 / Shift+F6 cycle the desk's parts: the ask bar, the conversation, the board and its index strip (part 5b,
+        # DESIGN-SPEC 3.6; only while the board can be, and only on the desk). The board's key filter lets them reach
+        # these from the page too.
+        self._cycle_shortcuts: list[QShortcut] = []
+        for sequence, forward in ((QKeySequence(Qt.Key.Key_F6), True),
+                                  (QKeySequence(Qt.KeyboardModifier.ShiftModifier | Qt.Key.Key_F6), False)):
+            cycle = QShortcut(sequence, self)
+            cycle.setContext(Qt.ShortcutContext.WindowShortcut)
+            cycle.setEnabled(False)
+            cycle.activated.connect(lambda forward=forward: self.cycle_focus(forward))
+            self._cycle_shortcuts.append(cycle)
+            self._shortcuts.append(cycle)
         self._build_layout()
         self._show_screen(SCREEN_HOME)
 
@@ -1386,12 +1500,14 @@ class ReadingView(QWidget):
         self._agenda_slot: QVBoxLayout | None = None
         self._activity = hud.ORB_WORKING
         self._typing = False
+        self._caption_carried: list[list[str]] = []   # what the caption carried lately (canvas part 3: _carried)
         self._talking = False           # the talk key's microphone is open (talk_ui): the orb listens
         self._pending = 0
         self._desktop_waiting = 0              # p2r-5: NEEDS YOUR OK cards waiting on the desktop HUD
         self._offers = 0
         self._muted_look = False
         self._offline_voice = False
+        self._on_call = False              # quiet during calls: Home's resting line says so
         self._paused = False
         self._waiting = False
         self._waiting_run = ""                    # the run waited for ("AM" / "PM"; "" unknown)
@@ -1417,6 +1533,7 @@ class ReadingView(QWidget):
         self.dock.set_slot_visible(dock_mod.MEMORY, False)       # the productivity bundle shows them
         self.dock.set_slot_visible(dock_mod.FOLLOWUPS, False)
         self.dock.set_slot_visible(dock_mod.MEETINGS, False)     # [meetings] shows it
+        self.dock.set_slot_visible(dock_mod.AGENTS, False)       # [standing] shows it (standing_ui)
         self.dock.set_slot_visible(dock_mod.DESKTOP, False)      # [desktop] shows it (set_desktop_available)
         self._desktop_on = False
         self._screen_hold: Callable[[int], None] | None = None   # on the desktop HUD: set_tab only records
@@ -1435,6 +1552,7 @@ class ReadingView(QWidget):
         from .wake_ui import LOOK_OFF, WakeBadge
 
         self._wake: tuple[str, str] = ("", LOOK_OFF)
+        self._wake_short = ""                   # its few words for the canvas (set_wake; canvas part 3)
         self._wake_badges: list[Any] = []
         self.wake_badge = WakeBadge()
         self.header.add_rec_badge(self.wake_badge)      # (any badge goes left of the hold note, REC's place)
@@ -1444,6 +1562,36 @@ class ReadingView(QWidget):
         self.header.clockClicked.connect(self.open_day_view)
         self.header.findClicked.connect(self.open_find)
         self.header.undoClicked.connect(self.holdUndo)
+        self.header.boardClicked.connect(self.toggle_board)
+        self.header.backClicked.connect(self.go_home)
+        # The canvas (PLAN-canvas part 1): Home is the board's page (set_canvas; canvas_ui.CanvasController).
+        self._canvas = False                      # canvas mode is on
+        self._canvas_page: canvas_view.CanvasPage | None = None
+        self._canvas_bar = False                  # the ask line is on the canvas now (else in Home's own holder)
+        self._mic_level: float | None = None      # the microphone's level (0..1; None: not open)
+        self._voice_level: Callable[[], float | None] | None = None   # the voice's level now (None: not timed)
+        # The new look's desk (part 5a): the board beside the conversation while it holds frames. Nothing of it is made
+        # until the board can be (set_board_available: [look] board on), and the desk itself at its first use.
+        self._board_on = False                    # the board can be (the header's button, Ctrl+B, the hint line)
+        self._board_count = 0                     # frames on the board
+        self._board_held = False                  # part 5c: a Clear's Bring back is offered: the desk stays for it
+        self._frame_lit = False                   # part 5c: a frame is lit (every ring's core glow halves)
+        self._board_big = False                   # part 5c: a frame is open big (the view spans both columns)
+        self._chrome_dim = 1.0                    # part 5c: the Dock and the header's strength (open big: 0.2)
+        self._chrome_effects: list[Any] = []
+        self._chrome_anim: Any = None
+        self._board_folded = False                # Ctrl+B folded it: Home's stage with "9 on the board"
+        self._board_hint = False                  # empty Home's hint line may show (seen fewer than three times)
+        self._board_view: QWidget | None = None   # the board's one view (desk_ui makes it), in the desk or the drawer
+        self._desk: desk_view.DeskPage | None = None
+        self._desk_shown = False
+        self._ring_flight: desk_view.RingFlight | None = None
+        self._ground_painter: Callable[..., Any] | None = None   # the window's ground under the desk's ring
+        self._turn_frames: Callable[[int], int] = lambda _entry: 0
+        self.board_drawer: home.Drawer | None = None
+        self.board_chip: holo.ActionChip | None = None   # folded Home's "9 on the board" (made at first use)
+        self.board_hint = desk_view.BoardHint()
+        self.board_hint.hide()
         self._find_actions = False   # an open offer's link in the Find list (the productivity bundle)
         self._hold_word = ""   # "Sent" / "Cancelled" while a Send's hidden hold runs
         self.stage = home.HomeStage()
@@ -1461,6 +1609,13 @@ class ReadingView(QWidget):
         self.briefing_chip.clicked.connect(lambda: self.set_tab(SCREEN_BRIEFING))
         self.approvals_chip = holo.ActionChip(needs_ok_chip(1), holo.CHIP_AMBER)
         self.approvals_chip.clicked.connect(lambda: self.set_tab(SCREEN_APPROVALS))
+        # The desk hides Home's stage, and with it the offer's or the error's tile: while one waits, the desk's chips
+        # row starts with an amber chip in the tile's own words, and it shows the stage with the tile (the final
+        # review's integration 0). Only the desk shows it.
+        self.side_chip = holo.ActionChip("", holo.CHIP_AMBER)
+        self.side_chip.clicked.connect(self.show_side_tile)
+        self.side_chip.hide()
+        self._side_folded = False                 # the desk folded for the side tile: it comes back once that goes
         # An open offer is ONE amber tile bottom-right of the orb (round 2, part 3a): its commit hands the
         # offer's own link to the app (homeLink), exactly what a click on its Transcript link does; Not now
         # puts it away on Home only. The answer just given (cyan chip) opens its moment or the Transcript.
@@ -1509,11 +1664,14 @@ class ReadingView(QWidget):
 
     def _build_home(self) -> QWidget:
         """Home: the stage, the YOU echo, the caption band and one quiet chip - or a moment in their place (the
-        plan, the brief) - then the command bar."""
+        plan, the brief) - then the command bar. The new look: the desk in its place while the board holds frames
+        (made at its first use: ``_home_switch`` shows one of the two)."""
         page = QWidget()
+        self._home_stage_page = page
         column = QVBoxLayout(page)
         column.setContentsMargins(holo.GUTTER_SIDE, 0, holo.GUTTER_SIDE, 12)
         column.setSpacing(6)
+        self._home_column = column
         self._home_rest = QWidget()
         rest = QVBoxLayout(self._home_rest)
         rest.setContentsMargins(0, 0, 0, 0)
@@ -1522,10 +1680,12 @@ class ReadingView(QWidget):
         rest.addWidget(self.echo, 0, Qt.AlignmentFlag.AlignHCenter)
         rest.addWidget(self.home_rec, 0, Qt.AlignmentFlag.AlignHCenter)
         rest.addWidget(self.captions)
+        rest.addWidget(self.board_hint)          # the new look: empty Home's one line (hidden: no room taken)
         self._chip_row = QWidget()
         chips = QHBoxLayout(self._chip_row)
         chips.setContentsMargins(0, 0, 0, 0)
         chips.addStretch(1)
+        chips.addWidget(self.side_chip)
         for chip in self._home_chips():
             chips.addWidget(chip)
         chips.addWidget(self.waiting_readout)
@@ -1533,12 +1693,15 @@ class ReadingView(QWidget):
         chips.addStretch(1)
         self._chip_row.setFixedHeight(holo.ActionChip.HEIGHT + 2 * holo.ActionChip.MARGIN)
         rest.addWidget(self._chip_row)
+        self._rest_layout = rest
         self._home_pages = _PageSwitch()
         for widget in (self._home_rest, self.plan_stage, self.brief_stage):
             self._home_pages.addWidget(widget)
         column.addWidget(self._home_pages, 1)
         column.addWidget(self._command_holder)
-        return page
+        self._home_switch = _PageSwitch()
+        self._home_switch.addWidget(page)
+        return self._home_switch
 
     def _build_layout(self) -> None:
         self._build_center()
@@ -1569,10 +1732,13 @@ class ReadingView(QWidget):
         # Part 2: a meeting's summary lends its draft and Add block cards from NEEDS YOUR OK, like the brief.
         self.meetings_stage.pageChanged.connect(self._schedule_moment_sync)
         self.meetings_stage.summaryLinkClicked.connect(self.homeLink)
+        self.agents_stage = standing_view.AgentsStage()          # [standing] (standing_ui fills it)
+        self.docs_stage = docs_view.DocsStage()                  # [docs] (docs_ui fills it)
         self.home_screen = self._build_home()
         self._screens = _PageSwitch()
         for screen in (self.home_screen, self.briefing_screen, self.live_screen, self.memory_screen,
-                       self.approvals_screen, self.followups_screen, self.settings_page, self.meetings_stage):
+                       self.approvals_screen, self.followups_screen, self.settings_page, self.meetings_stage,
+                       self.agents_stage, self.docs_stage):
             self._screens.addWidget(screen)                   # in SCREENS order
         self._main = QWidget()
         column = QVBoxLayout(self._main)
@@ -1594,6 +1760,7 @@ class ReadingView(QWidget):
         self.transcript_clear_button.clicked.connect(lambda: self.clearConversation.emit())
         self.transcript_drawer.add_head_button(self.transcript_clear_button)
         self.conversation.changed.connect(self._sync_transcript_clear)
+        self.conversation.changed.connect(self._sync_desk_turns)      # the desk's turns: the same entries
         self._sync_transcript_clear()
         self.day_drawer = home.Drawer(DAY_VIEW_TITLE, self._main)
         self._place_agenda(self.day_drawer.body_layout, hud.AGENDA_DAY)
@@ -1624,6 +1791,8 @@ class ReadingView(QWidget):
             return
         self.transcript_drawer.close_drawer()
         self.day_drawer.close_drawer()
+        if self.board_drawer is not None:
+            self.board_drawer.close_drawer()
         self.find_overlay.close_list()
         if index != SCREEN_HOME:
             self.stage.context.dismiss()        # the context tiles go when the owner leaves Home
@@ -1632,7 +1801,9 @@ class ReadingView(QWidget):
         self._sync_summary_cards()              # ... and a meeting summary's draft and block cards
         page = self._screens.widget(index)
         self._screens.setCurrentWidget(page)
-        self.transition.play(page)              # the wipe and the panels assembling (never blocks a click)
+        self._sync_canvas_chrome()              # the canvas: the header (with Back) on every screen but Home
+        if not (self._canvas and index == SCREEN_HOME):
+            self.transition.play(page)          # the wipe and the panels assembling (never blocks a click)
         if index == SCREEN_MEMORY:
             self._set_memory_unread(False)
         elif index == SCREEN_APPROVALS:
@@ -1757,7 +1928,7 @@ class ReadingView(QWidget):
         """The hero orb's rings assemble from the centre out, J.A.R.V.I.S. types in and one scan line sweeps
         the window (lively, about 1.8 s; calm: the rings only, slower; off: nothing). Nothing waits for it."""
         level = holo.motion_level()
-        if level == holo.MOTION_OFF:
+        if level == holo.MOTION_OFF or self._canvas:      # (the canvas: its orb assembles in the page, by itself)
             return
         self.hero.play_intro(calm=level == holo.MOTION_CALM)
         if level == holo.MOTION_LIVELY:
@@ -1802,7 +1973,7 @@ class ReadingView(QWidget):
         when it is given (an offer's or an answer's chip) and still there, else at the newest entry."""
         self.set_tab(SCREEN_HOME)
         self.stage.set_unread(False)
-        self.transcript_drawer.open_drawer(self.stage.transcript_button)
+        self.transcript_drawer.open_drawer(self.command_bar.input if self._canvas else self.stage.transcript_button)
         if entry_id and self.conversation.entry(entry_id) is not None:
             self.conversation.follow_from(entry_id)
         self.conversation.scroll_to_newest()
@@ -1819,7 +1990,7 @@ class ReadingView(QWidget):
         """The Day view (the header clock): TODAY / DEADLINES in a drawer over the current screen."""
         self._place_agenda(self.day_drawer.body_layout, hud.AGENDA_DAY)
         self.transcript_drawer.close_drawer()
-        self.day_drawer.open_drawer(self.header.clock)
+        self.day_drawer.open_drawer(self.command_bar.input if self._canvas_home() else self.header.clock)
 
     # ---- Home: the look, captions, chips (HOLOGRAM_SPEC 12.6, 14, 16.0) -------------------------------
 
@@ -1828,7 +1999,9 @@ class ReadingView(QWidget):
         listening > needs you > waiting > idle)."""
         base = _ORB_BASE.get(self._activity, orb_mod.IDLE)
         if base not in (orb_mod.SPEAKING, orb_mod.THINKING):
-            if self._typing or self._talking:
+            # Typing leans the hologram's ring as if it listened; on the canvas typing is not listening (canvas part 3:
+            # the state word said LISTENING and the meter's words ran beside a badge that said it was not listening).
+            if self._talking or (self._typing and not self._canvas):
                 base = orb_mod.LISTENING
             elif self._task_look:
                 base = self._task_look   # a task works, or a card of it waits (set_task_look)
@@ -1840,9 +2013,21 @@ class ReadingView(QWidget):
                 base = orb_mod.IDLE
         return base, self._muted_look, self._offline_voice
 
+    def voice_listening(self) -> bool:
+        """LISTENING is the owner's voice (the talk key or "Hey Jarvis"), not typing: the ring comes level and locks
+        (typing only leans it)."""
+        return self._talking and self.look()[0] == orb_mod.LISTENING
+
     def _sync_look(self) -> None:
         base, muted, offline = self.look()
+        voice = self._talking and base == orb_mod.LISTENING
+        desk_ring = self._desk.head.orb if self._desk is not None else None
+        for ring in (self.hero, self.dock.mini_orb(), self.briefing_orb, self.plan_stage.orb, desk_ring):
+            if ring is not None:
+                ring.set_voice_listening(voice)      # before the look: the ring turns once, to the right pose
         self.hero.set_look(base, muted=muted, offline=offline)
+        if desk_ring is not None:
+            desk_ring.set_look(base, muted=muted, offline=offline)     # the desk's ring is Home's ring there
         self.dock.set_orb_look(base, muted=muted, offline=offline)
         # Briefing's compact orb: as the hero, but never amber (nothing there waits on a decision).
         self.briefing_orb.set_look(orb_mod.IDLE if base == orb_mod.NEEDS else base, muted=muted, offline=offline)
@@ -1865,6 +2050,9 @@ class ReadingView(QWidget):
         else:
             tone = home.TONE_HOLO
         self.header.set_state_word(word, tone)
+        if desk_ring is not None and self._desk is not None:
+            desk_ring.set_dim(states_view.QUIET_DIM if quiet else 1.0)
+            self._desk.head.set_state_word(word, amber=tone == home.TONE_AMBER)   # the compact head's word
         self.glanceChanged.emit()
 
     def state_word(self) -> str:
@@ -1894,6 +2082,17 @@ class ReadingView(QWidget):
 
     def offline_voice(self) -> bool:
         return self._offline_voice
+
+    def set_on_call(self, on: bool) -> None:
+        """Quiet during calls: Home's resting line "You're on a call, sir: I'll keep to captions." while another app
+        uses the microphone (shown, never said)."""
+        if bool(on) == self._on_call:
+            return
+        self._on_call = bool(on)
+        self._sync_resting()
+
+    def on_call(self) -> bool:
+        return self._on_call
 
     def set_briefing_paused(self, paused: bool) -> None:
         if bool(paused) != self._paused:
@@ -1954,10 +2153,13 @@ class ReadingView(QWidget):
         self._sync_resting()
 
     def _sync_resting(self) -> None:
-        """Home's resting line: "Checking for your AM briefing, sir." while Jarvis waits for one, "My usual
+        """Home's resting line: "You're on a call, sir: I'll keep to captions." on a call (quiet during calls),
+        "Checking for your AM briefing, sir." while Jarvis waits for one, "My usual
         voice is out of reach, sir. I'll keep trying." on the Windows voice, else the greeting (an open offer's
         question shows over any of them)."""
-        if self._waiting:
+        if self._on_call:
+            text = states_view.call_line(self._address)
+        elif self._waiting:
             text = states_view.waiting_line(self._waiting_run, self._address)
         elif self._offline_voice:
             text = states_view.offline_line(self._address)
@@ -1978,6 +2180,8 @@ class ReadingView(QWidget):
         self._sync_side()
         self._sync_service_notes()
         self._sync_look()
+        self._sync_chip()                        # the desk's side chip says it (or goes)
+        self._sync_side_fold()
 
     def errors(self) -> list[states_view.ErrorInfo]:
         """The errors waiting on Home, the one shown first."""
@@ -2033,6 +2237,15 @@ class ReadingView(QWidget):
         errors = self.errors()
         shown = errors[0] if errors and not offer else None
         tile = self.error_tile if shown is not None else self.offer_tile
+        page = self._canvas_page if self._canvas else None
+        if page is not None:                      # the canvas: the one tile at its left
+            if page.side_tile() is not tile:
+                if self.stage.side_tile() is tile:
+                    self.stage.set_side_tile(None)
+                page.set_side_tile(tile)
+            self.error_tile.set_error(shown)
+            page.place_side_tile()
+            return
         if self.stage.side_tile() is not tile:
             self.stage.set_side_tile(tile)
         self.error_tile.set_error(shown)
@@ -2050,9 +2263,16 @@ class ReadingView(QWidget):
             if only and name != only:
                 continue
             replaced = ((name == "voice" and status == hud.STATUS_WARN and self._offline_voice)
-                        or (name == "notion" and ERROR_BRIEFING in self._errors)
-                        or (name == ASK_CHIP and ERROR_SIGN_IN in self._errors))
+                        or (name == "notion" and self._error_tile_says(ERROR_BRIEFING))
+                        or (name == ASK_CHIP and self._error_tile_says(ERROR_SIGN_IN)))
             self.header.set_service(name, hud.STATUS_OFF if replaced else status, tooltip)
+
+    def _error_tile_says(self, key: str) -> bool:
+        """Home's error tile shows this error now (so the header's note need not say it): it is the first error, no
+        offer's tile is in its place, and the desk does not hide the stage (the final review's integration 0)."""
+        errors = self.errors()
+        return (bool(errors) and errors[0].key == key and self.offer_tile.info() is None
+                and (self._canvas or not self._desk_shown))
 
     def set_offers(self, offers: Sequence[offer_view.OfferInfo]) -> None:
         """The open offers, oldest first (the productivity bundle). Those not put away with Not now count as
@@ -2069,7 +2289,9 @@ class ReadingView(QWidget):
         if len(waiting) != self._offers:
             self._offers = len(waiting)
             self._sync_look()
+        self._sync_service_notes()               # an offer's tile in the error tile's place
         self._sync_chip()
+        self._sync_side_fold()
 
     def _on_offer_not_now(self, offer_id: int) -> None:
         """Not now: the offer leaves Home (its tile, the question, the needs you); the Transcript keeps its
@@ -2136,7 +2358,10 @@ class ReadingView(QWidget):
         had_focus = current is not None and _holds_focus(current)
         self._set_moment("")
         if had_focus:
-            self.stage.transcript_button.setFocus(Qt.FocusReason.OtherFocusReason)
+            if self._canvas:
+                self.focus_ask_bar()
+            else:
+                self.stage.transcript_button.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def moment(self) -> str:
         return self._moment
@@ -2147,7 +2372,10 @@ class ReadingView(QWidget):
         self._moment = moment
         page = {MOMENT_PLAN: self.plan_stage, MOMENT_BRIEF: self.brief_stage}.get(moment, self._home_rest)
         self._home_pages.setCurrentWidget(page)
+        self._sync_canvas_home()                # the canvas: a moment opens over it (the header, Back), then it is back
         self._sync_brief_cards()
+        if self._board_on:
+            self._sync_desk(fly=False)          # a moment takes Home's stage: the desk steps aside while it shows
 
     def _schedule_moment_sync(self) -> None:
         if not self._moment_sync:
@@ -2255,13 +2483,38 @@ class ReadingView(QWidget):
         ``duration_ms``: how long the audio says them (a briefing item), which paces the words;
         ``timeline`` + ``position()``: each word as the voice says it (part B of the motion prototype)."""
         self.captions.say(text, spoken=spoken, duration_ms=duration_ms, timeline=timeline, position=position)
+        self._carried(text)
         self._sync_echo()
+
+    def _carried(self, text: str) -> None:
+        """The caption carries ``text`` (canvas part 3): kept (the last CAPTION_CARRIED, a growing stream as one) so
+        the ask line's status line never repeats it on the canvas - also after the caption rests."""
+        words = _caption_words(text)
+        if not words:
+            return
+        carried = self._caption_carried
+        if carried and words[:len(carried[-1])] == carried[-1]:
+            carried[-1] = words                  # the same words, written further
+        elif not carried or carried[-1][:len(words)] != words:
+            carried.append(words)
+            del carried[:-CAPTION_CARRIED]
+        if self._canvas:
+            self.command_bar.refresh_status()
+
+    def caption_said(self, text: str) -> bool:
+        """The caption carried these words (their first CAPTION_MATCH words, or all of a shorter line) - the canvas's
+        check of the ask line's status line."""
+        return _words_carried(_caption_words(text), self._caption_carried)
 
     def set_voice(self, timeline: voice_fx.VoiceTimeline | None, position: Callable[[], int] | None) -> None:
         """The utterance being said drives the hero's voice spikes (None: none, or not timed: the synthetic
         curve)."""
+        desk_ring = self._desk.head.orb if self._desk is not None else None
         if timeline is None or position is None or not (timeline.has_words or timeline.has_envelope):
+            self._voice_level = None
             self.hero.set_voice(None)
+            if desk_ring is not None:
+                desk_ring.set_voice(None)
             return
 
         def level() -> float | None:
@@ -2271,14 +2524,17 @@ class ReadingView(QWidget):
                 return None
             return voice_fx.level_at(timeline, ms) if ms >= 0 else None
 
+        self._voice_level = level               # the canvas's orb follows the same voice (voice_level)
         self.hero.set_voice(level)
+        if desk_ring is not None:
+            desk_ring.set_voice(level)          # the desk's ring speaks with the same voice
 
     # ---- Home's context tiles and cards flying to Approvals (part B of the motion prototype) ----------
 
     def show_context(self, infos: Sequence[context_view.TileInfo]) -> int:
         """The greeting's context tiles fly out of the orb, when Home shows the orb (else nothing); how many."""
         if (self._screen != SCREEN_HOME or self._moment or not self.isVisible() or not infos
-                or not self.stage.isVisible()):
+                or not self.stage.isVisible() or self._canvas):
             return 0
         return self.stage.context.show_tiles(infos)
 
@@ -2332,11 +2588,13 @@ class ReadingView(QWidget):
         """An answer's words as they are written, as Home's caption (home.CaptionView.stream): the voice takes the line
         over without typing it again."""
         self.captions.stream(text, complete=complete, spoken=spoken)
+        self._carried(text)
         self._sync_echo()
 
     def correct_caption(self, text: str, *, alert: bool = False, spoken: bool = True) -> None:
         """The words on the band were wrong: ``text`` replaces them at once (``alert``: in coral)."""
         self.captions.correct(text, alert=alert, spoken=spoken)
+        self._carried(text)
         self._sync_echo()
 
     def clear_stream_caption(self) -> None:
@@ -2360,17 +2618,90 @@ class ReadingView(QWidget):
             self.echo.set_text("")            # handled: the echo goes with the last caption
         self._sync_echo()
         self._sync_chip()
+        self._sync_board_hint()
 
     def _sync_echo(self) -> None:
         self.echo.setVisible(bool(self.echo.text()))
+        self._sync_desk_live()
 
     def _home_chips(self) -> tuple[holo.ActionChip, ...]:
         return (self.answer_chip, self.briefing_chip, self.approvals_chip)
 
+    def _sync_desk_chips(self) -> None:
+        """The desk's chips row: the amber chip first, then the answer just given and Briefing ready, whatever the
+        caption does (the turns say what Jarvis says there); the compact column shows only the first."""
+        needs_ok = self._pending + self._desktop_waiting
+        side = self.side_words()
+        due = ((self.side_chip, bool(side), side),
+               (self.approvals_chip, needs_ok > 0, needs_ok_chip(needs_ok)),
+               (self.answer_chip, bool(self._answer[0]), self._answer[0]),
+               (self.briefing_chip, self._new_briefing, self.briefing_chip.text()))
+        # The side tile's chip takes a place of its own: with it, the row keeps to two chips (the column's width).
+        room = 1 if self.desk_compact() else 2 if side else len(due)
+        was_shown = not self.briefing_chip.isHidden()
+        for chip, wanted, text in due:
+            shown = wanted and room > 0
+            room -= 1 if shown else 0
+            if shown and chip.text() != text:
+                chip.setText(text)
+                if chip is self.side_chip:
+                    chip.setAccessibleName(f"{text}: show it on Home")
+                chip.updateGeometry()
+            chip.setVisible(shown)
+        self.waiting_readout.setVisible(False)
+        self.voice_badge.setVisible(False)
+        if not self.briefing_chip.isHidden() and not was_shown:
+            self.briefing_chip.start_ping()
+
+    def side_words(self) -> str:
+        """The words of Home's side tile while one waits - the open offer's title, else the first error's sentence,
+        as the tile shows them (cut to SIDE_CHIP_CAP) -, else ""."""
+        info = self.offer_tile.info()
+        errors = self.errors()
+        words = info.title if info is not None else errors[0].sentence if errors else ""
+        words = " ".join(str(words or "").split())
+        return words if len(words) <= SIDE_CHIP_CAP else words[:SIDE_CHIP_CAP - 3].rstrip() + "..."
+
+    def show_side_tile(self) -> None:
+        """The desk's side chip (and the toast's Prepare brief): Home's stage with the offer's or the error's tile,
+        exactly as Ctrl+B folds the desk; the desk comes back once the tile is answered or dismissed and frames are
+        still on the board (_sync_side_fold). Nothing on the canvas (its tile is on it) or while no tile waits."""
+        if self._canvas or not self.side_words():
+            return
+        if self._screen != SCREEN_HOME:
+            self.set_tab(SCREEN_HOME)
+        self.close_moment()
+        if not self._desk_shown:
+            return
+        had_keys = _holds_focus(self.side_chip)
+        self._board_folded = True
+        self._side_folded = True
+        self._sync_desk(fly=False)
+        tile = self.stage.side_tile()
+        if had_keys and tile is not None:
+            first = next((button for button in tile.findChildren(QAbstractButton) if button.isVisible()), None)
+            (first or tile).setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _sync_side_fold(self) -> None:
+        """The tile the side chip showed was answered or dismissed: the desk comes back (frames still on the board)."""
+        if self._side_folded and not self.side_words():
+            self._side_folded = False
+            if self._board_folded and not self._canvas:
+                self._board_folded = False
+                self._sync_desk(fly=False)
+
     def _sync_chip(self) -> None:
         """At most one quiet chip at rest and none while an offer's amber tile waits (one focal point): the
         answer just given (cyan: Plan ready / Brief ready), Briefing ready (cyan) before N need your OK
-        (amber); the Dock carries the last two as well."""
+        (amber); the Dock carries the last two as well. On the desk: _sync_desk_chips."""
+        if not self._desk_shown or self._canvas:
+            self.side_chip.setVisible(False)     # only the desk hides the stage's tile
+        if self._canvas:
+            self._sync_canvas_chips()
+            return
+        if self._desk_shown:
+            self._sync_desk_chips()
+            return
         resting = self.captions.state() == home.RESTING
         offer = self._offers > 0
         answer = resting and not offer and bool(self._answer[0])
@@ -2393,6 +2724,24 @@ class ReadingView(QWidget):
         self.approvals_chip.setVisible(approvals)
         if briefing and not was_shown:
             self.briefing_chip.start_ping()
+
+    def _sync_canvas_chips(self) -> None:
+        """The canvas's chip row (over the caption): only the answer just given (Plan ready / Brief ready), the
+        waiting readout or the Windows voice's badge - Briefing ready and N need your OK are the page's own Briefing and
+        Approvals buttons there. A task's chip with its Stop and a timer's are the row's own (set_task_chip,
+        set_timer_chip)."""
+        resting = self.captions.state() == home.RESTING
+        answer = resting and bool(self._answer[0])
+        quiet_row = resting and not answer
+        readout = quiet_row and self._waiting and bool(self._waiting_readout)
+        self.waiting_readout.setVisible(readout)
+        self.voice_badge.setVisible(quiet_row and not readout and self._offline_voice)
+        if answer and self.answer_chip.text() != self._answer[0]:
+            self.answer_chip.setText(self._answer[0])
+            self.answer_chip.updateGeometry()
+        self.answer_chip.setVisible(answer)
+        self.briefing_chip.setVisible(False)
+        self.approvals_chip.setVisible(False)
 
     def set_task_look(self, base: str, word: str = "") -> None:
         """The orb while a task runs (agent_feed): it thinks; orb.NEEDS while a card of it waits; "" none. ``word``: the
@@ -2455,6 +2804,683 @@ class ReadingView(QWidget):
             if not chip.isHidden():
                 return chip.text()
         return ""
+
+    # ---- the new look's desk (part 5a, DESIGN-SPEC 2; desk_ui.DeskController feeds it) -----------------------------
+
+    def set_board_available(self, available: bool) -> None:
+        """The board can be ([look] board on): the header's Board button, Ctrl+B, empty Home's hint line and the desk
+        once the board holds frames. Off: Home is exactly as it was."""
+        available = bool(available)
+        if available == self._board_on:
+            return
+        self._board_on = available
+        self.header.set_board_visible(available)
+        self._board_shortcut.setEnabled(available)
+        for cycle in self._cycle_shortcuts:
+            cycle.setEnabled(available)
+        self._sync_desk(fly=False)
+
+    def board_available(self) -> bool:
+        return self._board_on
+
+    def set_board_hint(self, shown: bool) -> None:
+        """Empty Home's hint line may show (the owner has seen the board fewer than three times)."""
+        self._board_hint = bool(shown)
+        self._sync_board_hint()
+
+    def board_hint_shown(self) -> bool:
+        return not self.board_hint.isHidden()
+
+    def set_board_count(self, count: int) -> None:
+        """The frames on the board: the header's badge, the desk (it forms with the first one, unless folded), folded
+        Home's "9 on the board", the HUD's chip (glanceChanged)."""
+        count = max(0, int(count))
+        changed = count != self._board_count
+        self._board_count = count
+        self.header.set_board_count(count)
+        if count == 0:
+            self._board_folded = False          # nothing on the board: nothing folded away either
+        self._sync_desk()
+        if changed:
+            self.glanceChanged.emit()
+
+    def board_count(self) -> int:
+        """The frames on the board (0 while the board can't be): the HUD's "9 on the board"."""
+        return self._board_count if self._board_on else 0
+
+    def set_board_held(self, held: bool) -> None:
+        """A Clear's Bring back is offered (part 5c): the desk stays - the bar, the "Board cleared · N FRAMES · Bring
+        back" row, the ring at the column head - even with nothing left on the board; released with nothing on it,
+        the desk leaves through set_board_count's path and Home's stage returns."""
+        held = bool(held)
+        if held != self._board_held:
+            self._board_held = held
+            self._sync_desk()
+
+    def board_held(self) -> bool:
+        return self._board_held
+
+    def set_frame_lit(self, lit: bool) -> None:
+        """A frame on the board is lit (Jarvis speaks of it; part 5c): the core glow of every ring that mirrors the
+        main one halves (DESIGN-SPEC 1: one thing bright at a time) - Home's, the desk's, the Dock's, Briefing's,
+        Plan's, and the HUD's through glanceChanged."""
+        lit = bool(lit)
+        if lit == self._frame_lit:
+            return
+        self._frame_lit = lit
+        share = self.glow_share()
+        desk_ring = self._desk.head.orb if self._desk is not None else None
+        for ring in (self.hero, self.dock.mini_orb(), self.briefing_orb, self.plan_stage.orb, desk_ring):
+            if ring is not None:
+                ring.set_glow_share(share)
+        self.glanceChanged.emit()
+
+    def frame_lit(self) -> bool:
+        return self._frame_lit
+
+    def glow_share(self) -> float:
+        """The rings' core glow now: orb.LIT_GLOW while a frame is lit, else 1."""
+        return orb_mod.LIT_GLOW if self._frame_lit else 1.0
+
+    def set_board_big(self, big: bool) -> None:
+        """A frame is open big (part 5c): the board's view covers the conversation, so F6 skips it. On the canvas the
+        offer's or the error's tile hides meanwhile: it never covers the big frame (canvas part 5B)."""
+        self._board_big = bool(big)
+        if self._canvas_page is not None:
+            self._canvas_page.set_side_covered(self._board_big and self._canvas)
+
+    def board_big(self) -> bool:
+        return self._board_big
+
+    def set_chrome_dim(self, level: float, ms: int = 0) -> None:
+        """Open big's native dim (part 5c, DESIGN-SPEC 3.5): the Dock and the header at ``level`` of their strength
+        (0.2 while big, 1.0 back), eased over ``ms`` (expo-out; 0: at once). At 1.0 the effects go."""
+        from PySide6.QtCore import QAbstractAnimation, QVariantAnimation
+        from PySide6.QtWidgets import QGraphicsOpacityEffect
+
+        level = max(0.0, min(1.0, float(level)))
+        if self._canvas:                         # the canvas: the page dims its own corners with its board
+            self._chrome_dim = level
+            return
+        if self._chrome_anim is not None:
+            if shiboken6.isValid(self._chrome_anim):
+                self._chrome_anim.stop()                 # (deleted when stopped: none is left behind)
+            self._chrome_anim = None
+        if level >= 1.0 and not self._chrome_effects:
+            self._chrome_dim = 1.0
+            return
+        if not self._chrome_effects:
+            for widget in (self.dock, self.header):
+                effect = QGraphicsOpacityEffect(widget)
+                effect.setOpacity(1.0)
+                widget.setGraphicsEffect(effect)
+                self._chrome_effects.append(effect)
+        start = self._chrome_dim
+
+        def apply(value: Any) -> None:
+            self._chrome_dim = float(value)
+            for effect in self._chrome_effects:
+                if shiboken6.isValid(effect):
+                    effect.setOpacity(self._chrome_dim)
+
+        def finish() -> None:
+            apply(level)
+            self._chrome_anim = None
+            if level >= 1.0:
+                for widget in (self.dock, self.header):
+                    if shiboken6.isValid(widget):
+                        widget.setGraphicsEffect(None)       # deletes its effect: no offscreen pass any more
+                self._chrome_effects = []
+
+        if ms <= 0 or start == level:
+            finish()
+            return
+        animation = QVariantAnimation(self)
+        animation.setStartValue(float(start))
+        animation.setEndValue(float(level))
+        animation.setDuration(int(ms))
+        animation.setEasingCurve(QEasingCurve.Type.OutExpo)
+        animation.valueChanged.connect(apply)
+        animation.finished.connect(finish)
+        self._chrome_anim = animation
+        animation.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+
+    def chrome_dim(self) -> float:
+        """The Dock and the header's strength now (1.0: not dimmed)."""
+        return self._chrome_dim
+
+    def board_folded(self) -> bool:
+        return self._board_folded
+
+    def set_ground_painter(self, painter_fn: Callable[..., Any] | None) -> None:
+        """The window's ground, painted under the desk's ring (as under the hero)."""
+        self._ground_painter = painter_fn
+        if self._desk is not None and painter_fn is not None:
+            self._desk.head.orb.set_ground(painter_fn)
+
+    def ground_painter(self) -> Callable[..., Any] | None:
+        """The window's ground painter (``fn(painter, widget)``): open big's backdrop is painted on it (part 5c)."""
+        return self._ground_painter
+
+    def set_turn_frames(self, frames_for: Callable[[int], int]) -> None:
+        """How many frames a turn (its entry id) has on the board now: its "4 frames on the board"."""
+        self._turn_frames = frames_for
+        self.refresh_turn_frames()
+
+    def refresh_turn_frames(self) -> None:
+        if self._desk is not None:
+            self._sync_desk_turns()
+
+    def desk(self) -> desk_view.DeskPage:
+        """The desk (made at its first use; Home shows it while the board holds frames)."""
+        if self._desk is None:
+            page = desk_view.DeskPage()
+            page.setAccessibleName("Conversation and board")
+            page.tokenClicked.connect(self.boardTokenClicked)
+            page.linkClicked.connect(lambda link_id: self.conversation.linkClicked.emit(link_id))
+            page.earlierClicked.connect(lambda: self.open_transcript())
+            page.geometryChanged.connect(self.deskLayoutChanged)
+            page.turns.escaped.connect(self.focus_ask_bar)
+            page.set_folded_dock(self.width() < DOCK_LABELS_FROM if self.width() > 0 else False)
+            page.head.orb.set_glow_share(self.glow_share())     # part 5c: a lit frame halves its glow too
+            if self._ground_painter is not None:
+                page.head.orb.set_ground(self._ground_painter)
+            page.head.orb.set_recording(bool(self._recording))   # a meeting that records already: its coral ring
+            self._home_switch.addWidget(page)
+            self._desk = page
+            self._sync_desk_turns()
+            self._sync_look()
+        return self._desk
+
+    def desk_page(self) -> desk_view.DeskPage | None:
+        """The desk if it was made (never makes it)."""
+        return self._desk
+
+    def desk_shown(self) -> bool:
+        """Home shows the desk now (its page is the current one)."""
+        return self._desk_shown
+
+    def desk_compact(self) -> bool:
+        """The desk's narrow column (the folded Dock's): one chip, the last exchange, the bar without its count."""
+        return not self._canvas and self.width() > 0 and self.width() < DOCK_LABELS_FROM
+
+    def set_board_view(self, view: QWidget | None) -> None:
+        """The board's one view (desk_ui makes it once): in the desk's board column, or the drawer."""
+        self._board_view = view
+        self._place_board_view()
+
+    def board_view(self) -> QWidget | None:
+        return self._board_view
+
+    def _home_area(self) -> QSize:
+        size = self._screens.size()
+        return size if size.width() > 0 else QSize(READING_SIZE.width() - holo.DOCK_WIDTH_LABELLED - 12,
+                                                   READING_SIZE.height() - 12 - home.HEADER_HEIGHT)
+
+    def board_in_drawer(self) -> bool:
+        """The frames area would be under 360 px: the board opens as today's drawer instead (DESIGN-SPEC 2.3)."""
+        if self._canvas:
+            return False                         # the canvas: the board's box is the page's own
+        area = self._home_area()
+        return desk_view.desk_geometry(area.width(), area.height(), folded_dock=self.desk_compact()).drawer
+
+    def _board_drawer_widget(self) -> home.Drawer:
+        if self.board_drawer is None:
+            self.board_drawer = home.Drawer(BOARD_TITLE, self._main)
+        return self.board_drawer
+
+    def _place_board_view(self) -> None:
+        view = self._board_view
+        if view is None or not shiboken6.isValid(view):
+            return
+        if self._canvas:                         # the canvas: the view is the whole of Home
+            if self._canvas_page is not None:
+                self._canvas_page.set_board(view)
+            return
+        if self.board_in_drawer():
+            drawer = self._board_drawer_widget()
+            if view.parentWidget() is not drawer:
+                if self._desk is not None and self._desk.board() is view:
+                    self._desk.set_board(None)
+                drawer.body_layout.addWidget(view, 1)
+                view.show()
+        else:
+            if self.board_drawer is not None and view.parentWidget() is self.board_drawer:
+                self.board_drawer.body_layout.removeWidget(view)
+                self.board_drawer.close_drawer()
+            self.desk().set_board(view)
+
+    def toggle_board(self) -> None:
+        """Ctrl+B and the header's Board button: on Home, the board folds away (Home's stage with "9 on the board")
+        and comes back; from another screen, Home with the board; the board as a drawer opens and closes it. Nothing
+        while the board is empty."""
+        if not self._board_on or self._board_count == 0:
+            return
+        self._side_folded = False                # the owner folds or unfolds it: the side chip's fold is theirs now
+        if self._canvas:                         # the canvas: the board's box folds away and comes back
+            if self._screen != SCREEN_HOME or self._moment:
+                self._board_folded = False
+                self.close_moment()
+                self.set_tab(SCREEN_HOME)
+            else:
+                self._board_folded = not self._board_folded
+            self._sync_desk(fly=False)
+            self.glanceChanged.emit()
+            return
+        if self.board_in_drawer():
+            drawer = self._board_drawer_widget()
+            self._place_board_view()
+            if drawer.is_open():
+                drawer.close_drawer()
+            else:
+                self.set_tab(SCREEN_HOME)
+                drawer.open_drawer(self.header.board_button)
+            return
+        if self._screen != SCREEN_HOME:
+            self._board_folded = False
+            self.set_tab(SCREEN_HOME)
+            self._sync_desk(fly=False)
+            return
+        self._board_folded = not self._board_folded
+        self._sync_desk()
+
+    def show_board(self, folded: bool = False) -> None:
+        """The board on Home, unfolded (``folded`` False; the HUD's "9 on the board" brings the window back to it)."""
+        self._board_folded = bool(folded) and self._board_count > 0
+        self._sync_desk(fly=False)
+
+    def _desk_wanted(self) -> bool:
+        return (self._board_on and (self._board_count > 0 or self._board_held) and not self._board_folded
+                and not self._moment and not self.board_in_drawer())
+
+    def _sync_desk(self, *, fly: bool = True) -> None:
+        wanted = self._desk_wanted()
+        if wanted != self._desk_shown:
+            self._show_desk(wanted, fly=fly)
+        self._sync_board_chip()
+        self._sync_board_hint()
+        self._sync_chip()
+
+    def _show_desk(self, shown: bool, *, fly: bool) -> None:
+        """Home's page: the desk (the command bar and the chip row move into its column; the ring flies from the stage
+        to the column head) or the stage again (they move back)."""
+        if self._canvas:                         # the canvas: no desk forms - the board shows its frames, or not
+            self._desk_shown = bool(shown)
+            self.deskShown.emit(bool(shown))
+            return
+        # The command bar and the chips change parents as the desk forms or folds, and Qt takes the keyboard from a
+        # widget it reparents: whichever of them had it gets it back after the switch (the final review's int. 1).
+        bar_focus = _holds_focus(self.command_bar)
+        chip_focus = next((chip for chip in self._chip_row.findChildren(QWidget) if chip is QApplication.focusWidget()),
+                          None)
+        self._show_desk_now(shown, fly=fly)
+        self._sync_service_notes()               # the stage's error tile in or out of sight
+        if bar_focus:
+            self.command_bar.focus_input()
+        elif chip_focus is not None and chip_focus.isVisible():
+            chip_focus.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.deskShown.emit(shown)
+
+    def _show_desk_now(self, shown: bool, *, fly: bool) -> None:
+        if shown:
+            desk = self.desk()
+            flight = fly and self._screen == SCREEN_HOME and self.stage.isVisible() and self.isVisible()
+            start = QRectF(QRect(self.hero.mapTo(self, QPoint(0, 0)), self.hero.size())) if flight else QRectF()
+            pixmap = self.hero.snapshot() if flight else None
+            desk.setGeometry(QRect(QPoint(0, 0), self._home_area()))     # Home's whole area (the screens')
+            self._desk_shown = True
+            self._move_home_parts(True)
+            self._home_switch.setCurrentWidget(desk)
+            desk.apply_geometry()
+            self._place_board_view()
+            self._sync_desk_turns()
+            self._sync_look()
+            if pixmap is not None:
+                self._fly_ring(pixmap, start)
+        else:
+            if self._ring_flight is not None:
+                self._ring_flight.stop(finish=True)
+            self._desk_shown = False
+            self._move_home_parts(False)
+            self._home_switch.setCurrentWidget(self._home_stage_page)
+
+    def _fly_ring(self, pixmap: QPixmap, start: QRectF) -> None:
+        """The ring flies from the stage to the column head (420 ms ease-out-expo; calm x1.6; off: it is there)."""
+        desk = self._desk
+        if desk is None:
+            return
+        orb = desk.head.orb
+        end = QRectF(QRect(orb.mapTo(self, QPoint(0, 0)), orb.size()))
+        if self._ring_flight is None:
+            self._ring_flight = desk_view.RingFlight(self)
+        orb.hide()
+        if not self._ring_flight.fly(pixmap, start, end, done=lambda: self._land_ring(orb)):
+            orb.show()
+
+    @staticmethod
+    def _land_ring(orb: QWidget) -> None:
+        if shiboken6.isValid(orb):
+            orb.show()
+
+    def ring_flight(self) -> desk_view.RingFlight | None:
+        return self._ring_flight
+
+    def _move_home_parts(self, desk: bool) -> None:
+        """The command bar and the chip row: into the desk's column (the bar its full width, the chips from its left
+        edge, the amber one first) and back where they were."""
+        bar, row = self.command_bar, self._chip_row
+        chips = row.layout()
+        if desk:
+            page = self.desk()
+            slot = page.ask_slot.layout()
+            if slot is None:
+                slot = QHBoxLayout(page.ask_slot)
+                slot.setContentsMargins(0, 0, 0, 0)
+            bar.setMaximumWidth(_QWIDGETSIZE_MAX)
+            slot.addWidget(bar)
+            page.ask_slot.setVisible(not self._command_holder.isHidden())
+            chip_slot = page.chip_slot.layout()
+            if chip_slot is None:
+                chip_slot = QHBoxLayout(page.chip_slot)
+                chip_slot.setContentsMargins(0, 0, 0, 0)
+            chip_slot.addWidget(row)
+            chips.removeWidget(self.approvals_chip)
+            chips.insertWidget(1, self.approvals_chip)          # the amber chip first (DESIGN-SPEC 2.1)
+            chips.removeWidget(self.side_chip)
+            chips.insertWidget(1, self.side_chip)               # ... after the side tile's, which goes first of all
+            chips.setStretch(0, 0)                              # from the column's left edge
+        else:
+            holder = self._command_holder.layout()
+            bar.setMaximumWidth(holo.COMMAND_MAX_WIDTH + 2 * 4)
+            holder.insertWidget(1, bar, 1000)
+            self._rest_layout.addWidget(row)
+            chips.removeWidget(self.approvals_chip)
+            chips.insertWidget(chips.indexOf(self.briefing_chip) + 1, self.approvals_chip)
+            chips.setStretch(0, 1)
+        row.show()
+        bar.show()
+
+    def _sync_board_chip(self) -> None:
+        """Folded Home's "9 on the board" (and the board as a drawer's): it brings the board back."""
+        shown = self._board_on and self._board_count > 0 and not self._desk_shown and \
+            (self._board_folded or self.board_in_drawer()) and not self._canvas    # (the canvas: the page's Show board)
+        if self.board_chip is None:
+            if not shown:
+                return
+            self.board_chip = holo.ActionChip("", holo.CHIP_CYAN, icon="board")
+            self.board_chip.clicked.connect(self._on_board_chip)
+            row = self._chip_row.layout()
+            row.insertWidget(row.count() - 1, self.board_chip)
+        if shown:
+            text = board_chip_text(self._board_count)
+            if self.board_chip.text() != text:
+                self.board_chip.setText(text)
+                self.board_chip.setAccessibleName(f"{text}: show the board")
+                self.board_chip.updateGeometry()
+        self.board_chip.setVisible(shown)
+
+    def _on_board_chip(self) -> None:
+        if self.board_in_drawer():
+            self.toggle_board()
+        else:
+            self.show_board(False)
+
+    def board_chip_words(self) -> str:
+        """Folded Home's "9 on the board" as it shows ("" when it does not)."""
+        return self.board_chip.text() if self.board_chip is not None and not self.board_chip.isHidden() else ""
+
+    def _sync_board_hint(self) -> None:
+        shown = (self._board_on and self._board_hint and self._board_count == 0 and not self._moment
+                 and self.captions.state() == home.RESTING and not self._canvas)
+        if shown != (not self.board_hint.isHidden()):
+            self.board_hint.setVisible(shown)
+
+    def _sync_desk_turns(self) -> None:
+        """The desk's turns from the Transcript's own entries (the same data), and "Earlier · N turns"."""
+        desk = self._desk
+        if desk is None:
+            return
+        turns = []
+        for entry in self.conversation.entry_widgets():
+            role, stamp, text, _sub = entry.entry
+            link_text, link_id = entry.link()
+            turns.append(desk_view.Turn(entry.entry_id, role, stamp, text, entry.tone(), link_text, link_id))
+        desk.turns.set_turns(turns, self._turn_frames)
+        desk.head.set_earlier(desk.turns.earlier())
+
+    def _sync_desk_live(self) -> None:
+        """What Jarvis is saying now (the caption's line) as the desk's current turn until his turn comes."""
+        desk = self._desk
+        if desk is None:
+            return
+        state = self.captions.state()
+        desk.turns.set_live(self.captions.full_text() if state in (home.SPEAKING, home.HOLDING) else "")
+        desk.head.set_earlier(desk.turns.earlier())
+
+    def cycle_focus(self, forward: bool = True) -> None:
+        """F6 (Shift+F6 back) on the desk (part 5b, DESIGN-SPEC 3.6): the ask bar, the conversation, the board and its
+        index strip, round. The board's own parts are the page's: ``boardFocusRequested`` ("board" or "strip" into it;
+        "next" / "prev" on from where its focus is - past the strip it hands the focus back here). Nothing off the
+        desk."""
+        desk = self._desk
+        focus = QApplication.focusWidget()
+
+        def within(widget: QWidget | None) -> bool:
+            return (focus is not None and widget is not None and shiboken6.isValid(widget)
+                    and (focus is widget or widget.isAncestorOf(focus)))
+
+        if self._canvas:
+            # The canvas: the ask line, the board (its frames, then its strip), the page's corner buttons, round.
+            if self._screen != SCREEN_HOME or self._moment:
+                return
+            if within(self._board_view):
+                self.boardFocusRequested.emit("next" if forward else "prev")
+            else:
+                self.boardFocusRequested.emit("board" if forward else "controls")
+            return
+        if self._screen != SCREEN_HOME or not self._desk_shown or desk is None:
+            return
+
+        if self._board_big:                      # open big covers the conversation: the ask bar and the board only
+            if within(self._board_view):
+                self.focus_ask_bar()
+            else:
+                self.boardFocusRequested.emit("board")
+            return
+        if within(self._board_view):
+            self.boardFocusRequested.emit("next" if forward else "prev")
+        elif within(desk.turns):
+            if forward:
+                self.boardFocusRequested.emit("board")
+            else:
+                self.focus_ask_bar()
+        elif within(self.command_bar):
+            if forward:
+                self.focus_conversation()
+            else:
+                self.boardFocusRequested.emit("strip")
+        elif forward:
+            self.focus_ask_bar()
+        else:
+            self.boardFocusRequested.emit("strip")
+
+    def focus_ask_bar(self) -> None:
+        """The keyboard focus on the ask bar (Esc in the board or the conversation; F6 past the board's strip); the
+        conversation when the bar is not there (Ask off)."""
+        if self.ask_available() and not self.command_bar.isHidden():
+            self.command_bar.focus_input()
+        else:
+            self.focus_conversation()
+
+    def focus_conversation(self) -> None:
+        """The keyboard focus on the desk's conversation (F6): the arrows scroll it, Tab goes on to its tokens."""
+        if self._canvas:
+            if self.ask_available():
+                self.command_bar.focus_input()   # the canvas has no conversation column: the ask line
+            return
+        if self._desk is not None and self._desk_shown:
+            self._desk.turns.setFocus(Qt.FocusReason.ShortcutFocusReason)
+
+    def open_card(self, action_id: str) -> bool:
+        """Approvals at that card (the board's "Reply waits on Approvals": Ctrl+3's path); False when it is not there
+        (Approvals opens on its first waiting card)."""
+        self.set_tab(SCREEN_APPROVALS)
+        card = self.approvals.card(action_id) if action_id else None
+        if card is None:
+            return False
+        self.approvals_stage.select(action_id)
+        return True
+
+    def ring_level(self, level: float | None) -> None:
+        """The microphone's level on the ring the owner sees (Home's hero, and the desk's; the canvas's orb reads
+        ``mic_level()``)."""
+        self._mic_level = level
+        self.hero.set_level(level)
+        if self._desk is not None:
+            self._desk.head.orb.set_level(level)
+
+    # ---- the canvas (PLAN-canvas part 1) ---------------------------------------------------------------------------
+
+    def set_canvas(self, on: bool) -> None:
+        """Canvas mode on: Home is the board's page over the whole window - no Dock, no header on Home, the ask line,
+        the caption and the chips at its bottom centre. Off (the page can't start): Home as before the canvas."""
+        on = bool(on)
+        if on == self._canvas:
+            return
+        if on:
+            if self._canvas_page is None:
+                self._canvas_page = canvas_view.CanvasPage()
+                self._home_switch.addWidget(self._canvas_page)
+            if self._desk_shown:                 # (never in the app: the canvas is chosen before any frame)
+                self._show_desk(False, fly=False)
+            self._canvas = True
+            self.stage.context.dismiss()
+            page = self._canvas_page
+            self.captions.set_canvas(True)
+            self.captions.setFixedHeight(self.captions.band_height())
+            page.take_captions(self.captions)
+            chips = self._chip_row.layout()
+            page.take_chips(self._chip_row)
+            chips.setStretch(0, 1)
+            self.board_hint.hide()
+            self.echo.hide()
+        else:
+            # Off first, then the desk: with frames on the board it forms below (_sync_desk), as beside a conversation,
+            # and says so itself (deskShown) - nothing may count the canvas's "shown" as the desk's.
+            self._canvas = False
+            self._desk_shown = False
+            self.captions.set_canvas(False)
+            self.captions.setFixedHeight(self.captions.band_height())
+            self._rest_layout.insertWidget(self._rest_layout.indexOf(self.board_hint), self.captions)
+            self._rest_layout.addWidget(self._chip_row)
+            self.captions.show()
+            self._chip_row.show()
+            if self._canvas_page is not None:
+                self._canvas_page.set_side_tile(None)
+                self._canvas_page.set_board(None)
+        self.dock.setVisible(not on)
+        holo.set_canvas_look(on)                # part 4: every other screen wears the canvas's frame style
+        self._sync_canvas_home()
+        self._sync_canvas_chrome()
+        self._sync_side()
+        self._place_board_view()
+        self._sync_desk(fly=False)
+        self._sync_look()
+        self.canvasChanged.emit(on)
+
+    def canvas_on(self) -> bool:
+        return self._canvas
+
+    def canvas_page(self) -> canvas_view.CanvasPage | None:
+        """Home's page in canvas mode (made when the canvas first went on; None before)."""
+        return self._canvas_page
+
+    def _canvas_home(self) -> bool:
+        """The canvas itself is what Home shows now (canvas mode, Home, no moment over it)."""
+        return self._canvas and self._screen == SCREEN_HOME and not self._moment
+
+    def canvas_shown(self) -> bool:
+        """The owner sees the canvas: canvas mode, Home with no moment over it, the view up."""
+        return self._canvas_home() and self.isVisible()
+
+    def _sync_canvas_home(self) -> None:
+        """Home's page in canvas mode: the canvas, or - a moment (the plan, the brief) - Home's own stage page over
+        it, the ask line with it. Off: Home's stage page (the desk forms as before)."""
+        on_canvas = self._canvas and not self._moment
+        had_keys = self._place_canvas_bar(on_canvas)
+        if self._canvas_page is None:
+            return
+        if on_canvas:
+            self._home_switch.setCurrentWidget(self._canvas_page)
+        elif self._home_switch.currentWidget() is self._canvas_page:
+            self._home_switch.setCurrentWidget(self._home_stage_page)
+        if had_keys and self.command_bar.isVisibleTo(self):
+            self.command_bar.focus_input()       # part 5B (the integration review's 2): it keeps the keyboard it had
+        self._sync_canvas_chrome()
+
+    def _place_canvas_bar(self, on_canvas: bool) -> bool:
+        """The ask line: on the canvas in its canvas look, or back in Home's own holder as the hologram pill. True when
+        it had the keyboard as it moved (a new parent drops the focus: the caller gives it back once the page it went
+        to shows - canvas part 5B, the integration review's 2)."""
+        bar = self.command_bar
+        if on_canvas == self._canvas_bar:
+            return False
+        self._canvas_bar = on_canvas
+        had_keys = _holds_focus(bar)
+        if on_canvas and self._canvas_page is not None:
+            bar.set_canvas_said(self.caption_said)       # part 3: never what the caption carries, twice
+            bar.set_canvas(True)
+            self._canvas_page.take_bar(bar)
+            bar.setVisible(self.ask_available())
+        else:
+            bar.set_canvas(False)
+            bar.setMaximumWidth(holo.COMMAND_MAX_WIDTH + 2 * 4)
+            self._command_holder.layout().insertWidget(1, bar, 1000)
+            bar.show()
+        return had_keys
+
+    def _sync_canvas_chrome(self) -> None:
+        """Canvas mode: the header shows on every screen but Home (and over a moment), with Back at its left."""
+        if not hasattr(self, "_screens"):
+            return
+        if self._canvas:
+            over = self._screen != SCREEN_HOME or bool(self._moment)
+            self.header.setVisible(over)
+            self.header.set_back_visible(True)
+        else:
+            self.header.setVisible(True)
+            self.header.set_back_visible(False)
+
+    def go_home(self) -> None:
+        """The canvas's Back and Esc: a moment closes, another screen goes back to Home."""
+        if self._screen == SCREEN_HOME and self._moment:
+            self.close_moment()
+        else:
+            self.set_tab(SCREEN_HOME)
+        if self._canvas:
+            self.focus_ask_bar()
+
+    def mic_level(self) -> float | None:
+        """The microphone's level now (0..1; None while it is not open): the canvas's orb and meter."""
+        return self._mic_level
+
+    def voice_level(self) -> float | None:
+        """Jarvis's voice's level now (0..1; None: not speaking, or not timed)."""
+        level = self._voice_level
+        if level is None:
+            return None
+        try:
+            return level()
+        except Exception:  # noqa: BLE001 - unknown: the page plays its own pulse
+            return None
+
+    def needs_ok_count(self) -> int:
+        """The cards that wait for the owner's OK, in the window and on the desktop HUD (the amber chip's number)."""
+        return self._pending + self._desktop_waiting
+
+    def hold_word(self) -> str:
+        """A Send's hidden hold as the header says it ("Sent" / "Cancelled"; "" none, and on Approvals)."""
+        return "" if self._screen == SCREEN_APPROVALS else self._hold_word
 
     def _build_briefing(self) -> QWidget:
         """The Briefing screen (round 2, HOLOGRAM_SPEC 16.1): the stage with the compact orb, the ready view
@@ -2575,7 +3601,7 @@ class ReadingView(QWidget):
     def set_tab(self, index: int) -> None:
         """Open a screen while its Dock slot shows: SCREEN_HOME (hud.TAB_JARVIS), SCREEN_BRIEFING
         (hud.TAB_BRIEFING), SCREEN_LIVE (hud.TAB_LIVE), SCREEN_MEMORY (hud.TAB_MEMORY), SCREEN_APPROVALS,
-        SCREEN_FOLLOWUPS or SCREEN_SETTINGS. While Jarvis is on the desktop HUD (``hold_screens``) the hidden
+        SCREEN_FOLLOWUPS, SCREEN_SETTINGS, SCREEN_MEETINGS, SCREEN_AGENTS or SCREEN_DOCS. While Jarvis is on the desktop HUD (``hold_screens``) the hidden
         window keeps its screen: the one asked for is only recorded, and the window comes back on it."""
         key = _SCREEN_SLOTS.get(index)
         if key is None or not self.dock.is_slot_visible(key):
@@ -2658,6 +3684,21 @@ class ReadingView(QWidget):
     def meetings_available(self) -> bool:
         return self.dock.is_slot_visible(dock_mod.MEETINGS)
 
+    def set_agents_available(self, available: bool) -> None:
+        """[standing] is on (with Ask): the Dock's Agents slot (Ctrl+9) and its screen (hidden: Home when it was
+        current)."""
+        self._set_slot_available(dock_mod.AGENTS, SCREEN_AGENTS, available)
+
+    def agents_available(self) -> bool:
+        return self.dock.is_slot_visible(dock_mod.AGENTS)
+
+    def set_docs_available(self, available: bool) -> None:
+        """[docs] is on: the Dock's Documents slot (Ctrl+0) and its screen (hidden: Home when it was current)."""
+        self._set_slot_available(dock_mod.DOCS, SCREEN_DOCS, available)
+
+    def docs_available(self) -> bool:
+        return self.dock.is_slot_visible(dock_mod.DOCS)
+
     def set_desktop_available(self, available: bool, hud_key: str = "") -> None:
         """[desktop] is on: the Dock's Desktop (the switch to the HUD; ``hud_key`` as people write it, "Ctrl+Alt+H",
         for its "<key> switches" line) and the Find list's "Desktop". There is no Desktop screen: nothing is switched
@@ -2691,6 +3732,8 @@ class ReadingView(QWidget):
             badge.setVisible(recording)
         self.hero.set_recording(recording)
         self.briefing_orb.set_recording(recording)
+        if self._desk is not None:               # the desk's ring is Home's ring while it shows (final review, int. 3)
+            self._desk.head.orb.set_recording(recording)
         self.dock.set_recording(recording)
         self.meetings_stage.set_recording(recording)
         self.header._fit_notes()
@@ -2709,11 +3752,13 @@ class ReadingView(QWidget):
         self._wake_badges.append(badge)
         badge.set_state(*self._wake)
 
-    def set_wake(self, text: str, look: str) -> None:
+    def set_wake(self, text: str, look: str, short: str = "") -> None:
         """"Hey Jarvis" (wake_ui): what it is doing in words and its look (wake_ui.LOOK_*) for HEY JARVIS in the
-        headers and on the desktop HUD (hidden while it is off)."""
-        if (text, look) == self._wake:
+        headers and on the desktop HUD (hidden while it is off); ``short``: the same in a few words for the canvas's
+        badge (wake_ui.WakeController.short_status; "": the words themselves)."""
+        if (text, look) == self._wake and short == getattr(self, "_wake_short", ""):
             return
+        self._wake_short = short
         self._wake = (text, look)
         for badge in (self.wake_badge, *self._wake_badges):
             badge.set_state(text, look)
@@ -2723,6 +3768,10 @@ class ReadingView(QWidget):
     def wake_state(self) -> tuple[str, str]:
         """(words, wake_ui.LOOK_*) of "Hey Jarvis" for the desktop HUD's chip; LOOK_OFF while it is off."""
         return self._wake
+
+    def wake_words(self) -> str:
+        """"Hey Jarvis" in a few words, for the canvas's badge (its words when no short form was given)."""
+        return getattr(self, "_wake_short", "") or self._wake[0]
 
     def set_followups_available(self, available: bool) -> None:
         """FOLLOW-UPS is on (the bundle): the Dock's Follow-ups slot and its screen."""
@@ -2874,6 +3923,10 @@ class ReadingView(QWidget):
     def set_ask_available(self, available: bool) -> None:
         """Show Ask Jarvis's command bar on Home ([ask] enabled) or keep it out of the layout."""
         self._command_holder.setVisible(available)
+        if self._canvas_bar:
+            self.command_bar.setVisible(bool(available))     # the canvas's ask line is the same bar
+        if self._desk is not None:
+            self._desk.ask_slot.setVisible(bool(available) and self._desk_shown)
 
     def ask_available(self) -> bool:
         return not self._command_holder.isHidden()
@@ -3131,12 +4184,19 @@ class ReadingView(QWidget):
         self._apply_tier(event.size().width())
         self._fit_short(self._screens_height(event.size().height()))
         self._apply_highlight(scroll_to=False)   # line wrapping changed
+        if self._desk is not None:
+            self._desk.set_folded_dock(event.size().width() < DOCK_LABELS_FROM)
         QTimer.singleShot(0, self._place_drawers)
 
     def _place_drawers(self) -> None:
         if shiboken6.isValid(self):
             self.transcript_drawer.place()
             self.day_drawer.place()
+            if self.board_drawer is not None:
+                self.board_drawer.place()
+            if self._board_on and self._board_view is not None:
+                self._place_board_view()        # the desk's column, or the drawer under a 360 px frames area
+                self._sync_desk(fly=False)
 
     def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().showEvent(event)
@@ -3152,11 +4212,25 @@ class ReadingView(QWidget):
         self.startup.note_shown(self._hud_present)     # hidden for the desktop HUD: still present
 
     def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
-        if event.key() == Qt.Key.Key_Escape and (self.transcript_drawer.is_open() or self.day_drawer.is_open()):
+        board_open = self.board_drawer is not None and self.board_drawer.is_open()
+        if event.key() == Qt.Key.Key_Escape and (self.transcript_drawer.is_open() or self.day_drawer.is_open()
+                                                 or board_open):
             event.accept()
             self.transcript_drawer.close_drawer()
             self.day_drawer.close_drawer()
+            if self.board_drawer is not None:
+                self.board_drawer.close_drawer()
             return
+        if (self._canvas and event.key() == Qt.Key.Key_Escape and event.modifiers() == Qt.KeyboardModifier.NoModifier
+                and (self._screen != SCREEN_HOME or self._moment)):
+            event.accept()                       # the canvas: Esc on a screen opened over it goes back to it
+            self.go_home()
+            return
+        if self._canvas and event.key() == Qt.Key.Key_Escape and event.modifiers() == Qt.KeyboardModifier.NoModifier:
+            leave = getattr(self.window(), "leave_fullscreen", None)
+            if callable(leave) and leave():      # part 5B: on the canvas itself, Esc leaves full screen
+                event.accept()
+                return
         super().keyPressEvent(event)
 
     def _auto_scroll(self, block: QTextBlock) -> None:
@@ -3342,11 +4416,26 @@ class BriefingWindow(hud.HudWindowFrame):
     ``muteToggled``; its chips the service states). The window paints the hologram ground there
     (``ground``, a holo.GroundCache the hero orb paints its slice of), and reads the Windows
     animation setting again on WM_SETTINGCHANGE (holo.refresh_reduced_motion).
+
+    The canvas (PLAN-canvas part 1; ``reading.canvasChanged``): in canvas mode the window is an ordinary one - not
+    always on top (a maximised window that stayed on top would cover every other app) - and the first time the
+    reading view shows it opens maximised (the app remembers no size between starts; within a session it keeps what
+    the owner made of it). F11 toggles full screen (``toggle_fullscreen``), ``toggle_maximized`` the page's
+    maximise button, ``start_drag`` its wordmark. Maximised or full screen the frame has no margins and no cut
+    corners; restored it has them again, and resizes down to READING_MIN_SIZE as before.
+
+    The window brief: in canvas mode on real Windows the window is an ordinary Windows window with its caption hidden
+    (window_chrome.NativeChrome: ``_sync_chrome`` sets the styles, ``nativeEvent`` hands it Windows' messages,
+    ``chrome_hit`` says what each point is - the edges, the page's top band as the caption but for its controls, the
+    page's maximise button as Windows' own -, ``set_page_chrome`` takes the page's report, ``maxHoverChanged`` lights
+    the page's maximise button). Off Windows, under the tests' offscreen platform and with the canvas off, nothing of it
+    runs.
     """
 
     closeRequested = Signal()
     visibilityChanged = Signal()   # shown, hidden, minimized or restored
     activeChanged = Signal(bool)   # the window became the active window (True) or stopped being it
+    maxHoverChanged = Signal(bool)     # the window brief: the pointer is on Windows' own maximise button (the page's)
 
     def __init__(self, short_minutes: int, long_minutes: int) -> None:
         super().__init__(margins=_PROMPT_MARGINS)
@@ -3371,6 +4460,7 @@ class BriefingWindow(hud.HudWindowFrame):
         self.ground = holo.GroundCache()
         self.reading.hero.set_ground(orb_mod.ground_painter(self.ground))
         self.reading.briefing_orb.set_ground(orb_mod.ground_painter(self.ground))
+        self.reading.set_ground_painter(orb_mod.ground_painter(self.ground))     # the desk's ring (made at first use)
         self.reading.transition.set_ground(orb_mod.ground_painter(self.ground))
         self.visibilityChanged.connect(self.reading.sync_presence)   # minimised / restored: the start-up's clock
         holo_header = self.reading.header
@@ -3387,6 +4477,19 @@ class BriefingWindow(hud.HudWindowFrame):
         mute.setContext(Qt.ShortcutContext.WindowShortcut)
         mute.setAutoRepeat(False)
         mute.activated.connect(self._on_mute_shortcut)
+        # The canvas (PLAN-canvas part 1): the window follows canvas mode; F11 is full screen while it is on.
+        self._frame_cut = self._cut           # the frame's cut corners (none while maximised or full screen)
+        self._canvas_sized = False            # the canvas window was opened maximised once (then the owner's size holds)
+        self._before_full = Qt.WindowState.WindowNoState    # what F11 goes back to
+        self._full_shortcut = QShortcut(QKeySequence(Qt.Key.Key_F11), self)
+        self._full_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._full_shortcut.setAutoRepeat(False)
+        self._full_shortcut.setEnabled(False)
+        self._full_shortcut.activated.connect(self.toggle_fullscreen)
+        self.reading.canvasChanged.connect(self._on_canvas)
+        # The window brief: in canvas mode on real Windows the window behaves as any Windows window (window_chrome).
+        self._chrome = window_chrome.NativeChrome(self)
+        self._page_chrome: Any = None         # the page's top band (board.protocol "chrome"), for Windows' hit-test
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt override
         event.ignore()   # the controller decides what closing means
@@ -3397,6 +4500,7 @@ class BriefingWindow(hud.HudWindowFrame):
         handle = self.windowHandle()
         if handle is not None:
             orb_mod.watch_input(handle)    # the owner's keys and mouse here end the orbs' deep idle
+        self._sync_chrome()                   # (a flag change made Qt set its own style again)
         self.visibilityChanged.emit()
 
     def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
@@ -3406,6 +4510,8 @@ class BriefingWindow(hud.HudWindowFrame):
     def changeEvent(self, event: QEvent) -> None:  # noqa: N802 - Qt override
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange:
+            self._sync_frame()                # maximised or full screen: no margins, no cut corners
+            self._sync_chrome()               # out of full screen: Windows' own behaviour again
             self.visibilityChanged.emit()
         elif event.type() == QEvent.Type.ActivationChange:
             if self.isActiveWindow():
@@ -3413,7 +4519,8 @@ class BriefingWindow(hud.HudWindowFrame):
             self.activeChanged.emit(self.isActiveWindow())
 
     def nativeEvent(self, event_type: Any, message: Any) -> Any:  # noqa: N802 - Qt override
-        """WM_SETTINGCHANGE: Windows' animation setting may have changed (reduced motion, spec 12.9)."""
+        """WM_SETTINGCHANGE: Windows' animation setting may have changed (reduced motion, spec 12.9). The window brief:
+        in canvas mode Windows' window messages are answered by window_chrome.NativeChrome."""
         try:
             if bytes(event_type) == b"windows_generic_MSG" and _native_windows():
                 from ctypes import wintypes
@@ -3421,9 +4528,58 @@ class BriefingWindow(hud.HudWindowFrame):
                 msg = wintypes.MSG.from_address(int(message))
                 if msg.message == _WM_SETTINGCHANGE:
                     QTimer.singleShot(0, holo.refresh_reduced_motion)
+                answer = self._chrome.handle(msg)
+                if answer is not None:
+                    return answer
         except Exception:  # noqa: BLE001 - a message this cannot read changes nothing
             pass
         return super().nativeEvent(event_type, message)
+
+    # ---- the window brief: Windows' own window behaviour in canvas mode (window_chrome) ------------------------------
+
+    def _sync_chrome(self) -> None:
+        """The window has an ordinary Windows window's styles exactly while the canvas is what it shows (on real
+        Windows only; full screen: Qt holds the style and gives it back after)."""
+        if not _native_windows() or not self.testAttribute(Qt.WidgetAttribute.WA_WState_Created):
+            return
+        try:
+            full = bool(self.windowState() & Qt.WindowState.WindowFullScreen)
+            self._chrome.sync(int(self.winId()), self.canvas_window(), apply=not full)
+        except Exception as exc:  # noqa: BLE001 - the window stays as Qt has it
+            logger.debug("Window: the native frame was not set (%s)", type(exc).__name__)
+
+    def native_chrome(self) -> Any:
+        """window_chrome.NativeChrome of this window (its wish and its answers)."""
+        return self._chrome
+
+    def set_page_chrome(self, report: Any) -> None:
+        """The page's top band as it reported it (board.protocol's "chrome" Request): Windows' hit-test reads it."""
+        self._page_chrome = report
+
+    def chrome_hit(self, pos: QPointF) -> int:
+        """What the point ``pos`` (this window's px) is for Windows (window_chrome.hit_test): the edges while the window
+        is resizable and not maximised; on Home's canvas, the page's top band as the caption but for its own controls,
+        and its maximise button as Windows' own; on another screen, its header's empty part as the caption."""
+        child = self.childAt(pos.toPoint())
+        band = None
+        header = False
+        reading = self.reading
+        if self.canvas_window() and child is not None:
+            board = reading.board_view()
+            if board is not None and board.isVisible() and reading.canvas_shown() \
+                    and (child is board or board.isAncestorOf(child)):
+                origin = QPointF(board.mapTo(self, QPoint(0, 0)))
+                band = window_chrome.band_from(self._page_chrome, origin, board.width())
+            elif child is reading.header and reading.header.isVisible():
+                header = True
+        edges = bool(self._resizable) and not self._filled()
+        return window_chrome.hit_test(pos, QSizeF(self.size()), edges=edges, band=band, header=header)
+
+    def set_max_hover(self, hover: bool) -> None:
+        self.maxHoverChanged.emit(bool(hover))
+
+    def call_soon(self, fn: Callable[[], Any]) -> None:
+        QTimer.singleShot(0, self, fn)
 
     def _render_ground(self, dpr: float, center: QPointF | None) -> QPixmap:
         """The hologram ground behind the reading view (void, the triangle grid, the vignette), the
@@ -3469,6 +4625,95 @@ class BriefingWindow(hud.HudWindowFrame):
     def is_reading_view(self) -> bool:
         return self._stack.currentWidget() is self.reading
 
+    # ---- the canvas's window (PLAN-canvas part 1) ---------------------------------------------------------------
+
+    def _on_canvas(self, on: bool) -> None:
+        """Canvas mode went on: an ordinary window (never always on top), F11 for full screen. Off (the page could
+        not start, or stopped for good): out of full screen and maximised - the old look has no way back from either -
+        at the old look's own size (canvas part 5B, the integration review's 1)."""
+        self._full_shortcut.setEnabled(bool(on))
+        if not on and self._filled():
+            self.setWindowState(self.windowState() & ~(Qt.WindowState.WindowMaximized
+                                                       | Qt.WindowState.WindowFullScreen))
+            self._before_full = Qt.WindowState.WindowNoState
+            if self.is_reading_view():
+                room = self._screen_room()
+                minimum = READING_MIN_SIZE.boundedTo(room)
+                self._apply_size(READING_SIZE.boundedTo(room).expandedTo(minimum), minimum)
+        if on and bool(self.windowFlags() & Qt.WindowType.WindowStaysOnTopHint):
+            shown = self.isVisible()
+            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+            if shown:
+                self.show()                   # (changing a flag hides a window; the app turns the canvas on before it shows)
+        self._sync_frame()
+        self._sync_chrome()
+
+    def canvas_window(self) -> bool:
+        """The reading view shows in canvas mode: the window may be maximised and full screen."""
+        return self.is_reading_view() and self.reading.canvas_on()
+
+    def _filled(self) -> bool:
+        return bool(self.windowState() & (Qt.WindowState.WindowMaximized | Qt.WindowState.WindowFullScreen))
+
+    def _sync_frame(self) -> None:
+        """The frame around the reading view: its margins (the resize grab zone) and cut corners while it is a
+        window on the desktop; none while it fills the screen."""
+        if not self.is_reading_view():
+            return
+        filled = self._filled()
+        margins = (0, 0, 0, 0) if filled else _READING_MARGINS
+        cut = 0 if filled else self._frame_cut
+        current = self.layout().contentsMargins()
+        if (current.left(), current.top(), current.right(), current.bottom()) != margins or cut != self._cut:
+            self.layout().setContentsMargins(*margins)
+            self._cut = cut
+            self._cache = None
+            self.update()
+
+    def toggle_fullscreen(self) -> None:
+        """F11 (canvas mode): full screen, and back to what the window was (maximised or its own size)."""
+        if not self.canvas_window():
+            return
+        state = self.windowState()
+        if state & Qt.WindowState.WindowFullScreen:
+            self.setWindowState((state & ~Qt.WindowState.WindowFullScreen) | self._before_full)
+        else:
+            self._before_full = state & Qt.WindowState.WindowMaximized
+            self.setWindowState((state & ~Qt.WindowState.WindowMaximized) | Qt.WindowState.WindowFullScreen)
+
+    def leave_fullscreen(self) -> bool:
+        """Esc on the canvas (part 5B, the walk's 11): out of full screen, back to what the window was before F11. False
+        when it was not full screen (Esc then does what it did)."""
+        state = self.windowState()
+        if not self.canvas_window() or not state & Qt.WindowState.WindowFullScreen:
+            return False
+        self.setWindowState((state & ~Qt.WindowState.WindowFullScreen) | self._before_full)
+        return True
+
+    def toggle_maximized(self) -> None:
+        """The page's maximise button (canvas mode): maximised, or the window's own size again (out of full screen
+        first)."""
+        if not self.canvas_window():
+            return
+        state = self.windowState()
+        if state & Qt.WindowState.WindowFullScreen:
+            self.setWindowState((state & ~Qt.WindowState.WindowFullScreen) | Qt.WindowState.WindowMaximized)
+        elif state & Qt.WindowState.WindowMaximized:
+            self.setWindowState(state & ~Qt.WindowState.WindowMaximized)
+        else:
+            self.setWindowState(state | Qt.WindowState.WindowMaximized)
+
+    def start_drag(self) -> bool:
+        """The page's wordmark was pressed (canvas mode): the system moves the window with the pointer, while it is
+        not filling the screen. False when it does not."""
+        if not self.canvas_window() or self._filled():
+            return False
+        handle = self.windowHandle()
+        try:
+            return bool(handle is not None and handle.startSystemMove())
+        except Exception:  # noqa: BLE001 - no move rather than an error
+            return False
+
     def set_hour24(self, hour24: bool) -> None:
         """The header clock and the activity times: "13:05" (True) or "1:05 PM" (False)."""
         assert self.header is not None
@@ -3504,8 +4749,14 @@ class BriefingWindow(hud.HudWindowFrame):
         self.header.show()
         self._cache = None
         self._show_reading_chips(False)
+        if self._filled():                    # the canvas filled the screen: the prompt is a small window again
+            self.setWindowState(self.windowState() & ~(Qt.WindowState.WindowMaximized
+                                                        | Qt.WindowState.WindowFullScreen))
+            self._canvas_sized = False        # (the canvas opens maximised again after it)
+        self._cut = self._frame_cut
         self.layout().setContentsMargins(*_PROMPT_MARGINS)
         self.set_resizable(False)
+        self._sync_chrome()                   # the prompt: Qt's frameless window again
         self.set_glow_anchor(self.prompt.orb)
         self.fit_prompt(force=True)
 
@@ -3565,7 +4816,19 @@ class BriefingWindow(hud.HudWindowFrame):
         self.set_glow_anchor(None)
         room = self._screen_room()
         minimum = READING_MIN_SIZE.boundedTo(room)   # a small screen gets a smaller window
-        self._apply_size(READING_SIZE.boundedTo(room).expandedTo(minimum), minimum)
+        if not (self.reading.canvas_on() and self._filled()):
+            self._apply_size(READING_SIZE.boundedTo(room).expandedTo(minimum), minimum)
+        else:
+            self.setMinimumSize(minimum)      # filling the screen already: only the minimum it resizes down to
+            self.setMaximumSize(_QWIDGETSIZE_MAX, _QWIDGETSIZE_MAX)
+        self._sync_chrome()                   # (first: a maximise below asks Windows with the window's own styles)
+        if self.reading.canvas_on() and not self._canvas_sized:
+            # The canvas opens maximised (the app remembers no size between starts); after that the owner's own
+            # size holds for the session.
+            self._canvas_sized = True
+            self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
+        self._sync_frame()
+        self._sync_chrome()
         self.reading.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _screen_room(self) -> QSize:
@@ -3875,6 +5138,8 @@ TOAST_VIEW = "view"                    # the toast's View: the Briefing screen
 TOAST_PREP = "prep"                    # the toast's Prepare brief: Home with the prep offer's tile
 TOAST_TIMER = "timer"                  # P2.4: a Jarvis timer ended - its OK only puts the toast away
 TOAST_TIMER_TEXT = "OK"
+TOAST_AGENTS = "agents"                # the toast's View agents: the Agents screen ([standing])
+STANDING_TELL_DELAY_MS = 3000          # reading began: the standing news is told after the greeting
 FOCUS_SPEECH_KEPT = 8                  # P2.5: sentences focus mode holds at most (memory only) ...
 FOCUS_SPEECH_SAID = 3                  # ... and says, newest last, when it ends
 FOCUS_TOAST_AFTER_MS = states_view.TOAST_MS + 250   # a held toast waits this long for the one showing as focus ends
@@ -3928,6 +5193,9 @@ _MEMORY_DROP_WORDS = {"read_only": "memory.json can't be read", "duplicate": "yo
 # How the conversation shows what Jarvis says after a card was carried out (persona.outcome_tone).
 _RESULT_TONES = {OUTCOME_GOOD: hud.TONE_GOOD, OUTCOME_ERROR: hud.TONE_ERROR, OUTCOME_WARN: hud.TONE_WARN}
 _GREETING_WAIT_MS = 3000          # an opening greeting waits this long for the first fetch answer
+# The briefing's audio is made only after his start-up line was said (the local voice loads and says his line first),
+# or at the latest this long after the start (2026-11-24).
+_PRERENDER_WAIT_MS = 30_000
 _GREETING_REPEAT_S = 120.0        # an open of a hidden or minimized window greets again after this
 _LOCK_RECHECK_MS = 5000           # a held announcement checks the lock screen again this often
 _CONVERSATION_SAVE_MS = 500       # conversation.json is written this long after the conversation changed
@@ -3986,8 +5254,20 @@ UNDO_FAILED_NOTE = "Undo didn't go through: {reason} - Retry tries again"
 UNDO_UNKNOWN_NOTE = "Undo may or may not have gone through - Retry checks the event first"
 UNDO_GONE_SUB = {CALENDAR: "removed from your calendar", TODO: "removed from your calendar",
                  RSVP: "your answer is back as it was", MOVE: "back at its old time"}
-_GROUP_TITLES = {SOURCE_ASK: "Ask", SOURCE_BRIEFING: "Briefing"}   # the NEEDS YOUR OK group headers
+# The NEEDS YOUR OK group headers, in the order the groups are shown (_merged_actions).
+_GROUP_TITLES = {SOURCE_ASK: "Ask", SOURCE_CAPTURE: "Capture", SOURCE_STANDING: "Agents",
+                 SOURCE_BRIEFING: "Briefing"}
+# Build plan item 3: the capture cards kept on screen (captures.json keeps them across a restart: capture_store); the
+# oldest that is not on its way goes first.
+_CAPTURE_CARDS_MAX = 100
+CAPTURE_SOURCE_TEXT = "Source"        # a capture card's tool: its kept copy in Jarvis's own viewer
+CAPTURE_LIST_PAGES = 40               # a capture's duplicate check reads up to 40 pages of 50 events
 _ASK_CARDS_MAX = 16                    # Ask cards kept (this run, memory only); the oldest go first
+# Standing agents' and rules' cards kept on screen (loaded from their run files of the last days, which keep
+# them across a restart); the oldest that is not on its way goes first.
+_STANDING_CARDS_MAX = 40
+# A standing card's label says which kind of job proposed it ("Rule - Todo").
+_STANDING_TITLES = {MODE_STANDING_AGENT: "Agent", MODE_STANDING_RULE: "Rule"}
 # A planner mode's cards (the productivity bundle) say which mode proposed them ("Plan - block").
 _MODE_TITLES = MODE_TITLES
 PLAN_BLOCK_PASSED_NOTE = "This block's time has passed - plan again"
@@ -4135,6 +5415,28 @@ _DECISION_CLICK_GUARD_S = 1.0
 # While an approval (or a Connect sign-in) runs, the other cards are locked.
 LOCK_TIP = "Finishing the previous approval..."
 SIGN_IN_LOCK_TIP = "Finishing the Google sign-in..."
+# While Add all runs (mail extras, part 1): every card is locked, one card at a time goes through its own path.
+BATCH_LOCK_TIP = "Adding the list, one card at a time..."
+BATCH_CHANGED_TEXT = "The list changed - check it again"
+# The Edit dialog's Rewrite (mail extras, part 2): Jarvis's own words in its status line (never the model's).
+REVISE_REQUEST_WORDS = "Rewrite the message"
+REVISE_CARD_BUSY_NOTE = "This card is already being carried out or decided; nothing was changed."
+REVISE_OFF_NOTE = "Rewrite needs Ask, which is off."
+REVISE_BUSY_NOTE = "Jarvis is busy with another request; Rewrite again when it's done."
+REVISE_NOT_STARTED_NOTE = "Jarvis couldn't start the rewrite now; the ask line says why."
+REVISE_STOPPED_NOTE = "Stopped; the message is as it was."
+REVISE_CHANGED_NOTE = "The message changed while Jarvis worked, so his rewrite was dropped. Rewrite again."
+REVISE_QUESTION_NOTE = "Jarvis wasn't sure what to change. Try saying it another way."
+REVISE_FAILED_NOTE = "Jarvis couldn't rewrite it this time{why}; the message is as it was."
+REVISE_HELD_NOTES = {
+    "": "Jarvis held the rewrite back; the message is as it was.",
+    "empty": "Jarvis's rewrite came back empty; the message is as it was.",
+    "too_long": "Jarvis's rewrite was too long; the message is as it was.",
+    "new_address": ("Jarvis held the rewrite back: it had an email address that is in neither the message nor your "
+                    "words."),
+    "new_link": "Jarvis held the rewrite back: it had a link that is in neither the message nor your words.",
+    "control": "Jarvis held the rewrite back: it had hidden characters.",
+}
 _LOCKED_MESSAGE = "Ignored an approval click: the previous approval is still running"
 _SIGN_IN_LOCKED_MESSAGE = "Ignored an approval click: the Google sign-in is still running"
 
@@ -4629,6 +5931,8 @@ _CalendarWorker = _ActionWorker   # its name before it also answered, moved and 
 
 def closed_first_text(action: ProposedAction) -> str:
     """What a card says when Jarvis closed before its hold could go out (nothing was sent)."""
+    if action.kind == UNSUBSCRIBE:
+        return CLOSED_FIRST_UNSUBSCRIBE_MESSAGE
     return CLOSED_FIRST_CANCEL_MESSAGE if action.kind == CANCEL else CLOSED_FIRST_MESSAGE
 
 
@@ -4804,6 +6108,8 @@ def _card_options(action: ProposedAction, view: CardView) -> dict[str, Any]:
     options: dict[str, Any] = {"approve_text": view.approve_text or "Approve", "body": view.body,
                                "open_text": view.open_text, "copy_text": view.copy_text,
                                "title_lines": 2 if action.structured else 0, "deny_text": view.deny_text}
+    if action.source == SOURCE_CAPTURE:
+        options["open_text"] = CAPTURE_SOURCE_TEXT     # its kept copy in Jarvis's own viewer (never a link)
     if action.sends_mail:
         # A Reply / Email: FROM and the recipients' chips, the text as sent (line breaks kept,
         # links highlighted, 10 lines), Edit; the right-hand button reads Send, Retry or Done.
@@ -4845,6 +6151,19 @@ class _SendHold:
 
 
 @dataclasses.dataclass
+class _Batch:
+    """Add all while it runs (mail extras, part 1): the confirmed cards' ids in card order, carried out one at a time
+    through the card's own path. Memory only."""
+
+    ids: list[str]
+    rows: dict[str, Any] = dataclasses.field(default_factory=dict)   # id -> the confirmed batch.Row (what it adds)
+    added: int = 0
+    index: int = 0               # the next card to start
+    current: str = ""            # the card being added now ("" between two cards)
+    stop: bool = False           # the owner's Stop: it ends after the card being added now
+
+
+@dataclasses.dataclass
 class _UndoOffer:
     """A calendar change Jarvis made (an added event or block, an answer, a move) whose card offers Undo:
     for UNDO_WINDOW_S or until the card is cleared. Memory only."""
@@ -4857,6 +6176,14 @@ class _UndoOffer:
     note: str = ""               # why the last Undo did not go through (its Undo then says Retry)
 
 
+def _couldnt_words(action: ProposedAction) -> str:
+    """"Couldn't move Project sync"; an Unsubscribe's own title reads on ("Couldn't unsubscribe from Acme Deals")."""
+    title = _kind_title(action)
+    if action.kind == UNSUBSCRIBE and title[:1].isupper():
+        return f"Couldn't {title[:1].lower()}{title[1:]}"
+    return f"Couldn't {_VERBS.get(action.kind, 'do')} {title}"
+
+
 def _action_phrase(action: ProposedAction) -> str:
     """"Accept Speaker series", "Move Project sync", "Cancel Study group", "Add Project sync",
     "Add a block for Problem set 3", or a Reply's / Email's subject (activity rows)."""
@@ -4865,7 +6192,7 @@ def _action_phrase(action: ProposedAction) -> str:
         return f"Add {title}"
     if action.kind == TODO:
         return f"Add a block for {title}"
-    if action.kind in (REPLY, EMAIL):
+    if action.kind in (REPLY, EMAIL, UNSUBSCRIBE):   # an Unsubscribe's title says it ("Unsubscribe from Acme Deals")
         return _kind_title(action)
     if action.kind == RSVP:
         verb = {"yes": "Accept", "no": "Decline", "maybe": "Answer maybe to"}.get(action.field("answer"), "Answer")
@@ -5154,7 +6481,20 @@ class AppController(QObject):
     his toasts and voice are held and the offers see no activity; when it ends - at its end, by the focus chip's Undo,
     by Undo all or by a Turn off (``focusChanged``) - the newest toast and the last few sentences come back and the
     offers tick again. The owner's own timers still end with their toast.
+
+    Quiet during calls ([voice] quiet_in_calls, on by default; smaller items part 7): from start() on, calls.CallWatch
+    asks every 3 s whether another app uses the microphone (``call_probe`` replaces that read: tests). While it does
+    (``_call_quiet``) his voice is captions only, as while a meeting records (nothing kept for later); the soft sounds
+    and the timers' and reminders' end sounds keep quiet (their toasts still show); "Hey Jarvis" pauses; a standing
+    line waits; a scheduled briefing's arrival waits for the call's end (within the catch-up window); Home's resting
+    line says "You're on a call, sir: I'll keep to captions." (shown, never said).
     """
+
+    call_probe: Callable[[], bool] | None = None     # quiet during calls: None is calls.py's registry read
+    _call_watch: Any = None
+    _call_timer: QTimer | None = None
+    _call_arrival_held = False                      # a scheduled arrival waits for the call's end
+    _call_deadline: QTimer | None = None            # ... at most until the catch-up window closes
 
     def __init__(self, config: Config, client: NotionClient, *, expected_run: str | None,
                  now_mode: bool, startup_error: str | None = None, volume: float = 1.0,
@@ -5177,9 +6517,13 @@ class AppController(QObject):
                  desktop_launch: bool = False,
                  desktop_backend: Callable[[], Any] | None = None,
                  desktop_window_api: Any = None,
-                 agent_factory: Callable[..., Any] | None = None) -> None:
+                 agent_factory: Callable[..., Any] | None = None,
+                 board_factory: Callable[[Any], Any] | None = None) -> None:
         super().__init__()
         self.config = _with_picked_voice(config)   # Settings > Voice's pick (voice.json) wins over [voice] local_voice
+        # The new look's board (desk_ui; [look] board): ``board_factory(parent)`` makes its one view (None: the real
+        # board.view.BoardView - never on a test platform, where Home then stays as it was).
+        self._board_factory = board_factory
         self.client = client
         self._on_shutdown = on_shutdown   # e.g. an exit watchdog (the app passes one; tests do not)
         self._desktop_launch = bool(desktop_launch)   # --hud (the HUD key started Jarvis): onto the HUD once ready
@@ -5265,6 +6609,9 @@ class AppController(QObject):
         self.talk: Any = self._create_talk()            # [talk]: the talk key's listening, or None while it is off
         self.wake: Any = self._create_wake()            # "Hey Jarvis" (wake_ui) beside the talk, or None without it
         self.voice_download: Any = self._create_voice_settings()   # [voice] engine "local": Settings > Voice's part
+        self.standing: Any = self._create_standing()    # [standing]: the Agents screen and its cards, or None
+        self.capture: Any = self._create_capture()      # build plan item 3: drops, pastes and the CAPTURE cards
+        self.docs: Any = self._create_docs()            # build plan item 5: [docs] documents and datasheets, or None
         self.window.reading.set_find_actions(self.productivity is not None)   # offers' links in the Find list
         # Jarvis's own voice: silent unless injected; start() builds the real one ([assistant] speak).
         self._voice_injected = voice_factory is not None
@@ -5272,6 +6619,8 @@ class AppController(QObject):
         self.window.set_speaker_available(bool(config.assistant.speak))
         self._sync_speaker()
         self._init_hologram()
+        self._say_network_use()                         # the canvas's engine start never opens a usable gate
+        self.look: Any = self._create_look()            # the new look: the soft sounds and Settings > Look
 
     def _init_hologram(self) -> None:
         """Round 1 of the hologram: the orbs stop while the session is locked (the existing probe,
@@ -5280,7 +6629,9 @@ class AppController(QObject):
         orb_mod.set_lock_probe(self._locked)        # the lock screen check the announcements use
         reading = self.window.reading
         reading.settings_page.set_paths(str(self._config_path()), str(self.config.data_dir))
-        reading.settings_page.set_config(self.config)         # read only: shown, never written back
+        reading.settings_page.set_config(self.config)         # shown; config.toml is never written back
+        # Smaller items part 4: Change on a comfort row writes settings.json in the data folder (used after a restart)
+        reading.settings_page.set_store(overrides.SettingsStore(overrides.settings_file(self.config.data_dir)))
         reading.set_address(self.config.assistant.address)
         reading.set_greeting(self._resting_greeting())
         # Round 2, part 3b (HOLOGRAM_SPEC 16.7): quiet hours are the bundle's (no bundle: none shown), and the
@@ -5322,9 +6673,23 @@ class AppController(QObject):
         if self._toast_window is None:
             self._toast_window = states_view.Toast()
             self._toast_window.actionClicked.connect(self._on_toast_action)
+            self._toast_window.avoid = self._toast_avoid     # part 5B: never over the canvas's orb
             if getattr(self, "desktop", None) is not None:
                 self.desktop.set_toast(self._toast_window)    # the desktop HUD keeps it under its bar
         return self._toast_window
+
+    def _toast_avoid(self) -> Any:
+        """Canvas part 5B (the walk's 22): while Jarvis's window shows the canvas, its orb's corner on the screen (global
+        px) - the toast goes above it; None otherwise."""
+        window = self.window
+        reading = window.reading
+        page = reading.canvas_page() if hasattr(reading, "canvas_page") else None
+        if page is None or not window.isVisible() or window.isMinimized() or not reading.canvas_shown():
+            return None
+        from . import canvas_view
+
+        box = canvas_view.orb_corner(page.width(), page.height())
+        return QRect(page.mapToGlobal(box.topLeft()), box.size())
 
     def _post_toast(self, line: str, action: str, key: str) -> None:
         """Jarvis's own toast (never a Windows notification, never the focus), only where the app already
@@ -5352,15 +6717,19 @@ class AppController(QObject):
         if self._hud_active():
             # On the desktop HUD: the click brings the window back on the toast's screen (leave_hud comes forward on
             # this click, never with force_foreground's synthetic Alt).
-            screen = {TOAST_VIEW: SCREEN_BRIEFING, TOAST_PREP: SCREEN_HOME}.get(key)
+            screen = {TOAST_VIEW: SCREEN_BRIEFING, TOAST_PREP: SCREEN_HOME, TOAST_AGENTS: SCREEN_AGENTS}.get(key)
             if self.desktop.leave_hud(screen) and key == TOAST_PREP:
                 reading.close_moment()
+                reading.show_side_tile()               # the stage with the tile, also over the desk
             return
         if key == TOAST_VIEW:
             reading.set_tab(SCREEN_BRIEFING)
         elif key == TOAST_PREP:
             reading.set_tab(SCREEN_HOME)
             reading.close_moment()
+            reading.show_side_tile()                   # the stage with the prep offer's tile, also over the desk
+        elif key == TOAST_AGENTS:
+            reading.set_tab(SCREEN_AGENTS)
         force_foreground(self.window)
 
     def _config_path(self) -> Path:
@@ -5400,6 +6769,10 @@ class AppController(QObject):
 
     def _init_script_state(self) -> None:
         self._prefetch: Script | None = None     # script prepared while the prompt shows
+        self._prerender_held = False             # the briefing's audio waits for the start-up line (local voice)
+        self._prerender_due: tuple[Script, bool] | None = None   # what waits: the script and its include_note
+        self._prerender_heard = False            # an utterance started while it waited (its end lets the audio go)
+        self._prerender_began = 0.0
         self._script: Script | None = None       # frozen script on the reading screen
         self._generation = 0
         self._audio: dict[int, SectionAudio] = {}
@@ -5416,9 +6789,10 @@ class AppController(QObject):
         self._skip_pending = False               # the next section start follows a skip or jump
 
     def _init_action_state(self) -> None:
-        self._actions: list[ProposedAction] = []   # the cards shown: ASK + BRIEFING (_merged_actions)
+        self._actions: list[ProposedAction] = []   # the cards shown: ASK + AGENTS + BRIEFING (_merged_actions)
         # One list per source (memory only; the decisions are saved by id like every card's).
-        self._source_lists: dict[str, list[ProposedAction]] = {SOURCE_ASK: [], SOURCE_BRIEFING: []}
+        self._source_lists: dict[str, list[ProposedAction]] = {SOURCE_ASK: [], SOURCE_CAPTURE: [],
+                                                               SOURCE_STANDING: [], SOURCE_BRIEFING: []}
         self._ask_busy = False                     # an Ask is planning (the orb says PLANNING)
         self._autoplay = True                      # the reading starts playing once it is shown (not --ask)
         self._reading_settled = False              # this reading answered its scheduled slot (Read now, Play)
@@ -5427,6 +6801,8 @@ class AppController(QObject):
         self._jobs: dict[str, str] = {}            # action id -> _STAGE_* while held, queued, running or undoing
         self._running: dict[str, tuple[ProposedAction, bool]] = {}   # id -> (what was sent, writes_running)
         self._send_hold: _SendHold | None = None   # at most one: the other cards are locked meanwhile
+        self._batch: _Batch | None = None          # Add all while it runs (every card locked meanwhile)
+        self._batch_dialog: hud.BatchConfirmDialog | None = None
         self._hold_ends: list[threading.Event] = []   # a hold's call queued at its end: set when it is over
         self._undos: dict[str, _UndoOffer] = {}    # action id -> the Undo its card offers (calendar changes)
         self._result_notes: dict[str, str] = {}    # action id -> why its Undo left the change as it is
@@ -5454,6 +6830,11 @@ class AppController(QObject):
         # Reply / Email id -> _review_digest of the subject and message the Edit dialog showed whole, RSVP id ->
         # of its note (this run, memory only): the click skips the review only while the card still says exactly that.
         self._reviewed: dict[str, str] = {}
+        # Mail extras (part 2): the Edit dialog's Rewrite on its way ((card id, digest of what the dialog showed)), and
+        # the cards whose saved message is a rewrite (Send opens the dialog to read it whole first).
+        self._revise_run: tuple[str, str] | None = None
+        self._revise_asking = False    # a Rewrite's Ask run was started and has not ended (its cancel says nothing)
+        self._rewritten: set[str] = set()
         self._connect_mail = False                 # the queued / running sign-in is a Reply / Email's Send
         self._read_slot: str | None = None         # the scheduled slot this reading settled
         # The day plan (the productivity bundle; memory only): Todo card id -> the day a created plan
@@ -5534,6 +6915,8 @@ class AppController(QObject):
         # Only while a Send's or Cancel's hidden hold runs (it goes on when minimised or locked).
         self._send_hold_timer = self._make_timer(self._on_send_hold_tick, single_shot=False,
                                                  interval_ms=_HOLD_TICK_MS)
+        # Add all: the pause between one card's result and the next card's start.
+        self._batch_timer = self._make_timer(self._batch_step, single_shot=True, interval_ms=batch.STEP_GAP_MS)
         # Only while a card offers Undo (it goes after UNDO_WINDOW_S).
         self._undo_timer = self._make_timer(self._on_undo_tick, single_shot=False, interval_ms=_UNDO_TICK_MS)
         # The opening greeting waits at most this long for the first fetch answer.
@@ -5541,6 +6924,9 @@ class AppController(QObject):
                                                 interval_ms=_GREETING_WAIT_MS)
         # An announcement held while the session is locked looks again.
         self._held_timer = self._make_timer(self._on_held_timer, single_shot=True, interval_ms=_LOCK_RECHECK_MS)
+        # The briefing's audio waits at most this long for the start-up line.
+        self._prerender_timer = self._make_timer(lambda: self._release_prerender("30 s"), single_shot=True,
+                                                 interval_ms=_PRERENDER_WAIT_MS)
 
     def _make_timer(self, slot: Callable[[], None], *, single_shot: bool, interval_ms: int = 0) -> QTimer:
         timer = QTimer(self)
@@ -5577,6 +6963,8 @@ class AppController(QObject):
         reading.done.connect(self.done)
         reading.sectionClicked.connect(self.jump_to_section)
         reading.approveClicked.connect(self.approve_action)
+        reading.approvals_stage.batchRequested.connect(self.request_batch)
+        reading.approvals_stage.batchStopRequested.connect(self.stop_batch)
         reading.denyClicked.connect(self.deny_action)
         reading.lockedClicked.connect(self._on_locked_click)
         reading.openLink.connect(self.open_action_link)
@@ -5744,8 +7132,10 @@ class AppController(QObject):
         self._start_voice()
         if self._local_client is not None:
             self._local_client.warm()   # the voice loads in the background now: his first line needs no wait
+            self._hold_prerender()      # ... and says his start-up line before the briefing's audio is made
         self._create_tray()
         self._wake_call("start")    # "Hey Jarvis": the listener runs from now while it is on (never before start)
+        self._start_calls()         # quiet during calls: another app using the microphone is watched from now
         if self.meetings is not None:
             self.meetings.start()   # a recording a crash left is saved; retention; nothing records by itself
         else:
@@ -5754,6 +7144,11 @@ class AppController(QObject):
         self._update_service_chips()
         if self.ask is not None:
             self.ask.start()   # checks Claude Code on the ask thread (no model request)
+        if self.standing is not None:
+            self.standing.start()   # the run files' cards, the folder check (nothing is said before reading)
+        if self.launch == LAUNCH_STANDING:
+            self._standing_show()
+            return
         if self.launch == LAUNCH_READ:
             self.enter_reading()
             force_foreground(self.window)
@@ -6271,6 +7666,9 @@ class AppController(QObject):
         logger.info("Fetching finished after %d attempt(s): %s", result.attempts, _describe_poll(result))
         if result.briefing is None and result.error is not None:
             self._fetch_error = result.error
+        if self.state == STATE_WAITING and self._call_arrival_held:
+            logger.info("The %s briefing is in; it comes forward when the call ends", self.expected_run or "new")
+            return
         if self.state == STATE_WAITING:
             # Nothing new arrived in time (or Notion kept failing): nothing is shown or said; the
             # slot stays open, so the catch-up looks again at the next logon or unlock.
@@ -6365,8 +7763,8 @@ class AppController(QObject):
 
     def _pending_page_actions(self) -> list[ProposedAction]:
         """The briefing's own pending proposals: what the spoken "Needs your OK" reads (never an
-        Ask card) and what Ask sees of the briefing."""
-        return [action for action in self._pending_actions() if action.source != SOURCE_ASK]
+        Ask card, never a standing agent's or rule's) and what Ask sees of the briefing."""
+        return [action for action in self._pending_actions() if action.source == SOURCE_BRIEFING]
 
     def _set_source(self, source: str, actions: Sequence[ProposedAction]) -> None:
         """Replace one source's cards (the briefing's on a new page, Ask's after an answer); the
@@ -6376,19 +7774,22 @@ class AppController(QObject):
         self._set_actions(self._merged_actions())
 
     def _merged_actions(self) -> list[ProposedAction]:
-        """ASK first, then BRIEFING. An Ask card whose id the briefing also has is information
-        only ("Already in your list under BRIEFING"): the briefing's card stays the one to decide
-        (the same id is the same proposal and has one decision)."""
+        """ASK first, then CAPTURE (build plan item 3), then AGENTS (standing agents' and rules'), then BRIEFING. A
+        card whose id the briefing
+        also has is information only ("Already in your list under BRIEFING"): the briefing's card stays the one
+        to decide (the same id is the same proposal and has one decision); a standing card whose id an Ask card
+        has already is left out."""
         briefing = self._source_lists[SOURCE_BRIEFING]
         page_ids = {action.id for action in briefing}
         merged: list[ProposedAction] = []
         seen: set[str] = set()
-        for action in self._source_lists[SOURCE_ASK]:
-            if action.id in page_ids and not action.error:
-                action = with_error(action, ALREADY_LISTED_TEXT)
-            if action.id not in seen and action.id not in page_ids:
-                seen.add(action.id)
-                merged.append(action)
+        for source in (SOURCE_ASK, SOURCE_CAPTURE, SOURCE_STANDING):
+            for action in self._source_lists.get(source, ()):
+                if action.id in page_ids and not action.error:
+                    action = with_error(action, ALREADY_LISTED_TEXT)
+                if action.id not in seen and action.id not in page_ids:
+                    seen.add(action.id)
+                    merged.append(action)
         return merged + briefing
 
     def _take_ask_cards(self, cards: Sequence[ProposedAction], replace_mode: str = "", window: Any = None,
@@ -6426,6 +7827,64 @@ class AppController(QObject):
                 break
             merged.remove(victim)
         self._set_source(SOURCE_ASK, merged)
+
+    def _take_standing_cards(self, cards: Sequence[ProposedAction]) -> None:
+        """The standing agents' and rules' cards (standing_ui loads them from their run files): they replace the
+        earlier ones, a card in its hidden hold, queued or on its way keeping its content (and staying even when
+        the new list leaves it out); at most _STANDING_CARDS_MAX stay, the oldest that is not on its way going
+        first. A card of another source or without a standing mode is refused here (logged by count)."""
+        old = {action.id: action for action in self._source_lists[SOURCE_STANDING]}
+        fresh: list[ProposedAction] = []
+        refused = 0
+        for card in cards:
+            if card.source != SOURCE_STANDING or card.mode not in STANDING_MODES:
+                refused += 1
+                continue
+            if card.id in self._jobs and card.id in old:
+                card = old[card.id]
+            if all(card.id != kept.id for kept in fresh):
+                fresh.append(card)
+        fresh_ids = {card.id for card in fresh}
+        fresh += [action for action in old.values() if action.id in self._jobs and action.id not in fresh_ids]
+        while len(fresh) > _STANDING_CARDS_MAX:
+            victim = next((action for action in reversed(fresh) if action.id not in self._jobs), None)
+            if victim is None:
+                break
+            fresh.remove(victim)
+        if refused:
+            logger.warning("Standing: %d card(s) of another source refused", refused)
+        self._set_source(SOURCE_STANDING, fresh)
+
+    def _take_capture_cards(self, pairs: Sequence[tuple[str, ProposedAction]]) -> None:
+        """Build plan item 3: the capture cards (capture_ui: every kept capture's cards, from captures.json) replace the
+        earlier ones; a card in its hidden hold, queued or on its way keeps its content (and stays even when the new
+        list leaves it out); at most _CAPTURE_CARDS_MAX stay, the oldest that is not on its way going first. A card of
+        another source or mode is refused here (logged by count)."""
+        old = {action.id: action for action in self._source_lists[SOURCE_CAPTURE]}
+        fresh: list[ProposedAction] = []
+        refused = 0
+        groups: dict[str, list[ProposedAction]] = {}
+        for capture_id, card in pairs:
+            groups.setdefault(capture_id, []).append(card)
+        ordered = [card for capture_id in reversed(list(groups)) for card in groups[capture_id]]
+        for card in ordered:                                      # the newest capture first, each in its own order
+            if card.source != SOURCE_CAPTURE or card.mode != MODE_CAPTURE:
+                refused += 1
+                continue
+            if card.id in self._jobs and card.id in old:
+                card = old[card.id]
+            if all(card.id != kept.id for kept in fresh):
+                fresh.append(card)
+        fresh_ids = {card.id for card in fresh}
+        fresh += [action for action in old.values() if action.id in self._jobs and action.id not in fresh_ids]
+        while len(fresh) > _CAPTURE_CARDS_MAX:
+            victim = next((action for action in reversed(fresh) if action.id not in self._jobs), None)
+            if victim is None:
+                break
+            fresh.remove(victim)
+        if refused:
+            logger.warning("Capture: %d card(s) of another source refused", refused)
+        self._set_source(SOURCE_CAPTURE, fresh)
 
     def _replaceable_nudge_card(self, action: ProposedAction, thread: tuple[str, str]) -> bool:
         """An unedited, undecided nudge card of ``thread`` (account, thread id), not held or on its way: what
@@ -6498,8 +7957,9 @@ class AppController(QObject):
             return action
 
     def _set_actions(self, actions: list[ProposedAction]) -> None:
-        """Show ``actions`` (all sources, merged) as the cards. With Ask cards among them each
-        source gets a group header (ASK, then BRIEFING) and Ask's labels read "ASK \u00b7 MOVE"."""
+        """Show ``actions`` (all sources, merged) as the cards. With Ask or standing cards among them each
+        source gets a group header (ASK, AGENTS, then BRIEFING), Ask's labels read "ASK \u00b7 MOVE" and a
+        standing card's "RULE \u00b7 TODO" (or "AGENT \u00b7 ...")."""
         if actions == self._actions:
             return
         self._actions = list(actions)
@@ -6522,7 +7982,7 @@ class AppController(QObject):
         reading = self.window.reading
         reading.clear_action_cards()
         today = self._now().date()
-        grouped = any(action.source == SOURCE_ASK for action in self._actions)
+        grouped = any(action.source != SOURCE_BRIEFING for action in self._actions)
         group = None
         for page_action in self._actions:
             if grouped and page_action.source != group:
@@ -6534,6 +7994,10 @@ class AppController(QObject):
             label = view.kind_label + (EDITED_MARK if self._is_edited(page_action) else "")
             if page_action.source == SOURCE_ASK:
                 label = f"{_MODE_TITLES.get(page_action.mode) or _GROUP_TITLES[SOURCE_ASK]} {DOT} {label}"
+            elif page_action.source == SOURCE_STANDING:
+                label = f"{_STANDING_TITLES.get(page_action.mode) or _GROUP_TITLES[SOURCE_STANDING]} {DOT} {label}"
+            elif page_action.source == SOURCE_CAPTURE:
+                label = f"{_GROUP_TITLES[SOURCE_CAPTURE]} {DOT} {label}"
             reading.add_action_card(action.id, label, view.title, _card_detail(action, view, today),
                                     view.decidable, **_card_options(action, view))
             self._show_card_state(action.id)   # also sets the note (warnings) while it waits
@@ -6774,7 +8238,7 @@ class AppController(QObject):
         """Edit and Sign in open a dialog or the browser: only while nothing else runs (no hold,
         job or sign-in on any card), so nothing ever covers a held card's Undo."""
         return (self.state != STATE_QUITTING and not self._jobs and self._send_hold is None
-                and not self._connect_running and not self._store.is_decided(action_id))
+                and not self._connect_running and self._batch is None and not self._store.is_decided(action_id))
 
     def _copy_label(self, action: ProposedAction) -> str:
         """The tools row's Copy: a Move's or Cancel's note (never sent); an RSVP's note too when
@@ -6892,7 +8356,9 @@ class AppController(QObject):
         total = sum(1 for action in self._actions if action.decidable)
         self.window.prompt.set_pending(pending)
         self.window.reading.set_pending(pending, total)
+        self._look_call("on_pending", pending)          # the soft "waits on you" when a new card waits
         self._sync_mail_cards()
+        self._sync_batch_bar()
         self._update_service_chips()
         self._render_followups()   # a row whose reply card waits reads "draft waiting" (R31)
 
@@ -6927,6 +8393,8 @@ class AppController(QObject):
         """Why the cards are locked ("" when they are not)."""
         if self._connect_running:
             return SIGN_IN_LOCK_TIP
+        if self._batch is not None:
+            return BATCH_LOCK_TIP
         return LOCK_TIP if self._jobs else ""
 
     def _sync_card_locks(self) -> None:
@@ -6938,11 +8406,15 @@ class AppController(QObject):
             action = self._action(card.action_id)
             if card.actionable and action is not None and action.editable:
                 card.set_edit_enabled(self._tools_enabled(card.action_id))   # never a dialog beside Undo
+        self._sync_batch_bar()   # Add all waits while anything else runs
 
     def _locked_out(self, action_id: str) -> bool:
         """True (and logged, without titles) for an Approve / Deny on a locked card."""
         if self._connect_running:
             logger.info(_SIGN_IN_LOCKED_MESSAGE)
+            return True
+        if self._batch is not None:
+            logger.info("Ignored an approval click: Add all is running")
             return True
         if self._jobs and action_id not in self._jobs:
             logger.info(_LOCKED_MESSAGE)
@@ -6953,6 +8425,194 @@ class AppController(QObject):
         """A click on a dimmed Deny / Approve: ignored, but it counts for the 1 s guard."""
         if not self._decision_click_too_soon() and not self._locked_out(action_id):
             logger.info(_LOCKED_MESSAGE)
+
+    # ---- Add all (mail extras, part 1): own-calendar adds, one confirm, one card at a time -----------------
+
+    def _batch_candidates(self) -> list[ProposedAction]:
+        """The cards Add all would add now (batch.eligible), as their cards show them."""
+        if self.state == STATE_QUITTING or not self.config.calendar.enabled:
+            return []
+        alias = DEFAULT_ACCOUNT
+        signed_in = self._account_signed_in(alias)
+        confirmed = (not self._account_unconfirmed(alias) and not self._account_unknown(alias)
+                     and not self._pending_account(alias))
+        pending = self._pending_actions()
+        reading = self.window.reading
+        noted, tried = set(), set()
+        for action in pending:
+            card = reading.action_card(action.id)
+            if card is None or card.note():
+                noted.add(action.id)   # an amber note (or no card to show it): it waits for its own click
+            if (self._store.get(action.id) or {}).get("status") in (STATUS_FAILED, STATUS_UNKNOWN):
+                tried.add(action.id)
+        decided = {action.id for action in self._actions if self._store.is_decided(action.id)}
+        return batch.eligible(pending, decided=decided, jobs=set(self._jobs), signed_in=signed_in,
+                              confirmed=confirmed, now=self._plan_now_wall(), noted=noted, tried=tried)
+
+    def _batch_blocked(self) -> bool:
+        """Something else runs (an approval, a hold, a sign-in, a dialog): the bar waits."""
+        standing = getattr(self, "standing", None)
+        checking = bool(getattr(standing, "_reply_checking", None)) if standing is not None else False
+        return bool(self._jobs or self._send_hold is not None or self._connect_running
+                    or self._dialog is not None or self._account_dialog is not None
+                    or self._batch_dialog is not None or self.state == STATE_QUITTING
+                    or checking)   # a standing Reply read again may start its Send hold when it passes
+
+    def _sync_batch_bar(self) -> None:
+        """Approvals' batch bar: "Add all N to calendar..." while N >= 2 cards could go together and nothing else
+        runs; "Adding 2 of 5..." with Stop while a batch runs; hidden else."""
+        stage = getattr(self.window.reading, "approvals_stage", None)
+        if stage is None:
+            return
+        run = self._batch
+        if run is not None:
+            shown = min(run.index, len(run.ids)) or 1
+            text = "Stopping..." if run.stop else f"Adding {shown} of {len(run.ids)}..."
+            stage.set_batch(len(run.ids), approvals_view.BATCH_RUNNING, text)
+            return
+        count = 0 if self._batch_blocked() else len(self._batch_candidates())
+        stage.set_batch(count, approvals_view.BATCH_IDLE if count >= batch.MIN_BATCH else approvals_view.BATCH_HIDDEN)
+
+    def request_batch(self) -> None:
+        """The bar's "Add all N to calendar...": the confirm dialog lists exactly what each card adds. Only this
+        click opens it (never voice, Ask, the canvas or the HUD); nothing is added before its "Add N"."""
+        if self._decision_click_too_soon() or self._batch is not None or self._batch_blocked():
+            return
+        listed = self._batch_candidates()
+        if len(listed) < batch.MIN_BATCH:
+            self._sync_batch_bar()
+            return
+        rows = batch.rows(listed, self._now().date())
+        others = max(0, len(self._pending_actions()) - len(listed))
+        dialog = hud.BatchConfirmDialog(rows, others, parent=self.window)
+        dialog.confirmed.connect(self._on_batch_confirmed)
+        dialog.finished.connect(self._on_batch_dialog_closed)
+        self._batch_dialog = dialog
+        logger.info("Add all: listing %d card(s) (%d other(s) wait for their own click)", len(rows), others)
+        self._sync_batch_bar()
+        dialog.open()
+
+    def _on_batch_dialog_closed(self, _result: int = 0) -> None:
+        dialog, self._batch_dialog = self._batch_dialog, None
+        if dialog is not None:
+            dialog.deleteLater()
+        self._sync_batch_bar()
+
+    def _on_batch_confirmed(self, shown: str) -> None:
+        """"Add N": the list is made again now; it goes only when it is exactly the one the dialog showed."""
+        self._batch_dialog = None
+        if self._batch is not None or self._batch_blocked():
+            logger.info("Add all: something else started before the confirm; nothing added")
+            self._activity(hud.TAG_WAIT, BATCH_CHANGED_TEXT, "ADD ALL")
+            self._sync_batch_bar()
+            return
+        listed = self._batch_candidates()
+        confirmed = batch.rows(listed, self._now().date())
+        if not listed or batch.digest(confirmed) != shown:
+            logger.info("Add all: the list changed before the confirm; nothing added")
+            self._activity(hud.TAG_WAIT, BATCH_CHANGED_TEXT, "ADD ALL")
+            self._sync_batch_bar()
+            return
+        self._decision_clicked_at = self._click_now()   # a second click right after never decides a card
+        self._batch = _Batch(ids=[action.id for action in listed], rows={row.action_id: row for row in confirmed})
+        logger.info("Add all: adding %d card(s), one at a time", len(listed))
+        self._sync_card_locks()
+        self._batch_step()
+
+    def stop_batch(self) -> None:
+        """The bar's Stop: the batch ends after the card being added now (each added card keeps its Undo)."""
+        run = self._batch
+        if run is None or run.stop:
+            return
+        run.stop = True
+        logger.info("Add all: Stop")
+        if not run.current:
+            self._batch_timer.stop()
+            self._end_batch(batch.REASON_STOPPED)
+            return
+        self._sync_batch_bar()
+
+    def _batch_step(self) -> None:
+        """The next card of the batch, through the card's own path (_carry_out), after the same checks as its own
+        click; anything else that started meanwhile, or a card that no longer goes, ends the batch."""
+        run = self._batch
+        if run is None:
+            return
+        run.current = ""
+        if self.state == STATE_QUITTING:
+            self._end_batch(batch.REASON_QUIT)
+            return
+        if run.stop:
+            self._end_batch(batch.REASON_STOPPED)
+            return
+        if self._send_hold is not None:
+            self._end_batch(batch.REASON_HOLD)
+            return
+        if self._connect_running or self._signing_in():
+            self._end_batch(batch.REASON_SIGN_IN)
+            return
+        if run.index >= len(run.ids):
+            self._end_batch(batch.REASON_DONE)
+            return
+        if self._jobs:
+            self._end_batch(batch.REASON_CHANGED)
+            return
+        action_id = run.ids[run.index]
+        if action_id not in {action.id for action in self._batch_candidates()}:
+            self._end_batch(batch.REASON_CHANGED)
+            return
+        action = self._current(action_id)
+        if action is None or batch.rows([action], self._now().date())[0] != run.rows.get(action_id):
+            # Not exactly what the confirm listed (its place or notes changed too, which the id leaves out).
+            self._end_batch(batch.REASON_CHANGED)
+            return
+        if self._start_calendar() is None or self._executor.readiness(action):
+            self._end_batch(batch.REASON_NOT_READY)
+            return
+        run.index += 1
+        run.current = action_id
+        self._sync_batch_bar()
+        self._carry_out(action)
+        if action_id not in self._jobs:   # the worker was gone or Jarvis is closing: nothing started
+            run.current = ""
+            self._end_batch(batch.REASON_NOT_READY)
+
+    def _batch_result(self, action_id: str, result: Any, error: Any, status: str) -> None:
+        """A batch card's result: on to the next one after a short pause, or the end (failed, unknown, sign-in)."""
+        run = self._batch
+        if run is None or action_id != run.current:
+            return
+        run.current = ""
+        ok = result is not None and error is None
+        reason = batch.stop_reason(status) if ok else (
+            batch.REASON_UNKNOWN if status == STATUS_UNKNOWN else batch.REASON_FAILED)
+        problem = getattr(error, "problem", "") or ""
+        if problem in _SIGN_IN_PROBLEMS or problem == PROBLEM_CONFIRM:
+            reason = batch.REASON_SIGN_IN
+        if ok and not reason:
+            run.added += 1
+        if reason:
+            self._end_batch(reason)
+            return
+        if run.stop:
+            self._end_batch(batch.REASON_STOPPED)
+            return
+        self._sync_batch_bar()
+        self._batch_timer.start()
+
+    def _end_batch(self, reason: str) -> None:
+        """The batch is over: one activity row ("Added 3 of 5; stopped: failed"), the cards unlock."""
+        run, self._batch = self._batch, None
+        self._batch_timer.stop()
+        if run is None:
+            return
+        total = len(run.ids)
+        batch.log_end(run.added, total, reason)
+        if self.state != STATE_QUITTING:
+            self._activity(hud.TAG_STOP if reason else hud.TAG_DONE, batch.summary(run.added, total, reason),
+                           f"ADD ALL {DOT} GOOGLE CALENDAR")
+            self._sync_card_locks()
+            self._refresh_actions_ui()
 
     # ---- the day plan's cards (the productivity bundle) -----------------------------------------
 
@@ -7091,6 +8751,9 @@ class AppController(QObject):
             return
         if action.kind == TODO and action.block_event() is None:
             return
+        if action.kind == UNSUBSCRIBE:
+            self._approve_unsubscribe(action)
+            return
         card = self.window.reading.action_card(action_id)
         worker = self._start_calendar()
         if worker is None or self._executor.readiness(action):
@@ -7172,14 +8835,31 @@ class AppController(QObject):
         if not mail.ready:
             self._hint(action_id, mail.note or NOT_READY_NOTE)
             return
+        if getattr(self, "standing", None) is not None and self.standing.reply_wait(action):
+            return   # a standing Reply's thread is read again first; Send goes on by itself when it passes
         self._start_send_hold(action, sender=mail.sender)
+
+    def _approve_unsubscribe(self, action: ProposedAction) -> None:
+        """Unsubscribe (mail extras): the card's link is checked again (a public https host, the one-click link Jarvis
+        read from the message itself); then UNSUBSCRIBED with Undo at once while the one POST waits the hidden hold
+        (the same hold as a Send: Undo during it sends nothing, its end makes exactly one call, quitting sends it)."""
+        url = action.field("url")
+        reason = "" if web_link_allowed(url) else UNSUBSCRIBE_LINK_NOTE
+        reason = reason or self._executor.readiness(action)
+        if not reason and self._start_calendar() is None:
+            reason = CALENDAR_SETUP_NOTE
+        if reason:
+            logger.info("Unsubscribe %s: not started (the link or the setup)", action.id)
+            self._hint(action.id, reason)
+            return
+        self._start_send_hold(action)
 
     def _unread(self, action: ProposedAction) -> bool:
         """A Reply / Email whose card does not show all of its subject or message (cut at the card's
         width, or more lines than the card has) and whose Edit dialog has not shown exactly this
         subject and message whole yet: Send opens the dialog to read it first."""
         card = self.window.reading.action_card(action.id)
-        cut = body_needs_review(action) or card is None or card.mail_cut()
+        cut = body_needs_review(action) or card is None or card.mail_cut() or action.id in self._rewritten
         return cut and self._reviewed.get(action.id) != _review_digest(action.title, action.body)
 
     def _note_unread(self, action: ProposedAction) -> bool:
@@ -7313,8 +8993,12 @@ class AppController(QObject):
         today = self._now().date()
         view = card_view(action, today)
         kind = {RSVP: "RSVP"}.get(action.kind, action.kind.upper())
-        card_words = (f"{_MODE_TITLES[action.mode].upper()} {kind_label(action).upper()}" if action.mode in _MODE_TITLES
-                      else f"{action.source.upper()} {kind}")
+        if action.mode in _MODE_TITLES:
+            card_words = f"{_MODE_TITLES[action.mode].upper()} {kind_label(action).upper()}"
+        elif action.mode in _STANDING_TITLES:
+            card_words = f"{_STANDING_TITLES[action.mode].upper()} {kind}"
+        else:
+            card_words = f"{action.source.upper()} {kind}"
         fields: list[Any] = [("Card", card_words), ("Account", account_of(action)),
                              ("Card says", " - ".join(part for part in (view.title, _card_detail(action, view, today))
                                                       if part))]
@@ -7436,7 +9120,7 @@ class AppController(QObject):
         if (now - offer.shown) * 1000 < QApplication.doubleClickInterval():
             logger.info("Ignored an Undo click right after the approval")
             return
-        if self._jobs or self._connect_running or self._send_hold is not None:
+        if self._jobs or self._connect_running or self._send_hold is not None or self._batch is not None:
             logger.info(_LOCKED_MESSAGE)
             return
         worker = self._calendar_worker
@@ -7592,6 +9276,11 @@ class AppController(QObject):
         action = self._action(action_id)
         if action is None or self.state == STATE_QUITTING:
             return
+        if action.source == SOURCE_CAPTURE:
+            # Build plan item 3: a capture card's Source - the kept copy in Jarvis's own viewer, never a link or app.
+            if getattr(self, "capture", None) is not None:
+                self.capture.show_source(action_id)
+            return
         link = action.link or (self._google_link(action_id) if action.changes_event else "")
         if not link:
             return
@@ -7686,9 +9375,9 @@ class AppController(QObject):
         Save keeps the changes on the card (memory only, same id); nothing is sent."""
         if self.state == STATE_QUITTING or self._dialog is not None or self._account_dialog is not None:
             return
-        if self._send_hold is not None or self._jobs or self._connect_running:
+        if self._send_hold is not None or self._jobs or self._connect_running or self._batch is not None:
             # The dialog is window-modal: beside another card's hold it would cover that card's Undo
-            # while the hold runs out.
+            # while the hold runs out (and Add all locks every card while it runs).
             logger.info("Ignored Edit of action %s: another card's approval or sign-in is running", action_id)
             return
         action = self._current(action_id)
@@ -7732,8 +9421,10 @@ class AppController(QObject):
                                 sender=mail.from_text.removeprefix("From: "), to=to, cc=cc, body=action.body,
                                 classify=lambda address: self._recipient_state(mail, address),
                                 normalize=email_address, find_links=body_links, banner=banner,
-                                max_recipients=MAX_RECIPIENTS, parent=self.window)
+                                max_recipients=MAX_RECIPIENTS, revise=self._revise_on(), parent=self.window)
         dialog.saved.connect(self._on_edit_saved)
+        dialog.reviseRequested.connect(self._on_revise_requested)
+        dialog.reviseStopped.connect(self._on_revise_stopped)
         dialog.finished.connect(self._on_edit_closed)
         self._dialog = dialog
         logger.info("Edit action %s (%s)", action.id, action.kind)
@@ -7790,6 +9481,10 @@ class AppController(QObject):
             self._edits.pop(action_id, None)
         else:
             self._edits[action_id] = edit
+        if getattr(dialog, "rewrite_kept", None) is not None and dialog.rewrite_kept():
+            self._rewritten.add(action_id)   # Jarvis wrote this message: Send reads it whole first
+        elif page.sends_mail:
+            self._rewritten.discard(action_id)
         dialog.accept()
         self._hints.pop(action_id, None)
         card = self.window.reading.action_card(action_id)
@@ -7810,6 +9505,7 @@ class AppController(QObject):
 
     def _on_edit_closed(self, _result: int = 0) -> None:
         dialog, self._dialog = self._dialog, None
+        self._cancel_revise("closed")
         if dialog is not None:
             if dialog.mail and dialog.whole_seen():
                 # What the dialog showed whole (saved or not): Send needs no review while the card
@@ -7821,6 +9517,102 @@ class AppController(QObject):
             dialog.deleteLater()
         if self.state != STATE_QUITTING:
             self._sync_card_locks()
+
+    # ---- the Edit dialog's Rewrite (mail extras, part 2) -------------------------------------------------
+
+    def _revise_on(self) -> bool:
+        """The Edit dialog has its revise row: Ask is on (a Rewrite is an Ask run)."""
+        return self.ask is not None and bool(getattr(self.config.ask, "enabled", False))
+
+    def _on_revise_requested(self, action_id: str, words: str, draft: str) -> None:
+        """Rewrite: one Ask run that sees only this message and the owner's words. Nothing changes until its answer is
+        offered in this dialog, and nothing is kept until Save."""
+        dialog = self._dialog
+        if dialog is None or dialog.action_id != action_id or self.state == STATE_QUITTING:
+            return
+        action = self._current(action_id)
+        if (action is None or not action.sends_mail or action_id in self._jobs
+                or self._store.is_decided(action_id)):
+            dialog.show_revise_note(REVISE_CARD_BUSY_NOTE, warn=True)
+            return
+        if self.ask is None or not self._revise_on():
+            dialog.show_revise_note(REVISE_OFF_NOTE, warn=True)
+            return
+        if self.ask.busy or self._revise_run is not None:
+            dialog.show_revise_note(REVISE_BUSY_NOTE, warn=True)
+            return
+        subject = str(dialog.values().get("subject", ""))
+        digest = _review_digest(subject, draft)
+        job = RevisionJob(action_id, action.kind, subject, draft, digest)
+        request = ModeRequest(MODE_REVISE, ORIGIN_CHOICE, typed=words, target=action_id, payload=job)
+        if not self.ask.submit_mode(request, REVISE_REQUEST_WORDS):
+            dialog.show_revise_note(REVISE_NOT_STARTED_NOTE, warn=True)
+            return
+        self._revise_run = (action_id, digest)
+        self._revise_asking = True
+        dialog.set_revising(True)
+        logger.info("Revise %s: asked (%d word character(s), %d message character(s))", action_id, len(words),
+                    len(draft))
+
+    def _on_revise_stopped(self, action_id: str) -> None:
+        """Stop in the dialog: the run is cancelled; the message stays as it was."""
+        run = self._revise_run
+        if run is None or run[0] != action_id:
+            return
+        self._cancel_revise("stopped")
+        dialog = self._dialog
+        if dialog is not None and dialog.action_id == action_id:
+            dialog.set_revising(False)
+            dialog.show_revise_note(REVISE_STOPPED_NOTE)
+
+    def _cancel_revise(self, why: str) -> None:
+        run, self._revise_run = self._revise_run, None
+        if run is None:
+            return
+        if self.ask is not None and self.ask.busy and self.ask.running_mode == MODE_REVISE:
+            self.ask.cancel()
+        logger.info("Revise %s: %s", run[0], why)
+
+    def _on_revise_outcome(self, outcome: Any) -> None:
+        """A Rewrite's answer: offered in the same dialog while it still shows exactly what was sent (else dropped);
+        a question back or a failure in Jarvis's own words (the model's say and question are never shown)."""
+        run, self._revise_run = self._revise_run, None
+        self._revise_asking = False
+        dialog = self._dialog
+        brief = getattr(outcome, "brief", None)
+        digest, reason = brief if isinstance(brief, tuple) and len(brief) == 2 else ("", "")
+        if (run is None or dialog is None or dialog.action_id != run[0] or getattr(outcome, "target", None) != run[0]
+                or digest != run[1]):
+            logger.info("Revise: an answer for a dialog that is gone or changed was dropped")
+            if run is not None and dialog is not None and dialog.action_id == run[0]:
+                # Its own dialog still waits (Jarvis was busy, stopped by an error, or the answer names nothing):
+                # the row is free again and says so in Jarvis's own words.
+                message = (getattr(outcome, "message", "") or "").strip()
+                dialog.set_revising(False)
+                dialog.show_revise_note(REVISE_FAILED_NOTE.format(why=f" ({message.rstrip('.')})" if message else ""),
+                                        warn=True)
+            return
+        values = dialog.values()
+        if _review_digest(str(values.get("subject", "")), str(values.get("body", ""))) != digest:
+            dialog.set_revising(False)
+            dialog.show_revise_note(REVISE_CHANGED_NOTE, warn=True)
+            logger.info("Revise %s: the message changed meanwhile; the answer was dropped", run[0])
+            return
+        revised = getattr(outcome, "revised", "")
+        if outcome.ok and revised:
+            dialog.offer_rewrite(revised)
+            logger.info("Revise %s: offered (%d character(s))", run[0], len(revised))
+            return
+        dialog.set_revising(False)
+        if outcome.ok and outcome.kind == REVISE_QUESTION:
+            dialog.show_revise_note(REVISE_QUESTION_NOTE, warn=True)
+        elif outcome.ok and outcome.kind == REVISE_HELD:
+            dialog.show_revise_note(REVISE_HELD_NOTES.get(reason, REVISE_HELD_NOTES[""]), warn=True)
+        else:
+            message = (outcome.message or "").strip()
+            dialog.show_revise_note(REVISE_FAILED_NOTE.format(why=f" ({message.rstrip('.')})" if message else ""),
+                                    warn=True)
+        logger.info("Revise %s: not offered (%s)", run[0], outcome.kind)
 
     # ---- results from the action worker ------------------------------------------------------------
 
@@ -7932,6 +9724,7 @@ class AppController(QObject):
         if self.state == STATE_QUITTING:
             return
         self._jobs.pop(action_id, None)
+        self._look_call("on_action_result", status, error is not None)   # the soft "done" / "failed"
         running = self._running.pop(action_id, None)
         action = running[0] if running is not None else self._current(action_id)
         writes_running = running[1] if running is not None else bool(action is not None and action.carried)
@@ -7965,6 +9758,7 @@ class AppController(QObject):
             # A sign-in during the run bound an account you have not confirmed (nothing was
             # changed): ask now, so the next click goes ahead.
             self._ask_account(account_of(action), card_id=action_id)
+        self._batch_result(action_id, result, error, status)
 
     def _calendar_result(self, action_id: str, action: ProposedAction | None, result: ExecResult | None,
                          error: ExecError | None, status: str, *, saved: bool = False) -> None:
@@ -8036,7 +9830,7 @@ class AppController(QObject):
         if status == STATUS_UNKNOWN:
             self._activity(hud.TAG_WAIT, f"Unknown: {_action_phrase(action)}", UNKNOWN_CARD_TEXT)
         else:
-            self._activity(hud.TAG_STOP, f"Couldn't {_VERBS.get(action.kind, 'do')} {_kind_title(action)}",
+            self._activity(hud.TAG_STOP, _couldnt_words(action),
                            _short(message))
         self._request_peeks([action], force=True)   # Google's view now, before any Retry
 
@@ -8255,6 +10049,11 @@ class AppController(QObject):
     def _on_account_connect(self, alias: str, stage: str, message: str, problem: str) -> None:
         if self.state == STATE_QUITTING or self._connect_alias != alias:
             return
+        self._account_connect_stage(alias, stage, message, problem)
+        if getattr(self, "standing", None) is not None:   # the Agents screen's Sign in <alias> hears how it went
+            self.standing.on_sign_in(alias, stage, problem, message)
+
+    def _account_connect_stage(self, alias: str, stage: str, message: str, problem: str) -> None:
         self._live_sign_in(alias, stage, message)
         personal = alias == DEFAULT_ACCOUNT
         if stage == _CONNECT_SIGN_IN:
@@ -8472,6 +10271,7 @@ class AppController(QObject):
             self._agenda_record = records
             self._show_agenda_rows(panel, rows)
         self._show_deadlines(panel, now)
+        self._look_call("on_events", self._agenda_events or ())    # the new look: the second screen's NEXT
 
     def _agenda_line(self) -> tuple[str, str, str, str]:
         """(text, colour, link, tooltip) of TODAY when there are no rows to show."""
@@ -8674,7 +10474,7 @@ class AppController(QObject):
         only). GUI thread."""
         from .ask.planner import briefing_context
 
-        page_cards = [action for action in self._actions if action.source != SOURCE_ASK]
+        page_cards = [action for action in self._actions if action.source == SOURCE_BRIEFING]
         try:
             context = briefing_context(self._briefing, self._pending_page_actions(), self._page_deadlines,
                                        config=self.config, now=self._now())
@@ -8706,7 +10506,7 @@ class AppController(QObject):
         self._ask_busy = bool(busy)
         if not busy:
             self._ack_timer.stop()
-        if busy and self.ask is not None and self.ask.running_mode in (MODE_MEETING, MODE_DESKTOP):
+        if busy and self.ask is not None and self.ask.running_mode in (MODE_MEETING, MODE_DESKTOP, MODE_CAPTURE, MODE_REVISE):
             # A meeting summary runs in the background, a desktop request on the HUD (its caption says what Jarvis
             # is doing): nothing pauses or is said.
             self._update_reading_controls()
@@ -8733,11 +10533,12 @@ class AppController(QObject):
         screen "tab" brings LIVE up (a "web:" request's WEB task as an Ask's), else Home comes up."""
         if self.state == STATE_QUITTING:
             return
+        self._look_call("on_ask_started")       # the soft "thinking" if nothing is said within 400 ms
         if self.ask is None or self.ask.running_mode != MODE_MEETING:
             self._end_say_stream()              # a new request: what the last answer was still saying goes
         self._ask_desktop = bool(self.ask is not None and self.ask.running_mode == MODE_DESKTOP)
-        if self.ask is not None and self.ask.running_mode in (MODE_MEETING, MODE_DESKTOP):
-            # A meeting summary the owner asked for (the start card's tick, or Summarise), or a desktop request on the
+        if self.ask is not None and self.ask.running_mode in (MODE_MEETING, MODE_DESKTOP, MODE_CAPTURE, MODE_REVISE):
+            # A capture's reading (its Capture frame answers), a meeting summary the owner asked for (the start card's tick, or Summarise), or a desktop request on the
             # HUD (its caption answers): no YOU entry, the screen stays where the owner is; LIVE has its steps.
             self._ask_task_id = self.ask.task_id
             return
@@ -8745,6 +10546,7 @@ class AppController(QObject):
         # A "web:" request is never given to a later Ask as the conversation (ISO-4), nor is its answer.
         self._ask_you_entry = self._you(text, context=kind != _live.TASK_WEB)
         self._ask_task_id = self.ask.task_id if self.ask is not None else 0
+        self._look_call("on_answer_started", self._ask_task_id, text)   # the new look: its group on the board
         self._mode_auto_opened = 0
         was_live = self.window.reading.current_tab() == hud.TAB_LIVE
         if not self._live_auto_open(kind, self._ask_task_id):
@@ -8788,6 +10590,7 @@ class AppController(QObject):
         if self.state == STATE_QUITTING:
             return
         stream = self._say_stream
+        self._look_call("on_ask_answer")                 # words came: no thinking sound
         if stream is None or stream.seq != seq:
             stream = self._say_stream = _SayStream(seq)
             self._ack_timer.stop()                       # the first words are here: no acknowledgement
@@ -8823,6 +10626,16 @@ class AppController(QObject):
         if self._ask_task_id:
             self._snapshots_call("cancel_task", self._ask_task_id)   # its queued and running pictures stop
         if self.state == STATE_QUITTING:
+            return
+        if self._revise_asking:
+            # A Rewrite's run (Stop, closing the dialog, or Esc in the ask line): no conversation entry; the dialog's
+            # row is free again.
+            self._revise_asking = False
+            run, self._revise_run = self._revise_run, None
+            dialog = self._dialog
+            if dialog is not None and run is not None and dialog.action_id == run[0] and dialog.is_revising():
+                dialog.set_revising(False)
+                dialog.show_revise_note(REVISE_STOPPED_NOTE)
             return
         meetings = getattr(self, "meetings", None)
         if meetings is not None and meetings.summary_running():
@@ -8969,7 +10782,12 @@ class AppController(QObject):
         gets one row of counts (never the request or the answer)."""
         if self.state == STATE_QUITTING:
             return
+        self._look_call("on_ask_answer")                 # the answer came: no thinking sound
         self._remember_ask_read(outcome)
+        self._note_doc_tables(outcome)                   # [docs]: the board's tables a document run may be given
+        if getattr(outcome, "mode", "") == MODE_DOC:
+            self._on_doc_outcome(outcome)
+            return
         if getattr(outcome, "mode", "") == MODE_PLAN:
             self._offer_running = 0
             self._on_plan_outcome(outcome)
@@ -8987,6 +10805,13 @@ class AppController(QObject):
         if getattr(outcome, "mode", "") == MODE_DESKTOP:
             self._on_desktop_outcome(outcome)
             return
+        if getattr(outcome, "mode", "") == MODE_CAPTURE:
+            if getattr(self, "capture", None) is not None:
+                self.capture.on_outcome(outcome)
+            return
+        if getattr(outcome, "mode", "") == MODE_REVISE:
+            self._on_revise_outcome(outcome)
+            return
         self._offer_running = 0
         if outcome.ok and getattr(outcome, "agent_task", "") and self._task_cant_start(outcome):
             return
@@ -8994,6 +10819,16 @@ class AppController(QObject):
         if outcome.ok and getattr(outcome, "agent_task", ""):
             self._activity(hud.TAG_ASK, "Handed to a task", f"{outcome.duration_ms / 1000:.1f} s")
             self._start_agent(outcome.agent_task)
+            return
+        if outcome.ok and getattr(outcome, "doc_job", "") and getattr(self, "docs", None) is not None:
+            # The owner's own words go to one document run (the name only finds the item, or names a new one).
+            self._activity(hud.TAG_ASK, "Handed to a document" if outcome.doc_job == "doc" else "Handed to a sheet",
+                           f"{outcome.duration_ms / 1000:.1f} s")
+            self.docs.from_words(outcome.doc_job, getattr(outcome, "doc_name", ""), getattr(outcome, "doc_words", ""))
+            return
+        if outcome.ok and getattr(outcome, "standing_job", "") and getattr(self, "standing", None) is not None:
+            self._activity(hud.TAG_ASK, "Handed to the standing setup", f"{outcome.duration_ms / 1000:.1f} s")
+            self.standing.setup_from_words(outcome.standing_job, getattr(outcome, "standing_words", ""))
             return
         if outcome.ok and getattr(outcome, "suggestion", ""):
             self._offer_memory_suggestion(outcome.suggestion)
@@ -9025,6 +10860,7 @@ class AppController(QObject):
         elif outcome.kind not in ("empty", "busy"):
             self._activity(hud.TAG_STOP, "Ask: nothing was proposed", _short(outcome.message or outcome.kind))
         self._refresh_actions_ui()
+        self._look_call("on_ask_outcome", outcome, self._ask_task_id)    # the new look: its frames on the board
 
     # ---- the day plan (the productivity bundle) ----------------------------------------------
 
@@ -9079,6 +10915,7 @@ class AppController(QObject):
         elif outcome.kind not in ("empty", "busy"):
             self._activity(hud.TAG_STOP, "Plan: nothing was proposed", _short(outcome.message or outcome.kind))
         self._refresh_actions_ui()
+        self._look_call("on_ask_outcome", outcome, self._ask_task_id)    # the new look: the plan's day on the board
 
     def _converse_plan(self, outcome: Any) -> None:
         assistant = self.config.assistant
@@ -9457,12 +11294,13 @@ class AppController(QObject):
         controller = desktop_ui.DesktopController(
             self.config, self.window, overlay,
             chip_screens={hud_overlay.CHIP_BRIEFING: SCREEN_BRIEFING, hud_overlay.CHIP_APPROVALS: SCREEN_APPROVALS,
-                          hud_overlay.CHIP_REC: SCREEN_MEETINGS},
+                          hud_overlay.CHIP_REC: SCREEN_MEETINGS, hud_overlay.CHIP_BOARD: SCREEN_HOME},
             home_screen=SCREEN_HOME, may_enter=self._may_enter_hud, bring_forward=bring_forward_on_click,
             address=self.config.assistant.address, live=self.live,
             backend_factory=getattr(self, "_desktop_backend", None), consent_store=self._prefs_store,
             window_api=getattr(self, "_desktop_window_api", None), click_guard=self._desktop_click_guard,
             timers=self._shared_timer_book(), parent=self)
+        controller.chime_quiet = self._call_quiet            # quiet during calls: a timer's end sound
         controller.hudChanged.connect(self._on_hud_changed)
         controller.answered.connect(self._on_desktop_answered)
         controller.plannerNeeded.connect(self._on_desktop_planner)
@@ -9632,8 +11470,14 @@ class AppController(QObject):
 
             first, *others = (engine.name for engine in engine_order(self.config.agent.search_engine))
             task_row = consent_task_row(first, " and ".join(others), local=is_local(self.config))
+        drive_row = ""
+        if desktop.drive_on():                               # build plan item 7: filling in pages (version 4)
+            from .desktop_view import CONSENT_DRIVE_ROW
+
+            drive_row = CONSENT_DRIVE_ROW
         card.open_card(entry, updated=desktop.consent_given() and not desktop.consent_current(), task_row=task_row,
-                       task_new=desktop.consent_given() and not desktop.consent_for_tasks())
+                       task_new=desktop.consent_given() and not desktop.consent_for_tasks(), drive_row=drive_row,
+                       drive_new=desktop.consent_given() and not desktop.consent_for_drive())
         logger.info("Desktop: the first-run card shows (%s)", entry)
 
     def _show_desktop_consent_later(self) -> None:
@@ -10020,7 +11864,8 @@ class AppController(QObject):
         try:
             controller = (factory or agent_ui.AgentController)(self.config, planner, live=self.live,
                                                                consent=desktop.consent_given,
-                                                               tasks_consent=desktop.consent_for_tasks, parent=self,
+                                                               tasks_consent=desktop.consent_for_tasks,
+                                                               drive_consent=desktop.consent_for_drive, parent=self,
                                                                window_avoid=self._hud_reach, things=things)
         except Exception as exc:  # noqa: BLE001 - Jarvis works without tasks
             logger.warning("Could not set up tasks (%s)", type(exc).__name__)
@@ -10142,10 +11987,11 @@ class AppController(QObject):
         """A question for the owner: its card waits on the HUD (agent_feed); on the caption and in the conversation, in
         amber (a decision waits). What is typed next answers ask_owner's (AgentController.take_request). The firewall's
         (kind "web") is never said aloud or kept on this PC, and only a click on its card answers it: its words may be
-        private. ask_owner's (kind "task") is the model's, so it goes through the voice's gate and is not kept on this
+        private. The Send card's (kind "submit": a page's button words and host) is the same. ask_owner's (kind "task")
+        is the model's, so it goes through the voice's gate and is not kept on this
         PC either. Keep going is said, and answered by a click too. With the HUD away, those only a click answers say on
         screen how to reach the card: nothing else there shows that one waits for a click."""
-        web_card, asked = question.kind == "web", question.kind == "task"   # (a file card says only that it waits)
+        web_card, asked = question.kind in ("web", "submit"), question.kind == "task"   # (a file card: only that it waits)
         feed = getattr(self, "task_feed", None)
         reach = feed.reach_words() if feed is not None and not asked else ""
         shown = f"{question.text} {reach}" if reach else question.text
@@ -10277,6 +12123,105 @@ class AppController(QObject):
             return meetings is not None and bool(meetings.is_recording())
         except Exception:  # noqa: BLE001 - unknown: not recording
             return False
+
+    # ---- quiet during calls (smaller items part 7) -----------------------------------------------------------
+
+    def _call_quiet(self) -> bool:
+        """The owner is on a call - another app uses the microphone - and [voice] quiet_in_calls is on."""
+        watch = self._call_watch
+        return watch is not None and bool(watch.on_call)
+
+    def _start_calls(self) -> None:
+        """From start(): the watch and its 3 s poll, only while [voice] quiet_in_calls is on (off: nothing is read)."""
+        if not bool(getattr(self.config.voice, "quiet_in_calls", True)):
+            logger.info("Calls: not watched (quiet during calls is off)")
+            return
+        from . import calls
+
+        self._call_watch = calls.CallWatch(self.call_probe)
+        self._call_timer = self._make_timer(self._poll_call, single_shot=False, interval_ms=int(calls.POLL_S * 1000))
+        self._call_timer.start()
+        self._poll_call()
+
+    def _poll_call(self) -> None:
+        watch = self._call_watch
+        if watch is None or self.state == STATE_QUITTING:
+            return
+        from . import calls
+
+        try:
+            change = watch.poll()
+        except Exception as exc:  # noqa: BLE001 - the watch never stops the app
+            logger.warning("Calls: the check failed (%s)", type(exc).__name__)
+            return
+        if change is not None:
+            self._on_call_changed(change == calls.ON)
+
+    def _on_call_changed(self, on: bool) -> None:
+        """A call started: his line and a playing briefing stop (the owner's Play resumes it), "Hey Jarvis" pauses,
+        Home says so. It ended: all of that comes back, and a scheduled arrival that waited comes forward now (past
+        the catch-up window nothing is shown, as for a briefing that never came)."""
+        self.window.reading.set_on_call(on)
+        self._wake_call("refresh_holds")
+        if on:
+            self._voice_call("stop")
+            if self._script is not None and self.player.state in (PLAYING, WAITING):
+                self.player.pause()
+            self._update_reading_controls()
+            return
+        if not self._call_arrival_held:
+            return
+        self._release_arrival_hold()
+        if self.state != STATE_WAITING:
+            return
+        from .runstate import CATCH_UP_MAX_AGE
+
+        if self._now() - self._run_started > CATCH_UP_MAX_AGE:
+            logger.info("Calls: the briefing waited past its catch-up window; nothing shown")
+            self.quit()
+            return
+        self._arrive()
+
+    def _hold_arrival_for_call(self) -> None:
+        """A scheduled arrival waits for the call's end - at most until the catch-up window (CATCH_UP_MAX_AGE from
+        the run's start) closes: a single-shot timer then ends the hidden run, showing nothing."""
+        if self._call_arrival_held:
+            return
+        from .runstate import CATCH_UP_MAX_AGE
+
+        self._call_arrival_held = True
+        left_ms = int((self._run_started + CATCH_UP_MAX_AGE - self._now()).total_seconds() * 1000)
+        self._call_deadline = self._make_timer(self._call_deadline_passed, single_shot=True,
+                                               interval_ms=max(0, left_ms))
+        self._call_deadline.start()
+        logger.info("Calls: the %s briefing waits for the call to end (at most %d min)", self.expected_run or "new",
+                    max(0, left_ms) // 60_000)
+
+    def _release_arrival_hold(self) -> None:
+        self._call_arrival_held = False
+        timer, self._call_deadline = self._call_deadline, None
+        if timer is not None:
+            timer.stop()
+            timer.deleteLater()
+
+    def _call_deadline_passed(self) -> None:
+        """The catch-up window closed while a call still held the arrival: nothing is shown; the hidden run ends."""
+        if not self._call_arrival_held:
+            return
+        self._release_arrival_hold()
+        if self.state != STATE_WAITING:
+            return
+        logger.info("Calls: the briefing waited past its catch-up window; nothing shown")
+        self.quit()
+
+    def _timer_chime(self) -> None:
+        """A timer's or a reminder's end sound (instant_ui's), kept quiet on a call (its toast still shows)."""
+        if self._call_quiet():
+            logger.info("Instant: the end sound kept quiet (call)")
+            return
+        from . import instant_ui
+
+        instant_ui._chime()
 
     def _record_buttons_on(self) -> bool:
         """Record on Home's next-meeting tile and the Day view's meeting rows: [meetings] on, nothing records."""
@@ -10802,7 +12747,7 @@ class AppController(QObject):
         busy = bool(self.ask is not None and self.ask.busy) or speaking or bool(self._utterance)
         return QuietFacts(activity=self._prod_activity(), locked=self._locked_now(),
                           speak_ok=bool(assistant.speak and assistant.speak_replies) and not muted
-                          and not self._meeting_recording(), playing=playing,
+                          and not self._meeting_recording() and not self._call_quiet(), playing=playing,
                           card_busy=self._send_hold is not None or bool(self._jobs), busy=busy)
 
     def _prod_ask_state(self) -> tuple[bool, bool, float]:
@@ -11539,7 +13484,8 @@ class AppController(QObject):
                                             hour24=self.config.display.hour24,
                                             now=lambda: self._instant_now().astimezone(timezone.utc),
                                             local=lambda moment: wall(moment, self._instant_now()),
-                                            say_labels=is_local(self.config), parent=self)
+                                            say_labels=is_local(self.config), chime=self._timer_chime,
+                                            parent=self)
         self._instant_calendar_job: Any = None          # round 2: the calendars' read on its way (one at a time)
         self._instant_calendar_seq = 0
         calendar_read = self._instant_calendar_read if self._any_calendar_configured() else None
@@ -11551,7 +13497,8 @@ class AppController(QObject):
         controller.fallback.connect(self._on_instant_fallback)
         settings = self.window.reading.settings_page                   # round 2: Settings > Instant answers
         settings.add_group(instant_ui.SETTINGS_KEY, instant_ui.SETTINGS_TITLE, note=instant_ui.SETTINGS_NOTE,
-                           how=instant_ui.SETTINGS_HOW, rows=controller.settings_rows)
+                           how=instant_ui.SETTINGS_HOW, rows=controller.settings_rows,
+                           edits=settings_view.INSTANT_EDITS)
         controller.townChanged.connect(settings.refresh)
         timers.ended.connect(self._on_instant_timer_ended)
         timers.changed.connect(self._on_instant_timers_changed)
@@ -11614,6 +13561,7 @@ class AppController(QObject):
         self._you(words)
         sub = f"{reply.source} {DOT} {ms / 1000:.1f} s" if reply.source else f"on this PC {DOT} {ms} ms"
         self._jarvis(reply.text, sub=sub)
+        self._look_call("on_instant_answer", reply, words)   # the new look: a sum's working as a maths frame
         if self.ask is not None:
             brief = getattr(reply, "brief", "")          # round 2: a calendar's day has a one-line form for the bar
             self.ask.show_note(brief or reply.text, hud_text=brief or reply.speech)
@@ -11759,8 +13707,11 @@ class AppController(QObject):
         """The typed shortcuts on now: memory ("remember that ..."), the day plan ("plan my day"),
         the meeting brief ("prep me for my 2 PM"), the follow-up list ("any follow-ups?"), and desktop
         requests ("open my LING essay") only while [desktop] is enabled (the HUD exists)."""
+        standing = getattr(self, "standing", None)
         return RouteFlags(memory=self.memory_store is not None, plan=self._plan_on(), prep=self._prep_on(),
-                          followups=self._followups_section_on(), desktop=getattr(self, "desktop", None) is not None)
+                          followups=self._followups_section_on(), desktop=getattr(self, "desktop", None) is not None,
+                          standing=standing is not None,
+                          standing_names=standing.live_agent_names() if standing is not None else ())
 
     def _memory_prompt_notes(self) -> tuple[str, ...]:
         """Every note, newest first: the planner gives a run the ones that fit, an Ask's the closest to its
@@ -12362,8 +14313,8 @@ class AppController(QObject):
         if self._focus_quiet():
             self._hold_for_focus(kind, text, key)
             said = False
-        elif self._meeting_recording():
-            said = False
+        elif self._meeting_recording() or self._call_quiet():
+            said = False                  # a call: his voice would be heard by the others (captions only)
         else:
             try:
                 said = bool(self.voice.say(kind, text, key=key))
@@ -12373,6 +14324,8 @@ class AppController(QObject):
         if not said and text and self.state == STATE_READING and self._voice_silent():
             # Muted (or no voice): the same words as Home's caption, text only (HOLOGRAM_SPEC 14.7).
             self.window.reading.say_caption(scrub_for_speech(text), spoken=False)
+        if not said and kind in (KIND_GREETING, KIND_ANNOUNCE):
+            self._release_prerender("text only")   # the start-up line was not said: nothing to wait for
         return said
 
     def _hold_for_focus(self, kind: str, text: str, key: str) -> None:
@@ -12384,9 +14337,10 @@ class AppController(QObject):
             del held[:-FOCUS_SPEECH_KEPT]
 
     def _voice_silent(self) -> bool:
-        """Jarvis's voice is muted or off, a meeting records or focus mode runs (P2.5): what he would say shows as a
-        caption only."""
-        if not self.config.assistant.speak or self._meeting_recording() or self._focus_quiet():
+        """Jarvis's voice is muted or off, a meeting records, focus mode runs (P2.5) or the owner is on a call
+        (``_call_quiet``): what he would say shows as a caption only."""
+        if (not self.config.assistant.speak or self._meeting_recording() or self._focus_quiet()
+                or self._call_quiet()):
             return True
         try:
             return bool(self.voice.muted)
@@ -12418,12 +14372,19 @@ class AppController(QObject):
         self._voice_call("owner_acted")
         self._voice_call("stop")
         self._prod_call("on_speech_dropped")   # a queued offer sentence that never started is held again
+        self._release_prerender("play")         # the owner plays the briefing: its audio is made now
 
     def _on_voice_speaking(self, text: str) -> None:
         """Jarvis started saying ``text`` (the orb says SPEAKING and the speech line shows his words)
         or finished (""; the briefing's own state and line come back)."""
         self._utterance = text or ""
+        if self._prerender_held:                 # his start-up line: the briefing's audio is made once it ends
+            if text:
+                self._prerender_heard = True
+            elif self._prerender_heard:
+                self._release_prerender("said")
         self._wake_call("refresh_holds")         # "Hey Jarvis" pauses while he speaks: he never wakes himself
+        self._look_call("on_speaking")           # the soft sounds never play over him
         if text:
             self._prod_call("on_speaking", text)   # an offer's sentence counts as spoken from now (R26)
         if self.state != STATE_READING:
@@ -12480,6 +14441,7 @@ class AppController(QObject):
         self._voice_call("set_muted", bool(muted))
         if muted:
             self._prod_call("on_muted")   # an offer not said yet stays text only: unmuting never says it (R37)
+        self._look_call("on_muted", bool(muted))   # the new look: a lit frame and its cue line go with his voice
         self._sync_speaker()
 
     def _sync_speaker(self) -> None:
@@ -12550,6 +14512,8 @@ class AppController(QObject):
     def _on_conversation_link(self, link_id: str) -> None:
         if link_id == VIEW_BRIEFING_LINK:
             self.window.reading.set_tab(hud.TAB_BRIEFING)
+        elif link_id.startswith("standing:") and getattr(self, "standing", None) is not None:
+            self.window.reading.set_tab(SCREEN_AGENTS)
         elif link_id.startswith("live:"):
             self._reveal_live(link_id)
         elif link_id.startswith(MEMORY_UNDO_LINK):
@@ -12665,6 +14629,9 @@ class AppController(QObject):
             window.clearRequested.connect(self.clear_live)
             window.linkClicked.connect(self._on_live_link)
             window.set_summary(self._live_summary)
+            from . import second_screen
+
+            second_screen.broker().watch(window, second_screen.LIVE)   # the new look: it goes first on that screen
         return window
 
     def pop_out_live(self, *, activate: bool = True) -> None:
@@ -12754,6 +14721,10 @@ class AppController(QObject):
         others = [screen for screen in QGuiApplication.screens() if screen is not main_screen]
         target = others[0] if others else main_screen
         area = target.availableGeometry() if target is not None else QRect(0, 0, 1280, 800)
+        if others:                                   # the new look: clear of the second screen's strip there
+            from . import second_screen
+
+            area = second_screen.broker().room(target.geometry(), area, second_screen.LIVE)
         window.resize(LIVE_WINDOW_SIZE.boundedTo(area.size() - QSize(2 * SCREEN_MARGIN, 2 * SCREEN_MARGIN))
                       .expandedTo(LIVE_WINDOW_MIN_SIZE))
         width, height = window.width(), window.height()
@@ -13188,7 +15159,9 @@ class AppController(QObject):
     def _arrive(self) -> None:
         """The scheduled run's fresh briefing is here: shown without the focus and announced with a
         greeting before it, unless it was announced or viewed already (then the process just ends).
-        A setup error is shown the same way, as text only."""
+        A setup error is shown the same way, as text only (never held for a call: nothing is said). On a call
+        (quiet during calls) the briefing waits for the call's end (_on_call_changed), at most until the catch-up
+        window closes (_call_deadline: then nothing is shown and the hidden run ends)."""
         if self.startup_error:
             self._arriving = True
             try:
@@ -13198,6 +15171,9 @@ class AppController(QObject):
             headline = _split_startup_error(self.startup_error)[0].rstrip(".")
             self._jarvis(f"I can't reach your briefing: {headline}.", tone=hud.TONE_WARN)
             logger.info("Showing the setup error without the focus (nothing is said)")
+            return
+        if self._call_quiet():
+            self._hold_arrival_for_call()
             return
         key = briefing_key(self._briefing.header, self.slots) if self._briefing is not None else None
         if key is not None and (self._is_announced(key) or self._is_viewed(key)):
@@ -13303,7 +15279,8 @@ class AppController(QObject):
             announce=self.config.sections.announce, actions=self._pending_page_actions())
 
     def _refresh_prefetch(self) -> None:
-        """Prepare audio for the briefing while the prompt shows (rebuilt when it changes)."""
+        """Prepare audio for the briefing while the prompt shows (rebuilt when it changes); while the start-up line
+        holds it (``_hold_prerender``) the newest script waits."""
         if self.state in (STATE_READING, STATE_QUITTING) or self._briefing is None:
             return
         # No stale note while still waiting for the run; a one-off re-check keeps it.
@@ -13311,10 +15288,40 @@ class AppController(QObject):
         script = self._build_script(include_note)
         unchanged = self._prefetch is not None and script.sections == self._prefetch.sections
         self._prefetch = script
+        if self._prerender_held:
+            if not unchanged or self._prerender_due is not None:
+                self._prerender_due = (script, include_note)
+            return
         if not unchanged:
             self._submit_all(script)
             if not include_note:
                 self._warm_noted_intro(script)
+
+    def _hold_prerender(self) -> None:
+        """At start (the local voice): the briefing's audio is made only once his start-up line was said, or it was
+        shown as text only, or the owner reads, or _PRERENDER_WAIT_MS went by - so his first words never wait behind
+        the briefing's sections, nor come in the Windows voice for it. Nothing to wait for when he does not speak."""
+        if not self.config.assistant.speak or self._voice_silent():
+            return
+        self._prerender_held, self._prerender_heard, self._prerender_due = True, False, None
+        self._prerender_began = time.monotonic()
+        self._prerender_timer.start()
+
+    def _release_prerender(self, why: str) -> None:
+        """The start-up line is over (``why``: a reason word): what waits is made now."""
+        if not self._prerender_held:
+            return
+        self._prerender_held, self._prerender_heard = False, False
+        self._prerender_timer.stop()
+        due, self._prerender_due = self._prerender_due, None
+        logger.info("Briefing audio: waited %d ms for the start-up line (%s)",
+                    int((time.monotonic() - self._prerender_began) * 1000), why)
+        if due is None or self.state == STATE_QUITTING:
+            return
+        script, include_note = due                      # the newest script (each change while held replaced it)
+        self._submit_all(script)
+        if not include_note:
+            self._warm_noted_intro(script)
 
     def _warm_noted_intro(self, script: Script) -> None:
         """Also synthesize the intro with the stale note, so Read now during the wait starts at once.
@@ -13652,6 +15659,7 @@ class AppController(QObject):
         self._request_agenda()
         self._sync_agenda_timer()
         self._prod_sync()
+        self._standing_soon()
         self._restore_live_window()
         if self.startup_error:
             self._show_reading_error(self.startup_error, can_retry=False)
@@ -13752,7 +15760,11 @@ class AppController(QObject):
             self._stop_fetch()
         self._recheck_timer.stop()
         script = self._build_script(include_note=True)
-        if self._prefetch is None or script.sections != self._prefetch.sections:
+        if self._autoplay:
+            self._release_prerender("reading")   # it plays now: nothing waits for the start-up line any more
+        if self._prerender_held:                 # shown, waiting for Play: its audio still waits for his first line
+            self._prerender_due = (script, True)
+        elif self._prefetch is None or script.sections != self._prefetch.sections:
             self._submit_all(script)
         self._script = script
         self._include_ignored = False
@@ -13763,9 +15775,10 @@ class AppController(QObject):
         logger.info("Reading the briefing: %d section(s)%s%s", len(script.section_indices(False)),
                     ", with a stale note" if script.stale else "", "" if self._autoplay else " (waiting for Play)")
         self._render_reading()
-        if self._autoplay and self._meeting_recording():
-            self._autoplay = False                # a meeting records: the briefing waits for Play (never aloud)
-            logger.info("A meeting records: the briefing waits for Play")
+        if self._autoplay and (self._meeting_recording() or self._call_quiet()):
+            self._autoplay = False                # a meeting records or a call: the briefing waits for Play
+            logger.info("%s: the briefing waits for Play",
+                        "A meeting records" if self._meeting_recording() else "On a call")
         if self._autoplay:
             self._start_playback(script.section_indices(False))
         self._after_briefing_shown()
@@ -14042,6 +16055,7 @@ class AppController(QObject):
         self._update_reading_controls()
 
     def _on_player_state(self, state: str) -> None:
+        self._look_call("on_speaking")           # the soft sounds never play over a briefing
         self._pump_voice()
         self._wake_call("refresh_holds")         # "Hey Jarvis" pauses while the briefing plays (any player, as it is
                                                  # replaced for each new briefing)
@@ -14206,6 +16220,11 @@ class AppController(QObject):
         control on the desktop (Phase 3) the window key - OPEN or READ - is ignored: Esc or Stop
         first."""
         message = message if isinstance(message, dict) else {}
+        if message.get("cmd") == "standing":
+            # A background standing check has news: read the run files again and tell it; nothing comes forward.
+            if getattr(self, "standing", None) is not None and self.state != STATE_QUITTING:
+                self.standing.on_activation(message)
+            return
         run = _normalize_run(message.get("run"))
         now = message.get("now") is True
         ask = message.get("ask") is True
@@ -14267,6 +16286,205 @@ class AppController(QObject):
         else:
             self._open_activation(ask=False)
 
+    # ---- capture (build plan item 3) ----------------------------------------------------------------------
+
+    def _create_capture(self) -> Any:
+        """capture_ui.CaptureController: drops on the window, the ask line's capture paste and "capture:", the tray,
+        the CAPTURE cards (kept in captures.json, loaded now) and the Source viewer. A picture, PDF or text needs Ask;
+        a calendar file or link never goes to Claude. None when it can't start (logged by the error's type)."""
+        try:
+            from . import capture_ui
+            from .capture_store import CaptureStore
+
+            controller = capture_ui.CaptureController(
+                self.window.reading.command_bar, self.window, store=CaptureStore(self.config.data_dir),
+                data_dir=self.config.data_dir, submit_mode=self.ask.submit_mode if self.ask is not None else None,
+                ask_enabled=lambda: self.ask is not None and bool(self.config.ask.enabled),
+                decided=self._store.is_decided, decided_at=self._capture_decided_at,
+                take_cards=self._take_capture_cards, show_frame=self._show_capture_frame,
+                events=self._capture_events, zone=local_timezone, now=self._now, status=self._capture_status,
+                parent=self)
+            if self.ask is not None:
+                self.ask.captureRequested.connect(controller.typed)
+            controller.load()
+            return controller
+        except Exception as exc:  # noqa: BLE001 - Jarvis runs on without capture
+            logger.warning("Capture: not started (%s)", type(exc).__name__)
+            return None
+
+    def _capture_decided_at(self, card_id: str) -> Any:
+        entry = self._store.get(card_id) or {}
+        if entry.get("status") not in DECIDED_STATUSES:
+            return None
+        try:
+            moment = datetime.fromisoformat(str(entry.get("at", "")))
+        except ValueError:
+            return None
+        return moment if moment.tzinfo is not None else moment.astimezone()
+
+    def _capture_events(self, start: datetime, end: datetime) -> Any:
+        """One read of the personal calendar for a capture's duplicate check (never a sign-in: list_events raises
+        first); None when it can't be read (the cards are still made)."""
+        calendar = self._calendars.get(DEFAULT_ACCOUNT)
+        if calendar is None:
+            return None
+        start, end = (moment if moment.tzinfo is not None else moment.astimezone() for moment in (start, end))
+        try:
+            checked = getattr(calendar, "list_events_checked", None)
+            if checked is None:
+                return calendar.list_events(start, end)
+            events, complete = checked(start, end, max_pages=CAPTURE_LIST_PAGES)
+        except CalendarError as exc:
+            logger.info("Capture: the calendar was not read (%s)", type(exc).__name__)
+            return None
+        if not complete:
+            # More events than one read takes: some could be missed, so the check says it did not check.
+            logger.info("Capture: the calendar has more events than one read takes; not checked")
+            return None
+        return events
+
+    def _show_capture_frame(self, summary: Any, approvals: str, words: str) -> None:
+        desk = getattr(getattr(self, "look", None), "desk", None)
+        if desk is not None:
+            desk.on_capture(summary, approvals=approvals, words=words)
+
+    def _capture_status(self, text: str, tone: str) -> None:
+        if self.ask is not None:
+            self.ask.show_note(text, tone)
+        else:
+            self.window.reading.command_bar.set_status(text, tone)
+
+    # ---- documents and datasheets ([docs]; build plan item 5) ----------------------------------------------------
+
+    def _create_docs(self) -> Any:
+        """[docs] on (the default): docs_ui.DocsController - the Dock's Documents (Ctrl+0) and its screen, kept in the
+        docs folder of the data folder. Off: None, and nothing of it shows. None also when it can't start (logged by
+        the error's type)."""
+        settings = getattr(self.config, "docs", None)
+        if not getattr(settings, "enabled", True):
+            return None
+        try:
+            from . import docs_ui
+            from .docs.store import DocsStore
+
+            self._doc_tables_seen: list[tuple[str, tuple[str, ...], tuple[tuple[str, ...], ...]]] = []
+            ask = self.ask
+            controller = docs_ui.DocsController(
+                self.window.reading, DocsStore(self.config.data_dir, clock=self._now),
+                export_folder=getattr(settings, "export_folder", ""),
+                submit_mode=ask.submit_mode if ask is not None else None,
+                ask_on=lambda: self.ask is not None and bool(self.config.ask.enabled),
+                conversation=self._conversation_turns, tables=lambda: tuple(self._doc_tables_seen),
+                status=self._docs_status, board=self._docs_frame, parent=self)
+            planner = getattr(ask, "planner", None) if ask is not None else None
+            if planner is not None:   # an Ask's first run may hand a request to a document or a sheet
+                planner.docs_allowed = lambda: not controller.store.read_only
+            return controller
+        except Exception as exc:  # noqa: BLE001 - Jarvis runs on without documents
+            logger.warning("Docs: not started (%s)", type(exc).__name__)
+            return None
+
+    def _docs_frame(self, key: str, build: Any, refresh: bool) -> None:
+        """A document's or sheet's frame on the board (desk_ui.on_doc), while the new look's board is there."""
+        desk = getattr(getattr(self, "look", None), "desk", None)
+        if desk is not None:
+            desk.on_doc(key, build, refresh)
+
+    def _docs_status(self, text: str) -> None:
+        """Jarvis's own words about a document request (a question back: which one?) on the ask line."""
+        if self.ask is not None:
+            self.ask.show_note(text, hud.TONE_WARN)
+        else:
+            self.window.reading.command_bar.set_status(text, hud.TONE_WARN)
+
+    def _note_doc_tables(self, outcome: Any) -> None:
+        """The tables an Ask answer put on the board (at most the last 3): what a document run may be given as
+        <tables> (titles, column words and cells only)."""
+        if getattr(self, "docs", None) is None:
+            return
+        from .board import ask_frames
+
+        found = []
+        for frame in getattr(outcome, "frames", ()) or ():
+            if isinstance(frame, ask_frames.AskFrame) and frame.kind == "table":
+                body = frame.body or {}
+                found.append((frame.title, tuple(str(c) for c in body.get("columns", ())),
+                              tuple(tuple(str(cell) for cell in row) for row in body.get("rows", ()))))
+        if found:
+            self._doc_tables_seen = (self._doc_tables_seen + found)[-3:]
+
+    def _on_doc_outcome(self, outcome: Any) -> None:
+        """A document run's outcome: its changes wait in the item (docs_ui); the conversation gets Jarvis's words
+        (his say and where the changes are, or why he held them back), never the changes themselves."""
+        from .ask_ui import AskController
+
+        if getattr(self, "docs", None) is not None:
+            self.docs.on_outcome(outcome)
+        if not outcome.ok:
+            return
+        count = len(getattr(getattr(outcome, "doc_proposal", None), "items", ()) or ())
+        if count:
+            sub = "1 change waits in Documents" if count == 1 else f"{count} changes wait in Documents"
+        else:
+            sub = "nothing waits"
+        self._jarvis(AskController._answer(outcome), tone=hud.TONE_DONE if count else hud.TONE_WARN, sub=sub)
+        self._activity(hud.TAG_ASK, "Document changes" if count else "No document changes",
+                       f"{outcome.duration_ms / 1000:.1f} s")
+
+    # ---- standing agents and rules ([standing]) ------------------------------------------------------------
+
+    def _create_standing(self) -> Any:
+        """[standing] on, with Ask Jarvis: standing_ui.StandingController - the Agents screen (Ctrl+9), the standing
+        cards from the run files, the one spoken line and a standing Reply's check at click time. Off: None, and no
+        Agents surface shows (the run files on this PC go when the background check prunes them)."""
+        if not getattr(getattr(self.config, "standing", None), "enabled", False):
+            return None
+        if self.ask is None:
+            logger.info("Standing: [standing] is on but Ask Jarvis is off; the Agents screen stays hidden")
+            return None
+        from . import standing_ui
+
+        controller = standing_ui.StandingController(self, parent=self)
+        self.window.reading.tabChanged.connect(self._on_tab_for_standing)
+        # Setup from the chat: "agent:" / "rule:" and "run <name>" (ask.routes), and an Ask's first run may hand a
+        # standing job's request to the setup (the owner's own words go, never the planner's).
+        self.ask.standingRequested.connect(controller.on_route)
+        planner = getattr(self.ask, "planner", None)
+        if planner is not None:
+            planner.standing_allowed = controller.handoff_allowed
+        return controller
+
+    def _on_tab_for_standing(self, index: int) -> None:
+        if index == SCREEN_AGENTS and self.standing is not None and self._window_active():
+            self.standing.on_screen_shown()
+
+    def _standing_soon(self) -> None:
+        """Reading began (an open, a scheduled arrival): the standing news is told a moment later, after the
+        greeting or the announcement."""
+        if getattr(self, "standing", None) is not None:
+            QTimer.singleShot(STANDING_TELL_DELAY_MS, self, self._standing_tell)
+
+    def _standing_tell(self) -> None:
+        if getattr(self, "standing", None) is not None and self.state == STATE_READING and not self._shut_down:
+            self.standing.announce()
+
+    def _standing_show(self) -> None:
+        """--standing-show: a background check found something that needs the owner while Jarvis was closed: shown
+        without the focus (as a scheduled briefing arrives) and told once. Nothing left to tell (told meanwhile, or
+        [standing] is off here) ends this start at once."""
+        standing = getattr(self, "standing", None)
+        if standing is None or not standing.has_news():
+            logger.info("Standing: nothing to tell; not showing")
+            self.quit()
+            return
+        logger.info("Standing: news from a background check; showing without the focus")
+        self._arriving = True
+        try:
+            self._show_assistant(take_focus=False)
+        finally:
+            self._arriving = False
+        standing.announce()
+
     # ---- talking to Jarvis ([talk]) -------------------------------------------------------------------------
 
     def _create_talk(self) -> Any:
@@ -14294,8 +16512,34 @@ class AppController(QObject):
         if visibility is not None:
             visibility.connect(self._talk_visibility)
         reading.settings_page.add_group(talk_ui.SETTINGS_KEY, talk_ui.SETTINGS_TITLE, note=talk_ui.SETTINGS_NOTE,
-                                        how=talk_ui.SETTINGS_HOW, rows=controller.settings_rows, extra=panel)
+                                        how=talk_ui.SETTINGS_HOW, rows=controller.settings_rows, extra=panel,
+                                        edits=settings_view.TALK_EDITS)
+        # Canvas part 5B: Settings > Talk's Microphone row - the same saved pick as Settings > Meetings' (one setting:
+        # either row changes it, both show it), listed whenever Settings > Talk opens
+        controller.mic_picker = getattr(self, "_pick_microphone", None)
+        group_changed = getattr(reading.settings_page, "groupChanged", None)
+        if group_changed is not None:
+            group_changed.connect(lambda key: controller.refresh_mic_row() if key == talk_ui.SETTINGS_KEY else None)
+        meetings = getattr(self, "meetings", None)
+        if meetings is not None:
+            meetings.devicesPicked.connect(controller.refresh_mic_row)
+            meetings.silent_mics = controller.silent_names
         return controller
+
+    def _pick_microphone(self, name: str) -> None:
+        """Canvas part 5B: a microphone picked in Settings > Talk ("" follows the Windows default). Saved where Settings >
+        Meetings keeps it (one setting): through the meetings controller when [meetings] is on (it saves, shows it and
+        tells "Hey Jarvis"), else straight into the same file and "Hey Jarvis"'s listener moves to it. Nothing else."""
+        meetings = getattr(self, "meetings", None)
+        if meetings is not None:
+            meetings.pick_devices(microphone=name)
+            return
+        from . import meetings as meetings_mod
+
+        meetings_mod.DevicePrefs(meetings_mod.meetings_root(self.config)).set(microphone=name)
+        wake = getattr(self, "wake", None)
+        if wake is not None:
+            wake.mic_picked()
 
     # ---- "Hey Jarvis" (wake_ui) -----------------------------------------------------------------------------------
 
@@ -14315,6 +16559,7 @@ class AppController(QObject):
         settings = self.window.reading.settings_page
         controller.attach_panel(panel, refresh=settings.refresh)
         talk.extra_rows = controller.settings_rows
+        talk.silent_mics = controller.silent_mics       # part 5B: "(silent)" in the microphone lists
         controller.changed.connect(self._on_wake_changed)
         recording = getattr(getattr(self, "meetings", None), "recordingChanged", None)
         if recording is not None:
@@ -14324,6 +16569,41 @@ class AppController(QObject):
             picked.connect(controller.mic_picked)       # Settings > Meetings > Microphone: the listener moves to it
         self._on_wake_changed()
         return controller
+
+    def _say_network_use(self) -> None:
+        """Tell the web engine whether a page picture ([live] page pictures) or an agent page ([agent]) can be asked
+        for in this run: with neither, the board's engine starts with the dead proxy and Jarvis's network gate is
+        never made (snapshot_engine.set_network_use; the final review's ship-gate finding)."""
+        try:
+            from . import snapshot_engine
+
+            snapshot_engine.set_network_use(
+                lambda: getattr(self, "_snapshots", None) is not None or getattr(self, "agent", None) is not None)
+        except Exception as exc:  # noqa: BLE001 - unsaid: the gate binds sealed
+            logger.debug("Web engine: the network use was not said (%s)", type(exc).__name__)
+
+    def _create_look(self) -> Any:
+        """The new look's controller (look_ui): the soft sounds and Settings > Look; None if it could not start."""
+        try:
+            from . import look_ui
+
+            return look_ui.LookController(self)
+        except Exception as exc:  # noqa: BLE001 - the new look never stops the app
+            logger.warning("Look: not started (%s)", type(exc).__name__)
+            return None
+
+    def _look_call(self, name: str, *args: Any) -> Any:
+        # Never while the app quits, nor on a controller (or app) whose Qt object is gone: a signal that reaches a
+        # hook during the teardown must not touch objects that are being deleted.
+        look = getattr(self, "look", None)
+        if look is None or self.state == STATE_QUITTING or not shiboken6.isValid(self) \
+                or not shiboken6.isValid(look):
+            return None
+        try:
+            return getattr(look, name)(*args)
+        except Exception as exc:  # noqa: BLE001 - the new look never stops the app
+            logger.warning("Look: %s failed (%s)", name, type(exc).__name__)
+            return None
 
     def _wake_call(self, name: str, *args: Any) -> Any:
         wake = getattr(self, "wake", None)
@@ -14337,7 +16617,7 @@ class AppController(QObject):
 
     def _wake_holds(self) -> list[str]:
         """What pauses "Hey Jarvis" now (wake_ui.HOLD_*): a talk under way, Jarvis speaking or reading the briefing, a
-        meeting recording, focus mode."""
+        meeting recording, focus mode, a call (quiet during calls)."""
         from . import talk_ui, wake_ui
 
         holds: list[str] = []
@@ -14354,6 +16634,8 @@ class AppController(QObject):
             holds.append(wake_ui.HOLD_MEETING)
         if self._focus_quiet():
             holds.append(wake_ui.HOLD_FOCUS)
+        if self._call_quiet():
+            holds.append(wake_ui.HOLD_CALL)
         return holds
 
     def _wake_in_control(self) -> bool:
@@ -14364,6 +16646,7 @@ class AppController(QObject):
         """The soft chime as a talk "Hey Jarvis" started listens (when nothing was said yet: talk_ui)."""
         from .wake_ui import play_chime
 
+        self._look_call("on_wake_chime")          # the new look's "heard you" sound skips this one
         play_chime(self.config.data_dir)
 
     def _wake_tray_mark(self) -> str:
@@ -14383,7 +16666,7 @@ class AppController(QObject):
         if wake is None:
             return
         text, look = wake.status()
-        self.window.reading.set_wake(text, look)
+        self.window.reading.set_wake(text, look, wake.short_status())
         self._update_tray()
         action = self._tray_wake_action
         if action is not None and action.isChecked() != bool(wake.on):
@@ -14436,13 +16719,19 @@ class AppController(QObject):
         setter = getattr(self.window.reading, "set_talking", None)
         if callable(setter):
             setter(state == talk_ui.LISTENING)
+        self._look_call("on_talk_state", state)       # the soft "heard you" as listening opens
         self._update_reading_controls()
         if state == talk_ui.IDLE:
             self._pump_voice()
 
     def _talk_level(self, level: float | None) -> None:
-        """The microphone's level on Home's orb (the one the owner sees)."""
-        hero = getattr(self.window.reading, "hero", None)
+        """The microphone's level on Home's orb (the one the owner sees: the hero, or the desk's ring)."""
+        reading = self.window.reading
+        ring_level = getattr(reading, "ring_level", None)
+        if callable(ring_level):
+            ring_level(level)
+            return
+        hero = getattr(reading, "hero", None)
         if hero is not None and hasattr(hero, "set_level"):
             hero.set_level(level)
 
@@ -14680,6 +16969,8 @@ class AppController(QObject):
             return
         self._shut_down = True
         logger.info("Shutting down")
+        if self._call_timer is not None:
+            self._call_timer.stop()          # quiet during calls: nothing is read any more
         if getattr(getattr(self, "agent", None), "running", False):
             self._note_task_ended("stopped")   # closing ends it, and a later Ask sees that, not only its promise
         self._save_conversation()      # the conversation as it is now stays on this PC (its timers stop below)
@@ -14696,6 +16987,10 @@ class AppController(QObject):
             self.voice_download.shutdown()   # a download of the local voice stops (it carries on at the next click)
         if getattr(self, "meetings", None) is not None:
             self.meetings.shutdown()   # a recording stops and is saved; the pill goes
+        if getattr(self, "standing", None) is not None:
+            self.standing.shutdown()   # the folder check stops
+        if getattr(self, "docs", None) is not None:
+            self.docs.shutdown()       # what the owner typed and is not saved yet is saved now
         if getattr(self, "task_feed", None) is not None:
             self.task_feed.shutdown()  # the task's panel and cards: before the HUD's windows go
         if getattr(self, "desktop", None) is not None:
@@ -14712,6 +17007,8 @@ class AppController(QObject):
             self._on_shutdown()
         flushed = self._flush_send_hold()   # before the worker stops: the owner already saw "Sent"
         self.state = STATE_QUITTING
+        if self._batch is not None:
+            self._end_batch(batch.REASON_QUIT)   # Add all ends here: the card on its way finishes as any card's would
         self._closing.set()
         for timer in (self._ignore_timer, self._tick_timer, self._snooze_timer, self._note_timer,
                       self._recheck_timer, self._agenda_timer, self._send_hold_timer, self._undo_timer,
@@ -14725,6 +17022,18 @@ class AppController(QObject):
         if self.productivity is not None:
             self.productivity.shutdown()   # its timer and the prod thread stop; nothing more is offered
         self._snapshots_call("shutdown")   # no page is opened any more; the hidden view goes
+        look = getattr(self, "look", None)
+        desk = getattr(look, "desk", None) if look is not None and shiboken6.isValid(look) else None
+        if desk is not None:
+            try:
+                desk.shutdown()            # the new look's board: its page, renderer and profile go now
+            except Exception as exc:  # noqa: BLE001 - the board never stops the quit
+                logger.warning("Board: not shut down cleanly (%s)", type(exc).__name__)
+        if look is not None and shiboken6.isValid(look) and callable(getattr(look, "shutdown", None)):
+            try:
+                look.shutdown()            # the new look's second screen: its window goes now
+            except Exception as exc:  # noqa: BLE001 - the second screen never stops the quit
+                logger.warning("Second screen: not shut down cleanly (%s)", type(exc).__name__)
         self._close_live_window()
         if self._dialog is not None:
             self._dialog.reject()

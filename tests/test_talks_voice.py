@@ -59,8 +59,7 @@ from tests.ui_fakes import (
     fonts,
     plan,
     settle,
-    wait_for,
-)
+    wait_for, delete_now)
 
 _app: QApplication | None = None
 TRUSTED = "ana@example.edu"                       # a trusted-domain recipient: no Edit needed before Send
@@ -165,6 +164,7 @@ class Built:
             c._say_worker.join(5)
         c.window.deleteLater()
         settle()
+        delete_now(c)           # on this thread, never by a garbage collection on a later test's worker thread
 
 
 class VoiceBuildTests(unittest.TestCase):

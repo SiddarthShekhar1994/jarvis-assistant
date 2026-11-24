@@ -28,7 +28,8 @@ Public API
 ``ADDONS``, ``addons_missing()``, ``pip_lines(missing=None, python=None)``, ``missing_reason(root)``.
 ``sentence_groups(text, most=GROUP_CHARS)``, ``speed_for(percent)``, ``gain_for(percent)``,
 ``join_wavs(parts, out, gap_ms=0)`` -> (duration_ms, each part's duration_ms).
-``LocalResult``, ``LocalVoiceError`` (``.code``: ERR_*), ``LocalVoiceClient`` (one per app, shared by the briefing's
+``LocalResult``, ``LocalVoiceError`` (``.code``: ERR_*; both carry ``waited_ms`` and ``held_by``: HELD_*),
+``LocalVoiceClient`` (one per app, shared by the briefing's
 and Jarvis's speech threads): ``ready()``, ``warm()``, ``synthesize(text, out, voice=, speed=, gain=, urgent=)``,
 ``running()``, ``close()``.
 
@@ -68,7 +69,9 @@ LONG_CHARS = 400                       # a longer sentence is cut at a clause ma
 THREADS = 8
 READY_TIMEOUT_S = 180.0                # loading spaCy, misaki's dictionaries, torch and the model (a slow disk)
 ANSWER_TIMEOUT_S = 90.0                # one request (at most a few sentences)
-URGENT_WAIT_S = 10.0                   # his own line waits at most this long for the voice (it may still be loading)
+URGENT_WAIT_S = 10.0                   # his own line waits at most this long while another of his lines holds the voice
+URGENT_LOAD_WAIT_S = 25.0              # ... and this long while the voice loads or makes the briefing's audio (2026-11-24:
+                                       # his first words of the day in his own voice; captioned meanwhile)
 START_TRIES = 2                        # a process that ends or hangs before it is ready this many times in a row: given up
 CLOSE_WAIT_S = 3.0
 IDLE_MARGIN_S = 5.0                    # a process this close to its idle end is replaced rather than raced
@@ -88,11 +91,15 @@ ERR_TIMEOUT = "timeout"                # no answer in time
 ERR_START = "start_failed"             # the process could not be started
 ERR_REFUSED = "refused"                # under the test guard, with no fake process given
 ERR_CLOSED = "closed"                  # the app is closing
-ERR_BUSY = "busy"                      # his line waited URGENT_WAIT_S for the voice (loading): the Windows voice says it
+ERR_BUSY = "busy"                      # his line waited its most for the voice: the Windows voice says it
 ERR_LOAD = "load_failed"               # the process could not load (remembered: not started again until reset)
 MAX_TEXT_CHARS = 4000                  # one request (GROUP_CHARS is the usual; sentence_groups keeps far below it)
 # Errors about one line, not the voice: the Windows voice says that line, and the next one asks the local voice again.
 LINE_ERRORS = frozenset({ERR_TOO_LONG, ERR_FAILED, ERR_VOICE, ERR_PATH, ERR_BUSY})
+# What held the voice while one of his lines waited for it (reason words, safe to log).
+HELD_LOADING = "loading"               # the process was starting (a warm-up, or a request that started it)
+HELD_BRIEFING = "briefing"             # a briefing section's request (not urgent)
+HELD_LINE = "line"                     # another of his own lines
 
 # --------------------------------------------------------------------------
 # Voices and the engine setting
@@ -409,22 +416,28 @@ def join_wavs(parts: Sequence[Path], out: Path, gap_ms: int = 0) -> tuple[int, t
 # --------------------------------------------------------------------------
 
 class LocalVoiceError(Exception):
-    """The local voice gave no audio; ``code`` is one of ERR_* (safe to log; never any text)."""
+    """The local voice gave no audio; ``code`` is one of ERR_* (safe to log; never any text). ``waited_ms`` and
+    ``held_by`` (HELD_* or ""): how long the line waited for the voice first, and what held it."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, *, waited_ms: int = 0, held_by: str = "") -> None:
         super().__init__(code)
         self.code = code
+        self.waited_ms = int(waited_ms)
+        self.held_by = held_by
 
 
 @dataclass(frozen=True)
 class LocalResult:
     """One request's answer: the WAV's length, when each word starts (ms from the WAV's start, the word as the worker
-    read it), how long making it took and, when this request started the process, how long it took to load."""
+    read it), how long making it took and, when this request started the process, how long it took to load;
+    ``waited_ms`` and ``held_by`` (HELD_* or ""): how long it waited for the voice first, and what held it."""
 
     duration_ms: int
     words: tuple[tuple[int, str], ...] = ()
     ms: int = 0
     load_ms: int = 0
+    waited_ms: int = 0
+    held_by: str = ""
 
     def __repr__(self) -> str:                    # never the words themselves
         return f"LocalResult({self.duration_ms} ms, {len(self.words)} words, made in {self.ms} ms)"
@@ -453,6 +466,7 @@ class LocalVoiceClient:
         self._clock = clock
         self._cond = threading.Condition()
         self._busy = False
+        self._holder = ""                     # what holds the turn now (HELD_*), "" when free
         self._urgent_waiting = 0
         self._closed = False
         self._proc: Any = None
@@ -524,8 +538,14 @@ class LocalVoiceClient:
     def _start(self) -> tuple[str, int]:
         """("" or an error code, load_ms). Called holding the turn. A process that says it could not load - or ends or
         hangs before it is ready START_TRIES times in a row - is not started again (``reason`` says why) until
-        ``forget_failure``: each try costs a full load of about 1.3 GB."""
-        error, load_ms = self._start_once()
+        ``forget_failure``: each try costs a full load of about 1.3 GB. While it starts, loading holds the turn."""
+        with self._cond:
+            held, self._holder = self._holder, HELD_LOADING
+        try:
+            error, load_ms = self._start_once()
+        finally:
+            with self._cond:
+                self._holder = held
         if error in (ERR_CLOSED, ERR_REFUSED, ""):
             return error, load_ms
         if error.startswith(ERR_LOAD):
@@ -608,31 +628,43 @@ class LocalVoiceClient:
 
     # ---- the turn (one request at a time; urgent ones first) ---------------------------------------------------------
 
-    def _acquire(self, urgent: bool, timeout: float | None = None) -> bool:
-        """The turn (True), or False when ``timeout`` seconds went by first."""
-        deadline = None if timeout is None else self._clock() + timeout
+    def _acquire(self, urgent: bool, timeout: float | None = None,
+                 load_timeout: float | None = None) -> tuple[bool, int, str]:
+        """(got the turn, ms waited, what held it: HELD_* or ""). Without ``timeout`` it waits as long as it takes.
+        With one, it gives up (False) once ``timeout`` seconds went by while another of his lines held the turn, or
+        ``load_timeout`` seconds (default ``timeout``) while the process loaded or a briefing request held it. The
+        holder named is loading when the process loaded at any time in the wait, else the last one seen."""
+        began = self._clock()
+        load_timeout = timeout if load_timeout is None else load_timeout
+        held_by = ""
         with self._cond:
             if urgent:
                 self._urgent_waiting += 1
             try:
                 while self._busy or (not urgent and self._urgent_waiting > 0):
-                    if deadline is None:
+                    holder = self._holder if self._busy else ""
+                    if holder and held_by != HELD_LOADING:
+                        held_by = holder
+                    if timeout is None:
                         self._cond.wait()
                         continue
-                    left = deadline - self._clock()
+                    most = load_timeout if holder in (HELD_LOADING, HELD_BRIEFING) else timeout
+                    left = began + most - self._clock()
                     if left <= 0:
-                        return False
-                    self._cond.wait(left)
+                        return False, int((self._clock() - began) * 1000), held_by
+                    self._cond.wait(min(left, 0.25))  # the holder may change while it waits (a load starts or ends)
             finally:
                 if urgent:
                     self._urgent_waiting -= 1
                     self._cond.notify_all()       # a waiting briefing request looks again
             self._busy = True
-            return True
+            self._holder = HELD_LINE if urgent else HELD_BRIEFING
+            return True, (int((self._clock() - began) * 1000) if held_by else 0), held_by
 
     def _release(self) -> None:
         with self._cond:
             self._busy = False
+            self._holder = ""
             self._cond.notify_all()
 
     # ---- what the app asks ----------------------------------------------------------------------------------------
@@ -645,6 +677,8 @@ class LocalVoiceClient:
 
         def work() -> None:
             self._acquire(False)
+            with self._cond:
+                self._holder = HELD_LOADING       # a warm-up is the load itself
             try:
                 if not self._closed and not self.running():
                     self._start()                 # a failure is logged there, and remembered when it is the load
@@ -654,9 +688,11 @@ class LocalVoiceClient:
         threading.Thread(target=work, name="local-voice-warm", daemon=True).start()
 
     def synthesize(self, text: str, out: Path, *, voice: str | None = None, speed: float = 1.0, gain: float = 1.0,
-                   urgent: bool = False) -> LocalResult:
+                   urgent: bool = False, most_wait_s: float | None = None) -> LocalResult:
         """``text`` as a WAV at ``out`` (inside the audio folder). Raises LocalVoiceError. Blocking: never on the GUI
-        thread."""
+        thread. ``most_wait_s`` (his lines): the wait for the turn never goes past it (its utterance's own limit). His
+        line that waited for a load that did not end in a running voice goes to the Windows voice (ERR_BUSY or the
+        load's code): it never starts a second load in its own turn."""
         if self._closed:
             raise LocalVoiceError(ERR_CLOSED)
         if len(text) > MAX_TEXT_CHARS:
@@ -664,12 +700,28 @@ class LocalVoiceClient:
         reason = self.reason()
         if reason:
             raise LocalVoiceError(reason)
-        if not self._acquire(urgent, URGENT_WAIT_S if urgent else None):
-            raise LocalVoiceError(ERR_BUSY)       # still loading, or a long request: the Windows voice says this one
+        if urgent:
+            cap = float("inf") if most_wait_s is None else max(0.0, float(most_wait_s))
+            got, waited_ms, held_by = self._acquire(True, min(URGENT_WAIT_S, cap), min(URGENT_LOAD_WAIT_S, cap))
+        else:
+            got, waited_ms, held_by = self._acquire(False)
+        if not got:                               # still loading, or a long request: the Windows voice says this one
+            raise LocalVoiceError(ERR_BUSY, waited_ms=waited_ms, held_by=held_by)
         try:
-            return self._synthesize(text, Path(out), voice or self.voice, float(speed), float(gain))
+            if self._broken:                      # the load it waited for failed: the Windows voice at once, no retry
+                raise LocalVoiceError(self._broken, waited_ms=waited_ms, held_by=held_by)
+            if urgent and held_by == HELD_LOADING and not self.running():
+                raise LocalVoiceError(ERR_BUSY, waited_ms=waited_ms, held_by=held_by)   # that load did not take
+            result = self._synthesize(text, Path(out), voice or self.voice, float(speed), float(gain))
+        except LocalVoiceError as exc:
+            if held_by and not exc.held_by:
+                exc.waited_ms, exc.held_by = waited_ms, held_by
+            raise
         finally:
             self._release()
+        if held_by:
+            result = LocalResult(result.duration_ms, result.words, result.ms, result.load_ms, waited_ms, held_by)
+        return result
 
     def _synthesize(self, text: str, out: Path, voice: str, speed: float, gain: float) -> LocalResult:
         load_ms = 0

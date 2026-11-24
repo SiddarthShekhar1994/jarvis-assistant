@@ -97,7 +97,7 @@ from ..desktop.refs import APP, FILE, PLACE, SITE, RefIndex, parse_ref
 from ..gcal import zone_offset
 from . import firewall as agent_firewall
 from . import web
-from .tools import ERROR_CODES, ToolResult, _page_flags, error, untrusted
+from .tools import ERROR_CODES, ToolResult, _page_flags, error, sealed_now, untrusted
 
 logger = logging.getLogger(__name__)
 
@@ -1528,6 +1528,9 @@ class OwnerAccess:
         ref, site = args.get("ref"), args.get("site")
         if bool(ref) == bool(site):
             return error(OPEN_ONE_TEXT, "bad_input")
+        sealed = sealed_now(ctx) if site else None     # a site goes out: never while a tab holds what Jarvis typed
+        if sealed is not None:
+            return sealed
         step = self._open_step(str(ref).strip(), bool(args.get("show_in_folder"))) if ref else (
             {"skill": dv.OPEN_URL, "url": str(site)})
         if step is None:

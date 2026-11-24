@@ -24,25 +24,29 @@ SAY = "Right. I'll compare them and write a table."
 TASK_PLAN = {"say": SAY, "question": "", "lines": [], "agent_task": {"goal": MODEL_GOAL, "why": "several steps"}}
 DESKTOP_TASK = {"say": "Words about LING essay.", "steps": [], "agent_task": {"goal": MODEL_GOAL, "why": "several steps"}}
 PLAIN = {"say": "It's at two.", "question": "", "lines": []}
-# As on the branch without the agent (undo-from-bin-fix, 233febd): sha256 of each file, byte for byte. Off, these reach
-# Claude Code exactly as they would there.
-OFF_FILES = {cli.PROMPT_FILE: "414ae0a32c0a75e0bf0d3e7de8f0511b7d7862531755cf83bc6e0b19c678aae3",
+# sha256 of each file, byte for byte: as on the branch without the agent (undo-from-bin-fix, 233febd), but for the new
+# look's part 6 (2026-11-15), which gave the planner's prompt its FRAMES section and its schema the optional "topic" and
+# "frames" (tests/test_ask_frames.py holds their words and fields), and part 6's fixes (2026-11-16), which tell the
+# model a table's cells are text, a figure too ("3,400"): in the FRAMES section and in the rows' description, so a
+# numeric cell no longer costs a schema retry. Off, not a word of the agent reaches them.
+OFF_FILES = {cli.PROMPT_FILE: "f8c1dbf39e7f9264cc5c136c1734acbac78d146fed5ed7adefba370f0fd90a2d",   # mail extras: Unsubscribe
              cli.DESKTOP_PROMPT_FILE: "1f599172c03bf2f631b984cbaa58947a4a3873d8fdfedbde022074ca9f541521",
-             cli.SCHEMA_FILE: "70a7c8842f3d3c339d824bebc3dcedf30f84946c69e1e6a0cb6a1a7f259f20b4",
+             cli.SCHEMA_FILE: "6a4ceb66202d0e53ef9f3d437623f691dea9b8a5ea515084ecc9959c5309f811",
              cli.DESKTOP_SCHEMA_FILE: "a7f840a4251b93d04fb0b5f2c6e9131c52e43c6528421b3e098c71caa8890b84"}
-# schema_text() and mode_schema_text("desktop") off: (length, sha256), as on that branch.
-OFF_SCHEMAS = {(False, False): (927, "f9935a6fa5705643e92e1265ac0ee5cfc2584ebcbbc60c64f126d9436187c467"),
-               (False, True): (1614, "af94ec50b76b53ad1273886a76e0bed84e87d1b3d103cb20e63f23376769f3ae"),
-               (True, False): (1423, "dcad9d43c86bf0ae741bc3a0c6a2c1e0115239cc334789689fbf5a1c92b5cbb6"),
-               (True, True): (2110, "f4ad0fa87f26eaf0290ef85fe047f505967fcbf045bca064a30b6074917d045b")}
+# schema_text() and mode_schema_text("desktop") off: (length, sha256) - part 6's "topic" and "frames" in the first (and
+# its fixes' rows description).
+OFF_SCHEMAS = {(False, False): (3228, "40a08eb32e109bd935d10e565df416c6316e3bb670fe4368602b7cd4f455115a"),
+               (False, True): (3915, "d2fc66810ea1d382c7d236cb97aab0d33bd34d6741787535ee8fde5639d9ab27"),
+               (True, False): (3724, "6304a0faffb5a40faa5af0198f690790fe71da2d2d473c7f0acac41e24b6dc68"),
+               (True, True): (4411, "42f238354a989eaadc8b06d3a3eebb01e5832cae4778b91187f45953cdf37642")}
 OFF_DESKTOP_SCHEMA = (2276, "6d485a1f2ab170678b9283be41e7fe69edc75d6bb6e168c70029fc4d63d1070c")
-# On: only here do they change.
-ON_SCHEMAS = {(False, False): (1394, "246ba12b23f8140b5aa1ea7f09527bd4858265a061d359110c5d81efe3db1f18"),
-              (False, True): (2081, "89f3b91344ffe1180388fc89b5b8000e49dcd6efd5e231dd0428e4359044e1ae"),
-              (True, False): (1890, "5d5c6d76cd329cc5b3f91371537b019b7ccaf95cb6c688983b8ff3188e76623d"),
-              (True, True): (2577, "fbca4a1497a9e44e942961e65fa98eaedaccb254d2544f921017007c7c92ce5e")}
+# On: only here do they change (the planner's: part 6's and its fixes' too).
+ON_SCHEMAS = {(False, False): (3695, "719fee874b5e4b3c43d0298f0925c924679b8adcad221d3b2f6b4e1218ba29f0"),
+              (False, True): (4382, "820b7c037133510b83e4aab62f142e39d3f938c9b6b3d040c277f1af976cc6ff"),
+              (True, False): (4191, "97261e145609f975bc2e911a8f63e5cce0f4545bbaa4526cbd119a84ddee0c50"),
+              (True, True): (4878, "92be9be5c32948474c436be1019deb016e8be936ee7dc62618e835cbbe1e1813")}
 ON_DESKTOP_SCHEMA = (2743, "f9e3f8f1e7462fc1e8cd2efbed0944bbc138c22f340690c2fc6cab51c289c682")
-ON_PROMPTS = {cli.PROMPT_FILE_AGENT: "4297492fcbac2087256f990a81c9b146218db649241d7d72f4c99589f2b80765",
+ON_PROMPTS = {cli.PROMPT_FILE_AGENT: "779f6d074bb57bf4bc62afd0cece0a8884593fa407c77ae79addc6c3fe89557a",   # mail extras
               cli.DESKTOP_PROMPT_FILE_AGENT: "5fe066bb75bc6b46a9247ab2e7ba9ecd0ef11dd8f7f42e51a54d2c491109911f"}
 
 

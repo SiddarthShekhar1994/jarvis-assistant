@@ -19,7 +19,7 @@ from briefing_reader import meeting_audio, talk, wake, wake_listen
 from briefing_reader.wake_listen import Listener
 
 CHUNK = wake.CHUNK_BYTES
-REAL = "Microphone (FIFINE K678 Microphone)"
+REAL = "Microphone (USB Desk Microphone)"
 STEAM = "Microphone (Steam Streaming Microphone)"
 WEBCAM = "Microphone (LifeCam HD-5000)"
 

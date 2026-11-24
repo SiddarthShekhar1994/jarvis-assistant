@@ -24,7 +24,7 @@ from briefing_reader import hud_overlay, talk_ui, ui, wake, wake_listen, wake_ui
 from briefing_reader.wake_ui import HandoffStream, WakeController, WakeStore
 
 APP = QApplication.instance() or QApplication([])
-MIC = "Microphone (FIFINE K678 Microphone)"
+MIC = "Microphone (USB Desk Microphone)"
 STEAM = "Microphone (Steam Streaming Microphone)"
 
 
@@ -506,7 +506,7 @@ class ControllerTests(unittest.TestCase):
                 self.assertIn(words, text)
                 self.assertEqual(look, wake_ui.LOOK_PROBLEM)
                 if state == "virtual_mic":
-                    self.assertIn("Settings > Meetings > Microphone", text)
+                    self.assertIn("Settings > Talk > Microphone", text)       # (part 5B: Settings > Talk has it)
                     self.assertIn(STEAM, text)
 
     def test_a_newly_picked_microphone_reaches_the_listener(self) -> None:
@@ -575,7 +575,7 @@ class ControllerTests(unittest.TestCase):
             self.client.on_line({"state": "virtual_mic", "mic": STEAM, "default": True})
             self.heard()
             controller.shutdown()
-        self.assertFalse(any("FIFINE" in line or "Steam" in line for line in logs.output))
+        self.assertFalse(any("USB Desk" in line or "Steam" in line for line in logs.output))
 
 
 class AppHookTests(unittest.TestCase):
@@ -586,7 +586,7 @@ class AppHookTests(unittest.TestCase):
         def stub(**kwargs):
             values = dict(talk=SimpleNamespace(state=talk_ui.IDLE), voice=SimpleNamespace(speaking=False),
                           player=SimpleNamespace(state=ui.IDLE), meetings=SimpleNamespace(is_recording=lambda: False),
-                          _focus_quiet=lambda: False)
+                          _focus_quiet=lambda: False, _call_quiet=lambda: False)
             values.update(kwargs)
             return SimpleNamespace(**values)
 
@@ -596,6 +596,7 @@ class AppHookTests(unittest.TestCase):
             wake_ui.HOLD_SPEAKING: dict(voice=SimpleNamespace(speaking=True)),
             wake_ui.HOLD_MEETING: dict(meetings=SimpleNamespace(is_recording=lambda: True)),
             wake_ui.HOLD_FOCUS: dict(_focus_quiet=lambda: True),
+            wake_ui.HOLD_CALL: dict(_call_quiet=lambda: True),          # quiet during calls (smaller items 7)
         }
         for hold, values in cases.items():
             with self.subTest(hold):

@@ -1,4 +1,4 @@
-"""The Settings screen in the hologram look, read only (HOLOGRAM_SPEC 2-7, 15, 16.8; round 2, part 2b).
+"""The Settings screen in the hologram look (HOLOGRAM_SPEC 2-7, 15, 16.8; round 2, part 2b; Smaller items, parts 4-5).
 
 Public API
 ==========
@@ -8,21 +8,32 @@ Public API
     hours, LIVE and privacy; a click, or Up / Down on the list, opens a group: ``select_group(key)``,
     ``current_group()``). Right, the focal panel: the open group's name, its settings as they are now in
     plain words (``set_config(config)``: the config Jarvis loaded, never a file read here; ``rows()``), a
-    line on what it covers, how to change them (``text_label``: the config.toml tables, then a restart;
-    nothing on this screen changes a setting), ``config_path`` with Open config.toml (``config_button``,
+    line on what it covers, how to change them (``text_label``: Change for the rows that have it, else the
+    config.toml tables; either way a restart), ``config_path`` with Open config.toml (``config_button``,
     ``openConfig``) and ``data_path`` with Open the data folder (``data_button``, ``openDataFolder``;
     ``set_paths(config_path, data_dir)``). Accounts show only their names and whether they are connected
     (``set_connected({alias: True | False})``, from the app's own sign-in check; "Not checked yet" before it).
 
-``SettingsStage.add_group(key, title, note=, how=, rows=, extra=)``
+``SettingsStage.set_store(store)``, ``EDIT_ROWS``, ``edit_keys(config, group, label)``
+    Changing a comfort setting here (Smaller items, part 4): with the app's ``overrides.SettingsStore`` (settings.json
+    in the data folder), a row of ``EDIT_ROWS`` (or of a feature group's ``edits``) has Change (``change_buttons``):
+    it opens ``editor`` (settings_edit.RowEditor) under the row - Save writes the value to settings.json, Cancel
+    writes nothing, and the keyboard goes back to the row's Change. A row changed here says so under its value
+    (``row_note(label)``: "Changed here", or "Changed here to <value> - used after a restart") and has Back to
+    config.toml (``back_buttons``), which takes the value out of settings.json. The row's value is the one in use now;
+    a change is used after a restart (no Restart button). config.toml is never written. Without a store every row is
+    read only.
+
+``SettingsStage.add_group(key, title, note=, how=, rows=, extra=, edits=)``
     A group a feature adds while it is on (Meetings, with [meetings] on): its rows come from ``rows()``, its
     how-to line is ``how`` and ``extra`` (a widget of the feature's own, e.g. the device choice and Download)
-    shows under its rows. The six built-in groups stay read only.
+    shows under its rows; ``edits`` ({row label: keys}) gives rows a Change (``INSTANT_EDITS``, ``TALK_EDITS``).
 
 ``SettingsStage.attach_extra(key, widget)``
     A built-in group's own part (Voice: the local voice's Download and add-ons,
-    local_voice_ui.VoiceSettingsPanel), shown only while that group is open, at the foot of the panel - under Open
-    the data folder - so the group shown first keeps Open config.toml in the window.
+    local_voice_ui.VoiceSettingsPanel), shown only while that group is open, under its rows. The rows and these parts
+    scroll inside the panel (``scroll``) on a short window; the how-to lines, Open config.toml and Open the data folder
+    sit at the panel's foot, outside the scrolling, so they stay in the window on every group (900 x 600 too).
 
 ``settings_rows(config, group, connected)``
     The (label, value) pairs a group shows (used by the panel and the tests).
@@ -37,22 +48,27 @@ Public API
     The HUD key that can work: [desktop] hud_key, or "" while the keyboard shortcut ([hotkey] enabled) is off (no
     key can be registered then). The Dock's "<key> switches" line and Settings > Desktop show only this one.
 
-Read only by design: nothing here writes config.toml or .env, and no secret, token, client id, page id, file
-path of a sign-in or e-mail address is ever shown (Accounts: the alias and connected yes / no only).
+Nothing here writes config.toml or .env (only settings.json, through the store, for ``overrides.EDITABLE``'s keys),
+and no secret, token, client id, page id, file path of a sign-in or e-mail address is ever shown (Accounts: the alias
+and connected yes / no only).
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import logging
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from PySide6.QtCore import QRectF, QSize, Qt, Signal
+import shiboken6
+from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFontMetricsF, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractButton, QGridLayout, QHBoxLayout, QLabel, QScrollArea, QSizePolicy,
                                QVBoxLayout, QWidget)
 
-from . import holo, hud
+from . import holo, hud, overrides, settings_edit
 from .memory_view import COLUMN_MAX, PANEL_PAD, PanelFrame, Rule, SectionHead, body_label
+
+logger = logging.getLogger(__name__)
 
 SETTINGS_TITLE = "SETTINGS"
 GROUPS: tuple[tuple[str, str], ...] = (("voice", "Voice"), ("times", "Briefing times"), ("ask", "Ask"),
@@ -71,13 +87,39 @@ GROUP_NOTES: dict[str, str] = {
     "quiet": "Quiet hours keep offers silent.",
     "live": "What LIVE shows stays in memory and is never saved.",
 }
-HOW_TEXT = ("To change these, edit {tables} in config.toml, then restart Jarvis. Nothing on this screen changes "
-            "a setting.")
+HOW_TEXT = "To change these, edit {tables} in config.toml, then restart Jarvis."
+HOW_EDIT_TEXT = ("Change sets a row on this PC (settings.json in the data folder, which wins over config.toml); it is "
+                 "used after you restart Jarvis. For the rest, edit {tables} in config.toml, then restart Jarvis.")
+CHANGE_TEXT = "Change"
+BACK_TEXT = "Back to config.toml"
+CHANGED_HERE = "Changed here"
+CHANGED_RESTART = "Changed here to {words} - used after a restart"
+BACK_RESTART = "Back to config.toml ({words}) after a restart"
+SAVE_FAILED = "That could not be saved on this PC; nothing changed."
+# The rows Change can set (Decision 6's comfort settings, overrides.EDITABLE): {group: {row label: keys}}.
+EDIT_ROWS: dict[str, dict[str, tuple[str, ...]]] = {
+    "voice": {"Speed": ("voice.rate",), "Volume": ("voice.volume",), "Speaks on his own": ("assistant.speak",),
+              "Speaks his answers": ("assistant.speak_replies",),
+              "Says what happened after an approval": ("assistant.speak_results",),
+              "Greets you when opened": ("assistant.greet", "assistant.greeting_context"),
+              "Voice kept loaded": ("voice.keep_warm_minutes",),
+              "Quiet during calls": ("voice.quiet_in_calls",)},
+    "times": {"When a briefing arrives": ("assistant.scheduled_prompt",), "Clock on screen": ("display.clock",),
+              "Screen motion": ("ui.motion",)},
+    "quiet": {"Quiet hours": ("productivity.quiet_from", "productivity.quiet_until"),
+              "Brief before a meeting": ("productivity.prep_lead_minutes",)},
+    "live": {"Opens": ("live.auto_open",)},
+}
+INSTANT_EDITS: dict[str, tuple[str, ...]] = {"Temperature": ("instant.temperature",)}
+TALK_EDITS: dict[str, tuple[str, ...]] = {"Quiet that ends a talk": ("talk.quiet_ms",),
+                                          "Model kept loaded": ("talk.keep_warm_minutes",),
+                                          "Live captions": ("talk.live_captions",)}
 DATA_TEXT = "What Jarvis keeps on this PC (memory, decisions, voice cache, logs) is in the data folder."
 OPEN_CONFIG_TEXT = "Open config.toml"
 OPEN_DATA_TEXT = "Open the data folder"
 NOT_CHECKED = "Not checked yet"
 LIST_WIDTH = 220
+REVEAL_HOLD_MS = 1000            # reveal(): its row is kept in view while the group settles
 _LIVE_OPENS = {"tab": "On the Live screen", "window": "In its own window", "off": "Only when you open it"}
 _MOTION_WORDS = {holo.MOTION_LIVELY: "Lively - screens sweep and assemble, the orb assembles at start-up",
                  holo.MOTION_CALM: "Calm - slower, gentle fades only",
@@ -174,15 +216,23 @@ def settings_rows(config: Any, group: str, connected: Mapping[str, bool] | None 
             named = f"{voice_label(str(getattr(voice, 'local_voice', '') or 'bm_george'))}, made on this PC"
         else:
             named = f"{str(getattr(voice, 'voice', '') or 'Default')}, online (Microsoft)"
-        return [("Voice", named),
+        rows = [("Voice", named),
                 ("Speed", _percent(getattr(voice, "rate", ""), "faster", "slower")),
                 ("Volume", _percent(getattr(voice, "volume", ""), "louder", "quieter")),
                 ("When that voice can't run" if local else "When that voice is out of reach", windows),
                 ("Speaks on his own", "Yes" if getattr(assistant, "speak", True) else "No - text only"),
                 ("Speaks his answers", _yes(getattr(assistant, "speak_replies", True))),
                 ("Says what happened after an approval", _yes(getattr(assistant, "speak_results", True))),
-                ("Greets you when opened", _yes(getattr(assistant, "greet", True))),
-                ("Calls you", f'"{address}"' if address else "Nothing")]
+                ("Greets you when opened", settings_edit.row_words(settings_edit.GREET_KEYS, {
+                    "assistant.greet": getattr(assistant, "greet", True),
+                    "assistant.greeting_context": getattr(assistant, "greeting_context", True)}))]
+        if local:
+            minutes = int(getattr(voice, "keep_warm_minutes", 0) or 0)
+            rows.append(("Voice kept loaded", settings_edit.value_words("voice.keep_warm_minutes", minutes)))
+        rows.append(("Quiet during calls", settings_edit.value_words("voice.quiet_in_calls",
+                                                                     bool(getattr(voice, "quiet_in_calls", True)))))
+        rows.append(("Calls you", f'"{address}"' if address else "Nothing"))
+        return rows
     if group == "times":
         schedule = getattr(config, "schedule", None)
         polling = getattr(config, "polling", None)
@@ -221,9 +271,13 @@ def settings_rows(config: Any, group: str, connected: Mapping[str, bool] | None 
     if group == "quiet":
         if not prod_on:
             return [("Quiet hours", "Not used - offers are off on this PC")]
-        return [("Quiet hours", f"{_clock(getattr(prod, 'quiet_from', ''), hour24)} to "
+        rows = [("Quiet hours", f"{_clock(getattr(prod, 'quiet_from', ''), hour24)} to "
                                 f"{_clock(getattr(prod, 'quiet_until', ''), hour24)}"),
                 ("Then", "Offers show as text only; nothing is said out loud")]
+        if getattr(prod, "prep_offers", False):
+            rows.append(("Brief before a meeting", "Offered " + settings_edit.value_words(
+                "productivity.prep_lead_minutes", int(getattr(prod, "prep_lead_minutes", 15) or 15))))
+        return rows
     if group == "live":
         live = getattr(config, "live", None)
         live_on = bool(getattr(live, "enabled", True))
@@ -243,6 +297,16 @@ def settings_rows(config: Any, group: str, connected: Mapping[str, bool] | None 
                      else "Off"))
         return rows
     return []
+
+
+def edit_keys(config: Any, group: str, label: str) -> tuple[str, ...]:
+    """The settings Change sets on ``group``'s row ``label`` (``EDIT_ROWS``), or () - read only. Quiet hours and the
+    meeting brief only while the productivity bundle runs - it is on and so is Ask (else they do nothing)."""
+    keys = EDIT_ROWS.get(group, {}).get(label, ())
+    if group == "quiet" and not (getattr(getattr(config, "productivity", None), "enabled", False)
+                                 and getattr(getattr(config, "ask", None), "enabled", False)):
+        return ()
+    return tuple(key for key in keys if key in overrides.EDITABLE)
 
 
 def _and(names: list[str]) -> str:
@@ -300,6 +364,37 @@ def _tables(group: str) -> str:
     return ", ".join(names[:-1]) + " and " + names[-1]
 
 
+class _FitScroll(QScrollArea):
+    """The open group's rows: as tall as they are (the panel then fits its group), shrinking to scroll when the
+    window is short, so the panel's foot (Open config.toml) stays in view."""
+
+    MIN_ROWS_HEIGHT = 96
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._width = -1
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        base = super().sizeHint()
+        inner = self.widget()
+        if inner is None:
+            return base
+        width = max(self.viewport().width(), 240)
+        height = inner.heightForWidth(width) if inner.hasHeightForWidth() else -1
+        if height < 0:
+            height = inner.sizeHint().height()
+        return QSize(base.width(), height + 2 * self.frameWidth())
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
+        return QSize(super().minimumSizeHint().width(), self.MIN_ROWS_HEIGHT)
+
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        if self.viewport().width() != self._width:       # wrapped rows change height with the width
+            self._width = self.viewport().width()
+            self.updateGeometry()
+
+
 class GroupButton(QAbstractButton):
     """One group in the list: 40 px, radius 8; the open one on ``tile-focus`` with a 3 px ``holo`` bar."""
 
@@ -348,7 +443,12 @@ class GroupButton(QAbstractButton):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect()).adjusted(3.5, 2.5, -3.5, -2.5)
             on = self.isChecked()
-            if on:
+            if holo.canvas_look():                # part 4: a lit square row, the canvas frame's edge
+                if on:
+                    holo.paint_canvas_frame(painter, rect, holo.CANVAS_SELECTED)
+                elif self.underMouse():
+                    painter.fillRect(rect, holo.alpha(holo.HOLO, 0.06))
+            elif on:
                 painter.setPen(QPen(holo.LINE, 1.0))
                 painter.setBrush(QColor(holo.TILE_FOCUS))
                 painter.drawRoundedRect(rect, holo.RADIUS_BUTTON, holo.RADIUS_BUTTON)
@@ -383,6 +483,16 @@ class SettingsStage(QWidget):
         self._group = GROUPS[0][0]
         self._groups: list[tuple[str, str]] = list(GROUPS)
         self._added: dict[str, tuple[str, str, Callable[[], list[tuple[str, str]]], QWidget | None]] = {}
+        self._added_edits: dict[str, dict[str, tuple[str, ...]]] = {}
+        self._store: Any = None                       # overrides.SettingsStore (set_store); None: read only
+        self._editing = ""                            # the row whose editor is open
+        self.editor: settings_edit.RowEditor | None = None
+        self.change_buttons: dict[str, settings_edit.RowLink] = {}
+        self.back_buttons: dict[str, settings_edit.RowLink] = {}
+        self._notes: dict[str, str] = {}
+        self._snapshot: dict[str, Any] | None = None      # settings.json as read for the fill under way
+        self._revealing: tuple[QWidget, QWidget | None] | None = None   # reveal()'s row, kept in view a moment
+        self._reveal_seq = 0
         self._extras: dict[str, QWidget] = {}         # a built-in group's own part (attach_extra)
         self.head = SectionHead("settings", SETTINGS_TITLE)
         self.group_buttons: dict[str, GroupButton] = {}
@@ -402,15 +512,16 @@ class SettingsStage(QWidget):
         self._side = QWidget()
         self._side.setLayout(side)
         self._side.setFixedWidth(LIST_WIDTH)
-        # The open group (the focal panel), in a scroll area for short windows.
-        self.scroll = QScrollArea()
+        # The open group (the focal panel): its rows (and a feature's own part) scroll in the panel on a short window;
+        # the how-to lines with Open config.toml and Open the data folder stay at its foot, always in view (900 x 600).
+        self.scroll = _FitScroll()
         content = hud._transparent_scroll(self.scroll)
+        self.scroll.verticalScrollBar().rangeChanged.connect(self._on_scroll_range)
         self.panel = PanelFrame()
         self.panel.setMaximumWidth(COLUMN_MAX)
-        holder = QHBoxLayout(content)
-        holder.setContentsMargins(0, 0, 0, 0)
-        holder.addWidget(self.panel, 1000)
-        holder.addStretch(1)
+        rows_column = QVBoxLayout(content)
+        rows_column.setContentsMargins(0, 0, 0, 0)
+        rows_column.setSpacing(0)
         self.title_label = body_label("", "screen_title", holo.INK_1, wrap=False)
         self.note_label = body_label("", "body_sm", holo.INK_3, name="settingsNote")
         self._grid_box = QWidget()
@@ -420,6 +531,7 @@ class SettingsStage(QWidget):
         self._grid.setVerticalSpacing(8)
         self._grid.setColumnStretch(0, 2)
         self._grid.setColumnStretch(1, 3)
+        self._grid.setColumnStretch(2, 0)
         self.text_label = body_label("", "body_sm", holo.INK_2, selectable=True, name="settingsHow")
         self.config_path = body_label("", "body_sm", holo.INK_4, selectable=True, name="settingsConfigPath")
         self.config_button = holo.HoloButton(OPEN_CONFIG_TEXT, holo.GHOST)
@@ -435,43 +547,58 @@ class SettingsStage(QWidget):
         column.addSpacing(6)
         column.addWidget(self.note_label)
         column.addSpacing(14)
-        column.addWidget(self._grid_box)
+        rows_column.addWidget(self._grid_box)
         self._extra_box = QVBoxLayout()
         self._extra_box.setContentsMargins(0, 12, 0, 0)
-        column.addLayout(self._extra_box)
+        rows_column.addLayout(self._extra_box)
+        self._tail_box = QVBoxLayout()            # a built-in group's own part (attach_extra): under its rows
+        self._tail_box.setContentsMargins(0, 18, 0, 0)
+        rows_column.addLayout(self._tail_box)
+        rows_column.addStretch(1)
+        column.addWidget(self.scroll, 1)
         column.addSpacing(16)
         column.addWidget(Rule())
         column.addSpacing(12)
         column.addWidget(self.text_label)
         column.addSpacing(4)
         column.addWidget(self.config_path)
-        column.addSpacing(6)
-        column.addWidget(self.config_button, 0, Qt.AlignmentFlag.AlignLeft)
-        column.addSpacing(14)
+        column.addSpacing(10)
         column.addWidget(self.data_label)
         column.addSpacing(4)
         column.addWidget(self.data_path)
-        column.addSpacing(6)
-        column.addWidget(self.data_button, 0, Qt.AlignmentFlag.AlignLeft)
-        self._tail_box = QVBoxLayout()            # a built-in group's own part (attach_extra): under everything, so
-        self._tail_box.setContentsMargins(0, 18, 0, 0)   # the first group opened keeps Open config.toml in view
-        column.addLayout(self._tail_box)
-        column.addStretch(1)
+        column.addSpacing(8)
+        buttons = QHBoxLayout()                   # side by side: the foot stays short on a small window
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setSpacing(8)
+        buttons.addWidget(self.config_button)
+        buttons.addWidget(self.data_button)
+        buttons.addStretch(1)
+        column.addLayout(buttons)
+        right = QVBoxLayout()
+        right.setContentsMargins(0, 0, 0, 0)
+        holder = QHBoxLayout()
+        holder.setContentsMargins(0, 0, 0, 0)
+        holder.addWidget(self.panel, 1000)
+        holder.addStretch(1)
+        right.addLayout(holder)                   # as tall as the group needs, no taller than the window
+        right.addStretch(1)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(holo.GUTTER_SIDE + 8, holo.GUTTER_TOP, holo.GUTTER_SIDE, 16)
         layout.setSpacing(24)
         layout.addWidget(self._side)
-        layout.addWidget(self.scroll, 1)
+        layout.addLayout(right, 1)
         self._value_labels: list[QLabel] = []
         self.select_group(self._group)
 
     # ---- API --------------------------------------------------------------------------------
 
     def add_group(self, key: str, title: str, *, note: str, how: str, rows: Callable[[], list[tuple[str, str]]],
-                  extra: QWidget | None = None) -> None:
+                  extra: QWidget | None = None, edits: Mapping[str, Sequence[str]] | None = None) -> None:
         """A feature's own group (see the module docstring), listed after the built-in ones."""
         if key in self.group_buttons:
             return
+        self._added_edits[key] = {label: tuple(name for name in keys if name in overrides.EDITABLE)
+                                  for label, keys in dict(edits or {}).items()}
         button = GroupButton(key, title)
         button.clicked.connect(lambda _checked=False, which=key: self.select_group(which))
         button.installEventFilter(self)
@@ -497,6 +624,40 @@ class SettingsStage(QWidget):
         """Show the open group again (a feature's rows changed)."""
         self._fill()
 
+    def set_store(self, store: Any) -> None:
+        """The app's settings.json (overrides.SettingsStore): rows of EDIT_ROWS get Change. None: read only."""
+        self._store = store
+        self._editing = ""
+        self._fill()
+
+    def row_keys(self, label: str) -> tuple[str, ...]:
+        """The settings Change sets on the open group's row ``label`` (() without a store, or for a read-only row)."""
+        if self._store is None:
+            return ()
+        if self._group in self._added:
+            return self._added_edits.get(self._group, {}).get(label, ())
+        return edit_keys(self._config, self._group, label)
+
+    def row_note(self, label: str) -> str:
+        """What the open group's row ``label`` says under its value ("" for none)."""
+        return self._notes.get(label, "")
+
+    def open_editor(self, label: str) -> None:
+        """Change on the row ``label``: its editor under it, the keyboard on its first control."""
+        if not self.row_keys(label):
+            return
+        self._editing = label
+        self._fill()
+        editor = self.editor
+        if editor is not None:
+            self.reveal(editor, editor.first_control())
+
+    def close_editor(self) -> None:
+        """Cancel: nothing is written; the keyboard goes back to the row's Change."""
+        label, self._editing = self._editing, ""
+        self._fill()
+        self._focus_change(label)
+
     def set_paths(self, config_path: str, data_dir: str) -> None:
         self.config_path.setText(config_path)
         self.data_path.setText(data_dir)
@@ -516,12 +677,50 @@ class SettingsStage(QWidget):
         if key not in self.group_buttons:
             return
         changed = key != self._group
+        if changed:
+            self._editing = ""
+            self._revealing = None
         self._group = key
         self.group_buttons[key].setChecked(True)
         self._fill()
         self.scroll.verticalScrollBar().setValue(0)
         if changed:
             self.groupChanged.emit(key)
+
+    def reveal(self, widget: QWidget, focus: QWidget | None = None) -> None:
+        """Canvas part 5B: ``widget`` (a row of the open group) scrolled into view, and the keyboard to ``focus`` (else
+        to it) - once the group is laid out, so it holds on a short window too (1120 x 700)."""
+        def show() -> None:
+            if not shiboken6.isValid(widget) or not widget.isVisibleTo(self):
+                return
+            self.scroll.widget().layout().activate()
+            self._scroll_to(widget, focus)
+            target = focus if focus is not None and shiboken6.isValid(focus) else widget
+            target.setFocus(Qt.FocusReason.TabFocusReason)    # (its focus ring shows: the keyboard is there)
+
+        # The panel's height follows its rows, so the scroll range may come after this: scrolled again whenever it
+        # changes during the next moment (REVEAL_HOLD_MS), then left to the owner.
+        self._revealing = (widget, focus)
+        self._reveal_seq += 1
+        seq = self._reveal_seq
+        QTimer.singleShot(REVEAL_HOLD_MS, self, lambda: self._end_reveal(seq))
+        show()
+        QTimer.singleShot(0, self, show)          # (and again after the layout the group's fill asked for)
+
+    def _scroll_to(self, widget: QWidget, focus: QWidget | None) -> None:
+        self.scroll.ensureWidgetVisible(widget, 0, 48)
+        if focus is not None and focus is not widget and shiboken6.isValid(focus) and focus.isVisibleTo(self):
+            self.scroll.ensureWidgetVisible(focus, 0, 16)    # a tall row on a short window: its button too
+
+    def _on_scroll_range(self, _low: int, _high: int) -> None:
+        pending = self._revealing
+        if pending is not None and all(item is None or shiboken6.isValid(item) for item in pending):
+            if pending[0].isVisibleTo(self):
+                self._scroll_to(*pending)
+
+    def _end_reveal(self, seq: int) -> None:
+        if seq == self._reveal_seq:
+            self._revealing = None
 
     def current_group(self) -> str:
         return self._group
@@ -537,7 +736,8 @@ class SettingsStage(QWidget):
         labels = [self.title_label, self.note_label, self.text_label, self.config_path, self.data_label,
                   self.data_path, *self._value_labels]
         labels += [widget for widget in self._grid_box.findChildren(QLabel)]
-        return [label.text() for label in labels]
+        texts = [label.text() for label in labels]
+        return texts + [button.text() for button in self._grid_box.findChildren(QAbstractButton)]
 
     # ---- inside -------------------------------------------------------------------------------
 
@@ -546,12 +746,26 @@ class SettingsStage(QWidget):
         added = self._added.get(key)
         self.title_label.setText(dict(self._groups)[key])
         self.note_label.setText(added[0] if added else GROUP_NOTES.get(key, ""))
-        self.text_label.setText(added[1] if added else HOW_TEXT.format(tables=_tables(key)))
+        rows = self.rows()
+        editable = any(self.row_keys(label) for label, _value in rows)
+        how = HOW_EDIT_TEXT if editable else HOW_TEXT
+        self.text_label.setText(added[1] if added else how.format(tables=_tables(key)))
         for other, (_note, _how, _rows, extra) in self._added.items():
             if extra is not None:
                 extra.setVisible(other == key)
         for other, extra in self._extras.items():
             extra.setVisible(other == key)
+        # An open editor outlives a refill (a feature's rows changed, the voice was picked): what the owner chose so
+        # far and where the keyboard was come back in the new one.
+        draft: dict[str, Any] = {}
+        focus_path: tuple[str, int] | None = None
+        old_editor = self.editor
+        if old_editor is not None and shiboken6.isValid(old_editor) and self._editing:
+            draft, focus_path = old_editor.draft(), old_editor.focus_path()
+            problem = old_editor.problem.text() if old_editor.problem.isVisibleTo(old_editor) else ""
+        else:
+            problem = ""
+        self._snapshot = self._stored()           # settings.json read once for this fill (afresh: LOW 3)
         while self._grid.count():
             item = self._grid.takeAt(0)
             widget = item.widget()
@@ -559,16 +773,135 @@ class SettingsStage(QWidget):
                 widget.hide()
                 widget.deleteLater()
         self._value_labels = []
-        rows = self.rows()
-        for index, (label, value) in enumerate(rows):
+        self.editor = None
+        self.change_buttons, self.back_buttons, self._notes = {}, {}, {}
+        line = 0
+        for label, value in rows:
             name = body_label(label, "body_sm", holo.INK_3)
             name.setContentsMargins(0, 2, 0, 0)                  # on the value's first line
             shown = body_label(value, "body", holo.INK_1, selectable=True)
             shown.setAccessibleName(f"{label}: {value}")
-            self._grid.addWidget(name, index, 0, Qt.AlignmentFlag.AlignTop)
-            self._grid.addWidget(shown, index, 1, Qt.AlignmentFlag.AlignTop)
+            self._grid.addWidget(name, line, 0, Qt.AlignmentFlag.AlignTop)
             self._value_labels.append(shown)
+            keys = self.row_keys(label)
+            cell: QWidget = shown
+            if keys:
+                cell = self._edit_cell(label, keys, shown)
+                change = settings_edit.RowLink(CHANGE_TEXT, f"{CHANGE_TEXT} {label}")
+                change.clicked.connect(lambda _checked=False, which=label: self.open_editor(which))
+                self.change_buttons[label] = change
+                self._grid.addWidget(change, line, 2, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
+                if self._editing == label:
+                    change.hide()                   # (only once in the grid: never a window of its own)
+            self._grid.addWidget(cell, line, 1, Qt.AlignmentFlag.AlignTop)
+            line += 1
+            if keys and self._editing == label:
+                start = {**self._after_restart(keys), **{k: v for k, v in draft.items() if k in keys}}
+                editor = settings_edit.RowEditor(keys, start, self._hour24())
+                editor.saveRequested.connect(lambda values, which=label: self._save(which, values))
+                editor.cancelRequested.connect(self.close_editor)
+                if problem:
+                    editor.set_problem(problem)
+                self.editor = editor
+                self._grid.addWidget(editor, line, 0, 1, 3)
+                line += 1
+        self._snapshot = None
+        if self._editing and self.editor is None:
+            self._editing = ""                       # its row went (the group's rows changed)
         self._grid_box.setVisible(bool(rows))
+        self.scroll.widget().updateGeometry()
+        self.scroll.updateGeometry()
+        if self.editor is not None and focus_path is not None:
+            self.editor.focus_target(focus_path).setFocus(Qt.FocusReason.TabFocusReason)
+
+    def _hour24(self) -> bool:
+        return bool(getattr(getattr(self._config, "display", None), "hour24", False))
+
+    def _stored(self) -> dict[str, Any]:
+        """settings.json's values: read afresh (a file deleted or edited meanwhile shows as it is), once per fill."""
+        if self._snapshot is not None:
+            return dict(self._snapshot)
+        try:
+            return dict(self._store.values()) if self._store is not None else {}
+        except Exception as exc:  # noqa: BLE001 - a store that fails shows nothing changed
+            logger.warning("Settings: settings.json could not be read (%s)", type(exc).__name__)
+            return {}
+
+    def _after_restart(self, keys: Sequence[str]) -> dict[str, Any]:
+        """Each key's value from the next start: settings.json's, else config.toml's (for a key taken back), else the
+        one in use now."""
+        stored = self._stored()
+        overridden = getattr(self._config, "overridden", frozenset()) or frozenset()
+        toml = getattr(self._config, "toml_values", {}) or {}
+        values: dict[str, Any] = {}
+        for key in keys:
+            if key in stored:
+                values[key] = stored[key]
+            elif key in overridden and key in toml:
+                values[key] = toml[key]
+            else:
+                values[key] = overrides.current(self._config, key)
+        return values
+
+    def _edit_cell(self, label: str, keys: tuple[str, ...], shown: QLabel) -> QWidget:
+        """The value, and under it what a change here means (and Back to config.toml) when there is one."""
+        stored = self._stored()
+        here = [key for key in keys if key in stored]
+        after = self._after_restart(keys)
+        pending = any(after[key] != overrides.current(self._config, key) for key in keys)
+        words = settings_edit.row_words(keys, after, self._hour24())
+        if here:
+            note = CHANGED_RESTART.format(words=words) if pending else CHANGED_HERE
+        elif pending:
+            note = BACK_RESTART.format(words=words)
+        else:
+            return shown
+        self._notes[label] = note
+        box = QWidget()
+        column = QVBoxLayout(box)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(2)
+        column.addWidget(shown)
+        noted = body_label(note, "body_sm", holo.INK_3, name="settingsRowNote")
+        noted.setAccessibleName(f"{label}: {note}")
+        column.addWidget(noted)
+        if here:
+            back = settings_edit.RowLink(BACK_TEXT, f"{BACK_TEXT}: {label}")
+            back.clicked.connect(lambda _checked=False, which=label, names=keys: self._back(which, names))
+            self.back_buttons[label] = back
+            column.addWidget(back, 0, Qt.AlignmentFlag.AlignLeft)
+        return box
+
+    def _save(self, label: str, values: Mapping[str, Any]) -> None:
+        """Save: what differs from the value of the next start goes to settings.json; the row says so."""
+        keys = self.row_keys(label)
+        after = self._after_restart(keys)
+        changes = {key: value for key, value in values.items() if key in keys and value != after.get(key)}
+        try:
+            saved = self._store.update(changes) if changes else True
+        except ValueError:
+            saved = False
+        if not saved:
+            if self.editor is not None:
+                self.editor.set_problem(SAVE_FAILED)
+            return
+        self._editing = ""
+        self._fill()
+        self._focus_change(label)
+
+    def _back(self, label: str, keys: Sequence[str]) -> None:
+        """Back to config.toml: the row's keys leave settings.json (config.toml's values from the next start)."""
+        if self._store is None or not self._store.reset(keys):
+            logger.warning("Settings: a row could not be taken back to config.toml")
+            return
+        self._editing = ""
+        self._fill()
+        self._focus_change(label)
+
+    def _focus_change(self, label: str) -> None:
+        button = self.change_buttons.get(label)
+        if button is not None:
+            self.reveal(button)
 
     def eventFilter(self, watched: Any, event: Any) -> bool:  # noqa: N802 - Qt override
         if isinstance(watched, GroupButton) and event.type() == event.Type.KeyPress:

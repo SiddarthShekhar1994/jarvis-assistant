@@ -182,6 +182,13 @@ class OfferTile(QWidget):
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
         return QSize(TILE_MIN, self.height_for(TILE_MIN))
 
+    def fit_width(self) -> int:
+        """The narrowest width at which Not now and the commit button both show whole, side by side (canvas part 5B:
+        the canvas never gives its tile less; at 1120 x 700 Not now was cut to "T NO")."""
+        margin = holo.HoloButton.MARGIN
+        return (self.not_now_button.sizeHint().width() + self.commit_button.sizeHint().width() + holo.BUTTON_GAP
+                + 2 * holo.TILE_PAD[1] - 4 * margin)
+
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
         self._place_buttons()

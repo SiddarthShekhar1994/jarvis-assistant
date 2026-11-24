@@ -29,6 +29,37 @@
       "maxItems": 3,
       "items": {"type": "string", "maxLength": 1000},
       "description": "Usually empty. At most 3 Todo:, Calendar: or Open: lines in the Jarvis grammar, each waiting for the owner's OK."
+    },
+    "topic": {
+      "type": "string",
+      "maxLength": 40,
+      "description": "A few words for the board's header over this answer. Optional."
+    },
+    "frames": {
+      "type": "array",
+      "maxItems": 3,
+      "description": "Usually empty: see FRAMES. Plain words and numbers only.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "title"],
+        "properties": {
+          "kind": {"type": "string", "enum": ["table", "chart", "timeline", "maths"]},
+          "title": {"type": "string", "maxLength": 60},
+          "unit": {"type": "string", "maxLength": 12},
+          "columns": {"type": "array", "maxItems": 6, "items": {"type": "string", "maxLength": 24}, "description": "table: header words"},
+          "rows": {"type": "array", "maxItems": 12, "items": {"type": "array", "maxItems": 6, "items": {"type": "string", "maxLength": 40}}, "description": "table: cells, one per column; each is short words or a figure written as text, like \"3,400\""},
+          "bars": {"type": "array", "maxItems": 8, "items": {"type": "object", "additionalProperties": false, "required": ["label", "value"], "properties": {"label": {"type": "string", "maxLength": 24}, "value": {"type": "number"}}}, "description": "chart: one measure across a few things"},
+          "changed": {"type": "integer", "description": "index of the table row or chart bar that changed"},
+          "was": {"type": "number", "description": "chart: that bar's old value"},
+          "change": {"type": "string", "maxLength": 80, "description": "what changed, in words"},
+          "source": {"type": "string", "maxLength": 60, "description": "table: where the numbers are from"},
+          "nodes": {"type": "array", "maxItems": 8, "items": {"type": "object", "additionalProperties": false, "required": ["when", "words"], "properties": {"when": {"type": "string", "maxLength": 24}, "words": {"type": "string", "maxLength": 40}, "state": {"type": "string", "enum": ["done", "next", "due", ""]}}}, "description": "timeline: dates in order"},
+          "today": {"type": "integer", "description": "timeline: index of the first node after today"},
+          "steps": {"type": "array", "maxItems": 8, "items": {"type": "object", "additionalProperties": false, "required": ["expr"], "properties": {"name": {"type": "string", "maxLength": 24}, "expr": {}}}, "description": "maths: the working; expr is a number, a name (letters) or [op, args...] with op + - * / = frac pow root () or"},
+          "answer": {"type": "object", "additionalProperties": false, "required": ["expr"], "properties": {"name": {"type": "string", "maxLength": 24}, "expr": {}}, "description": "maths: the result"}
+        }
+      }
     }
   }
 }

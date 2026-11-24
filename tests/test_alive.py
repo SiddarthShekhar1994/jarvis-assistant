@@ -69,6 +69,8 @@ class LabelledDockTests(unittest.TestCase):
         self.assertEqual(self.dock.width(), holo.DOCK_WIDTH_LABELLED)
         self.dock.set_hud_key("Ctrl+Alt+H")
         self.dock.set_slot_visible(dock.DESKTOP, True)               # [desktop] on: the Switch prototype's Dock
+        self.dock.set_slot_visible(dock.AGENTS, True)                # [standing] on
+        self.dock.set_slot_visible(dock.DOCS, True)                  # [docs] on
         settle()
         for key in dock.SLOTS:
             button = self.dock.button(key)
@@ -76,8 +78,8 @@ class LabelledDockTests(unittest.TestCase):
             rect = self.dock.slot_rect(key)
             self.assertEqual((rect.x(), rect.width(), rect.height()), (12, 176, 44))
         self.assertEqual([dock.LABELS[k] for k in dock.SLOTS],
-                         ["Home", "Briefing", "Approvals", "Live", "Memory", "Follow-ups", "Meetings", "Desktop",
-                          "Settings"])
+                         ["Home", "Briefing", "Approvals", "Live", "Memory", "Follow-ups", "Meetings", "Agents",
+                          "Documents", "Desktop", "Settings"])
         self.assertEqual(self.dock.slot_rect(dock.SETTINGS).bottom(), 640 - 16)          # Settings at the bottom
         # Desktop: the HUD tag at the row's end, "Ctrl+Alt+H switches" right under it.
         tag = self.dock.button(dock.DESKTOP).tag_rect()
@@ -483,6 +485,8 @@ class StartupTests(AppWindowCase):
         self.assertFalse(reading.scan_sweep.isVisible())
 
     def test_the_orb_assembles_from_the_centre_out(self) -> None:
+        # The ring's start-up: the core, its glow, the band sweeping in clockwise from 12 o'clock, the tracks,
+        # the sight drawing round, then the brackets.
         hero = orb.OrbWidget(orb.HERO)
         self.addCleanup(hero.deleteLater)
         hero.set_phase(2.35)
@@ -490,15 +494,18 @@ class StartupTests(AppWindowCase):
         hero.play_intro(start=2.35 - 0.3)
         frame = hero.sample()
         self.assertGreater(frame.core_op, 0.0)                             # the core first
-        self.assertGreater(frame.opacities[5], 0.0)                        # R6 (innermost) is on its way
-        self.assertEqual(frame.opacities[0], 0.0)                          # R1 (outermost) has not started
-        self.assertEqual(frame.frame, 0.0)
-        self.assertLess(frame.scales[5], rest.scales[5])
+        self.assertLess(frame.core_scale, rest.core_scale)
+        self.assertTrue(0.0 < frame.band_in < 1.0)                         # the band is sweeping in ...
+        self.assertGreater(frame.sweep[0], frame.sweep[-1])                # ... clockwise from 12 o'clock
+        self.assertEqual(frame.sight_draw, 0.0)                            # the sight has not started
+        self.assertEqual(frame.brackets, 0.0)                              # nor the brackets
+        self.assertNotEqual(frame.roll, rest.roll)                         # the band rolls in
         self.assertTrue(hero.intro_running())
         self.assertEqual(hero.frame_interval(), orb.FRAME_ACTIVE_MS)
         hero.play_intro(start=2.35 - 2.0)
         done = hero.sample()
-        self.assertEqual((done.opacities, done.scales), (rest.opacities, rest.scales))
+        self.assertEqual((done.alphas, done.roll, done.brackets, done.sight_draw, done.band_in, done.sweep),
+                         (rest.alphas, rest.roll, rest.brackets, 1.0, 1.0, None))
         holo.set_reduced_motion(True)
         hero.play_intro()
         self.assertFalse(hero.intro_running())

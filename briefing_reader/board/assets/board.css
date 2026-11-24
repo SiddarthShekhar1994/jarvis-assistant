@@ -1,0 +1,1542 @@
+/* The board's page (the new look, part 3): the frame chrome and its states (DESIGN-SPEC 3.2 and 3.4) and the motion of
+   section 5. Every colour, radius, easing, type role and glyph comes from tokens.css, written from holo at each request.
+   Each timing is multiplied by --k: lively 1, calm 1.6, off 0 (each moment's end state at once). No remote address, no
+   inline style anywhere: the page's own policy allows styles from jarvis-board: only. */
+
+:root {
+  --k: 1;
+  --pad: 15px;                                              /* the view's inner pad: a lit frame's brackets fit in it */
+  --wire: color-mix(in srgb, var(--tile) 30%, transparent); /* a frame's ground while it draws in */
+  --amber-wash: color-mix(in srgb, var(--amber) 10%, transparent);
+  --alert-wash: color-mix(in srgb, var(--alert) 8%, transparent);
+}
+:root.motion-calm { --k: 1.6; }
+:root.motion-off { --k: 0; }
+@media (prefers-reduced-motion: reduce) { :root { --k: 0; } }
+
+*, *::before, *::after { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; }
+body {
+  color: var(--ink-2);
+  font: 400 13px/20px var(--font-body);
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+::selection { background: var(--line-strong); color: var(--ink-1); }
+h2, p { margin: 0; }
+button {
+  margin: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit;
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+#board {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 12px var(--pad) 40px;                            /* the last frame can scroll clear of the end */
+  overflow-x: hidden; overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+#board::-webkit-scrollbar { display: none; }
+
+/* ---- glyphs (holo's stroke icons, 24 units, 1.6 stroke) ---- */
+.glyph {
+  flex: none; width: 16px; height: 16px;
+  fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round;
+}
+.glyph.filled { fill: currentColor; stroke: none; }
+
+/* ---- the frame (3.2) ---- */
+.frame {
+  container: frame / inline-size;
+  position: relative; flex: none;
+  padding: 11px 14px 14px;
+  background: var(--tile);
+  border: 1px solid var(--frame-edge);
+  border-radius: var(--radius-frame);
+  outline: none;
+  transition: background-color calc(160ms * var(--k)) var(--ease-out), border-color calc(160ms * var(--k)) var(--ease-out);
+}
+.frame:not(.lit):not(.waits):not(.failed):not(.arriving):hover { border-color: var(--line); }
+.frame:focus-visible, .frame:has(button:focus-visible) { outline: 2px solid var(--focus); outline-offset: 3px; }
+
+/* The title keeps at least 11em; a meta that does not fit beside it goes under it, never squeezing the title. */
+.f-head {
+  display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 8px; row-gap: 2px;
+  min-height: 24px; margin-bottom: 8px;
+}
+.f-glyph { align-self: flex-start; margin-top: 2px; color: var(--holo-lo); }
+.f-title { flex: 1 1 11em; min-width: 0; color: var(--ink-1); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.f-meta {
+  flex: 0 1 auto; max-width: 100%; margin-left: auto; color: var(--ink-4);
+  text-align: right; overflow-wrap: anywhere; unicode-bidi: plaintext;
+}
+.f-pinned { width: 13px; height: 13px; align-self: center; color: var(--ink-3); display: none; }
+.frame.pinned .f-pinned { display: block; }
+.f-tag {
+  display: none; align-self: center; flex: none;
+  padding: 2px 6px; border: 1px solid var(--line-strong); border-radius: var(--radius-badge);
+  color: var(--holo-hi);
+}
+.frame.changed .f-tag { display: inline-block; animation: show calc(160ms * var(--k)) var(--ease-out) both; }
+
+/* Pin, Open big and Close take the meta's place while the frame has the focus. */
+.f-ctl { display: none; align-self: flex-start; gap: 2px; margin: -2px -6px -2px auto; }
+.frame:focus-within .f-ctl { display: flex; }
+.frame:focus-within .f-meta, .frame:focus-within .f-pinned { display: none; }
+.f-icon {
+  display: grid; place-items: center; width: 26px; height: 26px;
+  border: 1px solid transparent; border-radius: var(--radius-button-sm); color: var(--ink-2);
+  transition: color calc(120ms * var(--k)), background-color calc(120ms * var(--k)), border-color calc(120ms * var(--k));
+}
+.f-icon:first-child { border-color: var(--line); }
+.f-icon .glyph { width: 14px; height: 14px; }
+.f-icon:hover { color: var(--ink-1); background: var(--raised); border-color: var(--line-strong); }
+.f-icon:active { transform: translateY(1px); }
+.f-icon.on { color: var(--holo-hi); }
+
+.f-body { color: var(--ink-2); overflow-wrap: anywhere; }
+.f-text { white-space: pre-line; unicode-bidi: plaintext; }
+.f-pic {
+  display: block; width: 100%; height: auto; margin-top: 10px;
+  background: var(--picture); border: 1px solid var(--line-faint); border-radius: 4px;
+  filter: brightness(.8);
+  user-select: none; -webkit-user-drag: none;
+  transition: filter calc(160ms * var(--k)) var(--ease-out);
+}
+.frame:focus-within .f-pic, .frame.lit .f-pic { filter: none; }      /* 80 % until it is focused or lit */
+.frame.failed .f-pic, .frame.empty .f-pic { display: none; }
+
+/* ---- the kinds (3.3): rows with LINE_FAINT dividers; "+N MORE" as the last row's meta ---- */
+.x-more { margin: 0; padding-top: 6px; text-align: right; color: var(--ink-3); }
+
+/* text: the words, then rows of a lead, words and a meta (a source's title and host: words, never a link) */
+.tx-rows { display: grid; grid-template-columns: minmax(0, 1fr) fit-content(45%); column-gap: 10px; }
+.tx-rows.leads { grid-template-columns: fit-content(30%) minmax(0, 1fr) fit-content(40%); }
+.f-text + .tx-rows { margin-top: 8px; }
+.tx-row {
+  grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; align-items: baseline;
+  padding: 5px 0; border-top: 1px solid var(--line-faint);
+}
+.tx-rows > .tx-row:first-child { border-top: 0; padding-top: 0; }
+.f-text + .tx-rows > .tx-row:first-child { border-top: 1px solid var(--line-faint); padding-top: 5px; }
+.tx-rows .x-more { grid-column: 1 / -1; }
+.tx-lead { color: var(--ink-3); overflow-wrap: anywhere; }
+.tx-text { min-width: 0; color: var(--ink-1); font: 400 13px/18px var(--font-body); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.tx-meta {                                    /* as a calendar row's place: words, not a badge */
+  color: var(--ink-4); font: 400 12px/16px var(--font-body); text-align: right; overflow-wrap: anywhere;
+}
+
+@container frame (max-width: 330px) {         /* narrow: a row's meta goes under its words, as a calendar row's */
+  .tx-rows { grid-template-columns: minmax(0, 1fr); }
+  .tx-rows.leads { grid-template-columns: fit-content(35%) minmax(0, 1fr); }
+  .tx-meta { grid-column: -2; text-align: left; }
+}
+
+/* calendar: the day bar (first to last hour), the now-line horizon, rows with time running down */
+.cal-bar {
+  position: relative; height: 12px; margin: 0 0 3px;
+  border: 1px solid var(--line-faint); border-radius: 3px;
+  background: color-mix(in srgb, var(--holo) 5%, transparent);
+}
+.cal-span {
+  position: absolute; top: 2px; bottom: 2px; left: var(--at); width: var(--w); border-radius: 2px;
+  background: color-mix(in srgb, var(--holo-lo) 50%, transparent);
+}
+.cal-span.next { background: var(--holo); }
+.cal-span.free {
+  top: 1px; bottom: 1px; background: none;
+  border: 1px dashed color-mix(in srgb, var(--ink-3) 55%, transparent);
+}
+.cal-tick { position: absolute; top: -4px; bottom: -4px; left: var(--at); width: 2px; margin-left: -1px; background: var(--holo-hi); }
+.cal-hours {
+  position: relative; height: 14px; margin-bottom: 8px; color: var(--ink-4);
+  font: 500 11px/14px var(--font-mono); letter-spacing: .04em; font-variant-numeric: tabular-nums;
+}
+.cal-hours span { position: absolute; left: var(--at); transform: translateX(-50%); white-space: nowrap; }
+.cal-hours span.start { transform: none; }
+.cal-hours span.end { transform: translateX(-100%); }
+.cal-rows {
+  display: grid; column-gap: 10px;
+  grid-template-columns: fit-content(40%) minmax(0, 1fr) fit-content(35%);
+}
+.cal-now { grid-column: 1 / -1; display: flex; align-items: center; margin: 0 0 2px; }
+.cal-pill {
+  flex: none; padding: 0 5px; border-radius: 3px; background: var(--holo-hi); color: var(--holo-ink);
+  font: 600 10px/16px var(--font-mono); letter-spacing: .06em; font-variant-numeric: tabular-nums;
+}
+.cal-rule { flex: 1; height: 1px; background: linear-gradient(90deg, var(--holo-hi), color-mix(in srgb, var(--holo-hi) 8%, transparent)); }
+.cal-row {
+  position: relative; grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; align-items: baseline;
+  padding: 5px 0; border-top: 1px solid var(--line-faint);
+}
+.cal-rows > .cal-row:first-child, .cal-now + .cal-row, .cal-row.free + .cal-row, .cal-row.free { border-top-color: transparent; }
+.cal-rows .x-more { grid-column: 1 / -1; }
+.cal-time { min-width: 96px; color: var(--ink-3); overflow-wrap: anywhere; }
+.cal-title { min-width: 0; color: var(--ink-1); font: 400 13px/18px var(--font-body); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.cal-meta { color: var(--ink-4); font: 400 12px/16px var(--font-body); text-align: right; overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.cal-row.next .cal-time, .cal-row.now .cal-time, .cal-row.today .cal-time { color: var(--holo-hi); }
+.cal-row.next .cal-meta, .cal-row.now .cal-meta, .cal-row.new .cal-meta, .cal-row.struck .cal-meta {
+  font: 500 10px/12px var(--font-mono); letter-spacing: .12em; text-transform: uppercase;
+}
+.cal-row.next .cal-meta, .cal-row.now .cal-meta, .cal-row.new .cal-meta { color: var(--holo-hi); }
+.cal-row.past .cal-time, .cal-row.past .cal-title { color: var(--ink-4); }
+.cal-row.new .cal-title { color: var(--holo-hi); }
+.cal-row.struck .cal-title {
+  color: var(--ink-3); text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--ink-4) 70%, transparent);
+}
+.cal-row.free::before {                       /* a dashed box round the free gap, outside the columns */
+  content: ''; position: absolute; inset: 1px -7px; pointer-events: none;
+  border: 1px dashed color-mix(in srgb, var(--ink-3) 35%, transparent); border-radius: 4px;
+  background: color-mix(in srgb, var(--holo) 2%, transparent);
+}
+.cal-row.free { margin: 4px 0; }
+.cal-row.free .cal-time, .cal-row.free .cal-title { color: var(--ink-3); }
+@container frame (max-width: 330px) {
+  .cal-rows { grid-template-columns: fit-content(45%) minmax(0, 1fr); column-gap: 8px; }
+  .cal-time { min-width: 86px; }
+  .cal-meta { grid-column: 2; text-align: left; }
+}
+
+/* mail thread: who (600), when, the plain text clamped to 3 lines (by style only: the words are whole) */
+.mt-from { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 10px; margin-bottom: 3px; }
+.mt-sender { min-width: 0; color: var(--ink-1); font: 600 13px/18px var(--font-body); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.mt-time { color: var(--ink-4); }
+.mt-text {
+  margin: 0; unicode-bidi: plaintext;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden;
+}
+.frame.waits .mt-sender { color: var(--amber-tx); }
+.frame.waits .mt-time { color: var(--amber-tx2); }
+
+/* mail list: an unread dot, the sender, the time at the right, the subject below (it wraps, never cut) */
+.ml-row {
+  display: grid; grid-template-columns: 6px minmax(0, 1fr) fit-content(45%); column-gap: 10px; row-gap: 1px;
+  align-items: baseline; padding: 6px 0; border-top: 1px solid var(--line-faint);
+}
+.f-body > .ml-row:first-child { border-top: 0; padding-top: 0; }
+.ml-dot { width: 6px; height: 6px; border-radius: 50%; align-self: center; }
+.ml-row.unread .ml-dot { background: var(--holo-hi); }
+.ml-sender { min-width: 0; color: var(--ink-1); font: 600 13px/18px var(--font-body); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.ml-side { color: var(--ink-4); text-align: right; overflow-wrap: anywhere; }
+.ml-meta { color: var(--ink-3); }
+.ml-dotsep { padding: 0 .5em; }
+.ml-subject {
+  grid-column: 2 / 4; min-width: 0; color: var(--ink-2); font: 400 12.5px/18px var(--font-body);
+  overflow-wrap: anywhere; unicode-bidi: plaintext;
+}
+
+/* to-dos: a box each; waits an amber diamond and WAITS; done a mint check, struck words and DONE */
+.td-row {
+  display: grid; grid-template-columns: 16px minmax(0, 1fr) fit-content(40%); column-gap: 10px;
+  align-items: center; padding: 6px 0; border-top: 1px solid var(--line-faint);
+}
+.f-body > .td-row:first-child { border-top: 0; padding-top: 0; }
+.td-box {
+  display: grid; place-items: center; width: 14px; height: 14px;
+  border: 1.5px solid var(--ink-3); border-radius: 3px;
+}
+.td-row.waits .td-box { border: 0; }
+.td-row.waits .td-mark { width: 13px; height: 13px; color: var(--amber); }
+.td-row.done .td-box { border-color: var(--ok); background: var(--ok); color: var(--ok-ink); }
+.td-row.done .td-mark { width: 11px; height: 11px; stroke-width: 2.6; }
+.td-text { min-width: 0; color: var(--ink-1); font: 400 13px/18px var(--font-body); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.td-meta { color: var(--ink-3); text-align: right; overflow-wrap: anywhere; }
+.td-row.waits .td-text { color: var(--amber-tx); }
+.td-row.waits .td-meta { color: var(--amber); }
+.td-row.done .td-text {
+  color: var(--ink-4); text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--ink-4) 70%, transparent);
+}
+.td-row.done .td-meta { color: var(--ok); }
+
+/* capture (build plan item 3): a row per item found - WAITS an amber diamond (it waits on Approvals), ON YOUR CALENDAR
+   a mint check, DECIDED and PAST quiet, CAN'T ADD its reason on the second line; the note last */
+.cp-row {
+  display: grid; grid-template-columns: 16px minmax(0, 1fr) fit-content(36%); column-gap: 10px;
+  align-items: start; padding: 7px 0; border-top: 1px solid var(--line-faint);
+}
+.f-body > .cp-row:first-child { border-top: 0; padding-top: 0; }
+.cp-box { display: grid; place-items: center; width: 14px; height: 18px; }
+.cp-mark { width: 13px; height: 13px; }
+.cp-row.waits .cp-mark { color: var(--amber); }
+.cp-row.on_calendar .cp-mark { width: 12px; height: 12px; color: var(--ok); stroke-width: 2.4; }
+.cp-main { display: grid; row-gap: 2px; min-width: 0; }
+.cp-text { color: var(--ink-1); font: 400 13px/18px var(--font-body); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.cp-when { color: var(--ink-3); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.cp-detail { color: var(--ink-3); font: 400 12px/17px var(--font-body); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.cp-state { color: var(--ink-3); text-align: right; padding-top: 2px; }
+.cp-row.waits .cp-text { color: var(--amber-tx); }
+.cp-row.waits .cp-state { color: var(--amber); }
+.cp-row.on_calendar .cp-state { color: var(--ok); }
+.cp-row.past .cp-text, .cp-row.decided .cp-text { color: var(--ink-3); }
+.cp-row.past .cp-when, .cp-row.decided .cp-when, .cp-row.past .cp-state, .cp-row.decided .cp-state { color: var(--ink-4); }
+.cp-row.cant_add .cp-detail { color: var(--ink-2); }
+.cp-note { margin: 8px 0 0; color: var(--ink-3); font: 400 12px/17px var(--font-body); }
+
+/* picture: the app's JPEG (80 % until focused or lit), its host as a caption and PICTURE ONLY: it never navigates */
+.pic-slot:empty { display: none; }
+.pic-slot .f-pic { margin-top: 0; }
+.pic-cap { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 10px; row-gap: 2px; margin: 8px 0 0; }
+.pic-slot:empty + .pic-cap { margin-top: 0; }
+.pic-host { flex: 1 1 auto; min-width: 0; color: var(--ink-2); font: 400 12.5px/16px var(--font-body); overflow-wrap: anywhere; }
+.pic-only { flex: none; color: var(--ink-4); }
+
+/* ---- part 6, Ask's typed frames (3.3) ---- */
+/* the delta line (a changed figure's words, a chart's or a table's): the delta glyph, its figure first and bright */
+.delta {
+  margin: 10px 0 0; padding-left: 17px; text-indent: -17px;
+  color: var(--ink-3); font: 400 12px/17px var(--font-body); overflow-wrap: anywhere; unicode-bidi: plaintext;
+}
+.delta .delta-mark { width: 11px; height: 11px; margin-right: 6px; vertical-align: -1px; color: var(--holo-hi); }
+.delta-lead { color: var(--holo-hi); font: 600 12px/16px var(--font-body); }
+
+/* table: Mono caps headers, tabular cells (a zero in INK_4), the changed row banded cyan at 0.08 with its change in
+   HOLO_HI 600, a source footer; full width, never paired */
+.tb { width: 100%; border-collapse: collapse; }
+.tb th {
+  padding: 0 0 6px 10px; color: var(--ink-4); text-align: right; vertical-align: bottom;
+  font: 500 11px/14px var(--font-mono); letter-spacing: .2em; text-transform: uppercase; overflow-wrap: anywhere;
+}
+.tb td {
+  padding: 4px 0 4px 10px; border-top: 1px solid var(--line-faint); color: var(--ink-2); text-align: right;
+  font: 400 12.5px/18px var(--font-body); font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+}
+.tb th:first-child, .tb td:first-child { padding-left: 0; text-align: left; }
+.tb td.z { color: var(--ink-4); }
+.tb tr.hot td { background: color-mix(in srgb, var(--holo) 8%, transparent); color: var(--ink-1); }
+.tb tr.hot td:first-child { padding-left: 6px; }
+.tb tr.hot td:last-child { padding-right: 6px; font-weight: 600; color: var(--holo-hi); }
+.tb-src { margin: 10px 0 0; color: var(--ink-4); letter-spacing: .14em; overflow-wrap: anywhere; }
+
+/* chart: bars from zero with their values in Mono; the changed bar HOLO with a dashed ghost tick at its old value */
+.ch-bars {
+  display: grid; grid-template-columns: fit-content(40%) minmax(48px, 1fr) auto; gap: 8px 10px; align-items: center;
+}
+.ch-l { min-width: 0; color: var(--ink-2); font: 400 12px/16px var(--font-body); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.ch-tr { position: relative; height: 11px; border-radius: 2px; background: color-mix(in srgb, var(--holo) 6%, transparent); }
+.ch-fl {
+  position: absolute; top: 0; bottom: 0; left: var(--x0); width: var(--xw); border-radius: 2px;
+  background: color-mix(in srgb, var(--holo-lo) 60%, transparent); transform-origin: 0 50%;
+}
+.ch-fl.neg { transform-origin: 100% 50%; }
+.ch-fl.hot { background: var(--holo); }
+.ch-was { position: absolute; top: -4px; bottom: -4px; left: var(--x0); width: 0; border-left: 1.5px dashed var(--ink-2); }
+.ch-v {
+  color: var(--ink-1); text-align: right; white-space: nowrap;
+  font: 500 11px/14px var(--font-mono); font-variant-numeric: tabular-nums;
+}
+/* the bars grow (320 ms cubic-out from 300 ms of the draw-in; calm x1.6; off at once) */
+.frame.arriving .ch-fl { animation: bar-grow calc(320ms * var(--k)) cubic-bezier(.33, 1, .68, 1) calc(var(--at) + 300ms * var(--k)) both; }
+@keyframes bar-grow { from { transform: scaleX(0); } }
+
+/* timeline: nodes with their words - DONE a mint check, NEXT a cyan ring, DUE - and a TODAY marker. One node per row
+   (TODAY a row of its own: also under 300 px, see the block below), in a row of their own from a 300 px frame */
+.tline { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); row-gap: 8px; margin: 2px 0 0; }
+.tl-rail { position: absolute; left: 8.25px; top: 10px; bottom: 10px; width: 1.5px; background: var(--line); }
+.tl-past { display: none; }
+.tl-n { position: relative; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; column-gap: 10px; align-items: center; }
+.tl-o {
+  grid-row: 1 / 3; display: grid; place-items: center; width: 18px; height: 18px;
+  border: 1.5px solid var(--ink-3); border-radius: 50%; background: var(--tile);
+}
+.frame.lit .tl-o, .big-card .tl-o { background: var(--tile-focus); }
+.tl-when { grid-column: 2; grid-row: 1; color: var(--ink-3); overflow-wrap: anywhere; }
+.tl-words {
+  grid-column: 2; grid-row: 2; min-width: 0; color: var(--ink-1);
+  font: 400 12.5px/16px var(--font-body); overflow-wrap: anywhere; unicode-bidi: plaintext;
+}
+.tl-state { grid-column: 3; grid-row: 1 / 3; color: var(--ink-4); }
+.tl-n.done .tl-o { border-color: var(--ok); background: var(--ok); color: var(--ok-ink); }
+.tl-n.done .tl-mark { width: 11px; height: 11px; stroke-width: 2.6; }
+.tl-n.next .tl-o { border-color: var(--holo); box-shadow: 0 0 0 3px color-mix(in srgb, var(--holo) 15%, transparent); }
+.tl-n.done .tl-words { color: var(--ink-3); }
+.tl-n.done .tl-state { color: var(--ok); }
+.tl-n.next .tl-state { color: var(--holo-hi); }
+.tl-today { display: flex; align-items: center; gap: 10px; height: 12px; color: var(--holo-hi); }
+.tl-today::before { content: ''; flex: none; width: 18px; height: 1.5px; background: var(--holo-hi); }
+@container frame (min-width: 300px) {
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) { grid-template-columns: repeat(var(--n), minmax(0, 1fr)); row-gap: 0; margin: 18px 0 2px; }
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-rail { left: 9px; right: 9px; top: 8.25px; bottom: auto; width: auto; height: 1.5px; }
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-past {
+    display: block; position: absolute; left: 9px; top: 8.25px; height: 1.5px;
+    width: max(0px, calc(var(--today) - 9px)); background: var(--holo-lo);
+  }
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-n { display: flex; flex-direction: column; align-items: center; min-width: 0; text-align: center; }
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-n.first { align-items: flex-start; text-align: left; }
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-n.last:not(.first) { align-items: flex-end; text-align: right; }
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-when { margin-top: 7px; }
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-words, :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-state { margin-top: 2px; }
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-today {
+    position: absolute; left: var(--today); top: -14px; height: 32px; width: 0; gap: 0; z-index: 2;
+    border-left: 1.5px solid var(--holo-hi);
+  }
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-today::before { display: none; }
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-today span { position: absolute; left: 5px; top: -1px; white-space: nowrap; }
+  :is(.tline.few, .big-card .tline, .frame.wide .tline) .tl-today.right span { left: auto; right: 6px; }
+}
+
+/* maths: numbered steps (a name, then its line), the answer boxed in HOLO_HI; every element made by the page from
+   the checked tree (a fraction stacked, a power raised, a root under its bar). A fraction or a root keeps to its line:
+   it shrinks and a fraction's parts wrap over its bar; one that still cannot fit, or a root whose radicand would wrap,
+   reads inline there (a/b, √(…): board.js fitMaths). */
+.mx { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 7px 10px; align-items: baseline; }
+.mx-i { color: var(--ink-4); font: 500 10px/12px var(--font-mono); font-variant-numeric: tabular-nums; }
+.mx-k { color: var(--ink-3); white-space: nowrap; }
+.mx-e {
+  min-width: 0; color: var(--ink-1); font: 400 15px/22px var(--font-body); letter-spacing: .02em;
+  overflow-wrap: anywhere; unicode-bidi: isolate;
+}
+.mx-sup { display: inline-block; margin-left: 1px; font-size: 10px; line-height: 1; vertical-align: 6px; }
+.mx-frac {
+  display: inline-flex; flex-direction: column; align-items: center; max-width: 100%; margin: 0 2px;
+  vertical-align: middle; font-size: 12.5px; line-height: 15px;
+}
+.mx-top { min-width: 0; max-width: 100%; padding: 0 2px 1px; text-align: center; overflow-wrap: anywhere; }
+.mx-bot {
+  align-self: stretch; min-width: 0; padding: 1px 2px 0; border-top: 1px solid currentColor; text-align: center;
+  overflow-wrap: anywhere;
+}
+.mx-root { display: inline-flex; align-items: flex-end; max-width: 100%; }
+.mx-idx { align-self: flex-start; margin-right: -4px; font-size: 9px; line-height: 10px; }
+.mx-rad { min-width: 0; padding: 1px 1px 0 2px; border-top: 1px solid currentColor; overflow-wrap: anywhere; }
+.mx-ans {
+  display: inline-block; margin-left: -8px; padding: 2px 8px; border: 1px solid var(--line-strong); border-radius: 4px;
+  background: color-mix(in srgb, var(--holo) 9%, transparent); color: var(--holo-hi); font-weight: 600;
+}
+
+/* the keys while it has the focus: one line, or two even halves under 380 px of content */
+.f-keys {
+  display: none; flex-wrap: wrap; row-gap: 4px;
+  margin-top: 12px; padding-top: 9px; border-top: 1px solid var(--line-faint); color: var(--ink-3);
+}
+.frame:focus-within .f-keys { display: flex; }
+.f-keys span { white-space: nowrap; }
+.f-keys .mid { padding: 0 .7em; }
+@container frame (max-width: 379px) {
+  .f-keys .mid { display: none; }
+  .f-keys span:not(.mid) { flex-basis: 100%; }
+}
+
+/* buttons with words: Try again, Bring back */
+.f-act {
+  display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 12px;
+  border: 1px solid var(--line); border-radius: var(--radius-button-sm); background: var(--raised);
+  color: var(--ink-1); font: 600 13px/16px var(--font-display); letter-spacing: .02em; white-space: nowrap;
+  transition: border-color calc(120ms * var(--k)), background-color calc(120ms * var(--k));
+}
+.f-act .glyph { width: 14px; height: 14px; }
+.f-act:hover { border-color: var(--line-strong); background: var(--tile-focus); }
+.f-act:active { transform: translateY(1px); }
+
+/* ---- waits on the owner: amber, a rounder corner, a diamond and words ---- */
+.frame.waits { background: var(--tile-amber); border-color: var(--amber-line); border-radius: var(--radius-amber); }
+.frame.waits .f-glyph { color: var(--amber); }
+.frame.waits .f-title { color: var(--amber-tx); }
+.frame.waits .f-meta, .frame.waits .f-body { color: var(--amber-tx2); }
+.f-wait {
+  display: none; align-items: center; gap: 8px; max-width: 100%; min-height: 30px;
+  margin-top: 10px; padding: 4px 8px 4px 11px;
+  border: 1px solid var(--amber); border-radius: 15px; background: var(--amber-wash);
+  color: var(--amber-tx); font: 500 13px/16px var(--font-body); text-align: left;
+  transition: background-color calc(120ms * var(--k)), box-shadow calc(120ms * var(--k));
+}
+.frame.waits .f-wait { display: inline-flex; }
+.f-wait:hover { background: color-mix(in srgb, var(--amber) 16%, transparent); }
+.f-wait .f-dia { width: 12px; height: 12px; color: var(--amber); }
+.f-wait .f-chev { width: 12px; height: 12px; color: var(--amber-tx2); }
+.f-wait .f-words { min-width: 0; overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.f-wait .f-key {
+  flex: none; padding: 1px 4px; border: 1px solid var(--amber-line); border-radius: var(--radius-badge);
+  color: var(--amber-tx2);
+}
+.frame.waits:focus-within .f-wait { box-shadow: 0 0 0 1px var(--amber-hi); }
+
+/* ---- failed: coral, a warning glyph, the words, Try again (re-reads that frame's source only) ---- */
+.frame.failed { background: var(--tile-alert); border-color: var(--alert-line); }
+.frame.failed .f-glyph { color: var(--alert); }
+.f-fail { display: flex; align-items: flex-start; gap: 10px; }
+.f-fail .glyph { margin-top: 2px; color: var(--alert); }
+.f-fail .f-words { color: var(--alert-tx2); unicode-bidi: plaintext; }
+.f-act.alert { margin-top: 12px; border-color: var(--alert-line); background: var(--alert-wash); color: var(--alert-tx2); }
+.f-act.alert:hover { border-color: var(--alert); }
+
+/* ---- empty: a dashed ring, the words, when it was checked ---- */
+.f-empty { display: flex; align-items: center; gap: 12px; padding: 2px 0; }
+.f-ring { flex: none; width: 28px; height: 28px; border: 1px dashed var(--line-strong); border-radius: 50%; }
+.f-empty .f-words { color: var(--ink-1); unicode-bidi: plaintext; }
+.f-checked { display: block; color: var(--ink-3); }
+
+/* ---- closed: a dashed 36 px row with Bring back (for 8 s) ---- */
+.f-closed {
+  display: none; align-items: center; gap: 10px; min-height: 36px; padding: 4px 6px 4px 14px;
+  border: 1px dashed var(--line); border-radius: var(--radius-frame); color: var(--ink-3);
+}
+.f-closed .glyph { width: 13px; height: 13px; color: var(--ink-4); }
+.f-closed .f-what { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.f-closed b { font-weight: 400; color: var(--ink-2); unicode-bidi: isolate; }
+.f-closed .f-act { height: 26px; padding: 0 10px; font-size: 12px; }
+.frame.closed { padding: 0; background: transparent; border-color: transparent; }
+.frame.closed > :not(.f-closed) { display: none; }
+.frame.closed > .f-closed { display: flex; }
+.frame.sizing { overflow: hidden; }
+
+/* ---- lit: brackets 6 px outside the corners in the frame's own colour (never cyan on amber) ---- */
+.frame.lit { background: var(--tile-focus); border-color: var(--line-strong); box-shadow: 0 10px 26px -12px rgba(0, 0, 0, .85); }
+.frame.waits.lit { background: var(--tile-amber-lit); border-color: var(--amber); }
+.fx-bracket {
+  position: absolute; width: 14px; height: 14px; opacity: 0; pointer-events: none;
+  border: 0 solid var(--holo-hi);
+}
+.fx-bracket.tl { left: -7px; top: -7px; border-top-width: var(--bracket); border-left-width: var(--bracket); --dx: -1; --dy: -1; }
+.fx-bracket.tr { right: -7px; top: -7px; border-top-width: var(--bracket); border-right-width: var(--bracket); --dx: 1; --dy: -1; }
+.fx-bracket.bl { left: -7px; bottom: -7px; border-bottom-width: var(--bracket); border-left-width: var(--bracket); --dx: -1; --dy: 1; }
+.fx-bracket.br { right: -7px; bottom: -7px; border-bottom-width: var(--bracket); border-right-width: var(--bracket); --dx: 1; --dy: 1; }
+.frame.waits .fx-bracket { border-color: var(--amber-hi); }
+.frame.failed .fx-bracket { border-color: var(--alert-hi); }
+.frame.lit .fx-bracket { opacity: 1; animation: bracket calc(200ms * var(--k)) var(--ease-out) both; }
+@keyframes bracket {
+  from { opacity: 0; transform: translate(calc(var(--dx) * 10px), calc(var(--dy) * 10px)); }
+}
+body.wide .fx-bracket { display: none; }      /* open big: one thing in view, no brackets under it */
+
+/* ---- the cue line's last 15 px (8): from the view's left edge to the lit frame, a 2.5 px dot 6 px from it, in the
+   frame's own colour (CUE / CUE_AMBER); drawn in after the app's native part (lively), hidden while the board scrolls,
+   fading 400 ms after its sentence ---- */
+.cue-stub {
+  position: fixed; left: 0; top: var(--y, 0px); width: calc(var(--dot, 9px) + 3px); height: 1px; z-index: 3;
+  pointer-events: none; transition: opacity calc(400ms * var(--k)) linear;
+}
+.cue-stub.away, body.wide .cue-stub { visibility: hidden; }
+.cue-stub.leaving { opacity: 0; }
+.cs-line {
+  position: absolute; left: 0; top: -0.1px; width: var(--dot, 9px); height: 1.2px; background: var(--cue);
+  transform-origin: 0 50%;
+}
+.cs-dot {
+  position: absolute; left: calc(var(--dot, 9px) - 2.5px); top: -2px; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--holo-hi);
+}
+.cue-stub.amber .cs-line { background: var(--cue-amber); }
+.cue-stub.amber .cs-dot { background: var(--amber-hi); }
+.cue-stub.drawing .cs-line { animation: stub-draw calc(40ms * var(--k)) linear calc(200ms * var(--k)) both; }
+.cue-stub.drawing .cs-dot { animation: show calc(40ms * var(--k)) linear calc(240ms * var(--k)) both; }
+@keyframes stub-draw { from { transform: scaleX(0); } }
+
+/* ---- arriving: the outline traces clockwise, corner ticks snap on, skeleton bars, then the content ---- */
+.fx-outline, .fx-light {
+  position: absolute; left: -1px; top: -1px; width: calc(100% + 2px); height: calc(100% + 2px);
+  overflow: visible; pointer-events: none; display: none;
+}
+.fx-outline rect, .fx-light rect {
+  x: .6px; y: .6px; width: calc(100% - 1.2px); height: calc(100% - 1.2px); rx: var(--radius-frame);
+  fill: none;
+}
+.frame.waits .fx-outline rect, .frame.waits .fx-light rect { rx: var(--radius-amber); }
+.fx-outline rect { stroke: var(--holo-hi); stroke-width: 1.2; stroke-dasharray: 100 100; }
+.fx-tick { position: absolute; width: 8px; height: 8px; opacity: 0; pointer-events: none; border: 0 solid var(--holo-hi); display: none; }
+.fx-tick.tl { left: -1px; top: -1px; border-top-width: 1.5px; border-left-width: 1.5px; }
+.fx-tick.tr { right: -1px; top: -1px; border-top-width: 1.5px; border-right-width: 1.5px; }
+.fx-tick.bl { left: -1px; bottom: -1px; border-bottom-width: 1.5px; border-left-width: 1.5px; }
+.fx-tick.br { right: -1px; bottom: -1px; border-bottom-width: 1.5px; border-right-width: 1.5px; }
+.fx-skeleton { position: absolute; left: 14px; right: 14px; top: 11px; display: none; pointer-events: none; }
+.fx-skeleton i { display: block; height: 8px; margin: 10px 0; border: 1px solid var(--line); border-radius: 2px; }
+.fx-skeleton i:first-child { width: 44%; height: 10px; margin: 5px 0 0 24px; border-color: var(--line-strong); }
+.fx-skeleton i:nth-child(3) { width: 72%; }
+
+.frame.arriving {
+  --at: calc(var(--i, 0) * 80ms * var(--k));                /* this frame's place in the stagger */
+  animation:
+    ground calc(160ms * var(--k)) var(--ease-out) calc(var(--at) + 300ms * var(--k)) both,
+    edge calc(200ms * var(--k)) linear calc(var(--at) + 600ms * var(--k)) both;
+}
+@keyframes ground { from { background-color: var(--wire); } }
+@keyframes edge { from { border-color: transparent; } }
+.frame.arriving .fx-outline { display: block; animation: relax calc(200ms * var(--k)) linear calc(var(--at) + 600ms * var(--k)) forwards; }
+.frame.arriving .fx-outline rect { animation: trace calc(260ms * var(--k)) var(--ease-out) var(--at) both; }
+@keyframes trace { from { stroke-dashoffset: 100; } to { stroke-dashoffset: 0; } }
+@keyframes relax { to { opacity: 0; } }
+.frame.arriving .fx-tick { display: block; animation: tick calc(540ms * var(--k)) linear calc(var(--at) + 260ms * var(--k)) forwards; }
+@keyframes tick { 0%, 63% { opacity: 1; } 100% { opacity: 0; } }
+.frame.arriving .fx-skeleton { display: block; animation: hide calc(160ms * var(--k)) var(--ease-out) calc(var(--at) + 300ms * var(--k)) both; }
+@keyframes hide { from { opacity: 1; } to { opacity: 0; } }
+.frame.arriving > .f-head, .frame.arriving > .f-body, .frame.arriving > .f-wait, .frame.arriving > .f-pic {
+  animation: rise calc(160ms * var(--k)) var(--ease-out) calc(var(--at) + 300ms * var(--k)) both;
+}
+@keyframes rise { from { opacity: 0; transform: translateY(4px); } }
+@keyframes show { from { opacity: 0; } }
+:root.motion-calm .frame.arriving > .f-head, :root.motion-calm .frame.arriving > .f-body,
+:root.motion-calm .frame.arriving > .f-wait, :root.motion-calm .frame.arriving > .f-pic { animation-name: show; }
+.frame.arriving:not(.waits):not(.failed) .f-glyph { color: var(--holo-hi); }
+.frame.waits .fx-outline rect { stroke: var(--amber-hi); }   /* a frame that waits traces in its own colour */
+.frame.waits .fx-tick { border-color: var(--amber-hi); }
+/* while another frame is lit, an arriving one traces in LINE_FOCUS: one thing stays bright */
+#board.has-lit .frame.arriving .fx-outline rect { stroke: var(--line-focus); }
+#board.has-lit .frame.arriving .fx-tick { border-color: var(--line-focus); }
+#board.has-lit .frame.arriving .f-glyph { color: var(--holo-lo); }
+
+/* ---- the desk (parts 5a and 5b, DESIGN-SPEC 2.1 and 3.1): the bar on top, the frames area under it, groups ---- */
+/* The bar: "Board", the counts, then All | Pinned (a filter) and Clear. With it the frames area starts 44 px down and
+   leaves the index strip's 28 px (and its 12 px gap) at the right, fades over its last 44 px (and, scrolled down, its
+   first 28 px) and keeps the bottom 24 px gutter for "N more below". Without a bar message (parts 3 and 4) the page is
+   as it was. */
+#bar {
+  position: absolute; left: 0; right: 0; top: 0; height: 32px; z-index: 2;
+  display: none; align-items: center; gap: 12px; padding: 0 40px 0 var(--pad);
+}
+body.has-bar #bar { display: flex; }
+.b-title { flex: none; color: var(--ink-1); font: 600 15px/20px var(--font-display); letter-spacing: .02em; }
+.b-count { flex: none; color: var(--ink-3); }
+.b-waits { flex: none; display: inline-flex; align-items: center; gap: 6px; color: var(--amber); }
+.b-waits[hidden] { display: none; }
+.b-waits .b-dia { width: 9px; height: 9px; }
+body.compact .b-count { display: none; }
+.b-seg {
+  flex: none; margin-left: auto; display: flex; height: 28px; overflow: hidden;
+  border: 1px solid var(--line); border-radius: var(--radius-button-sm);
+}
+.b-seg button {
+  padding: 0 10px; color: var(--ink-3); font: 500 12px/26px var(--font-body); white-space: nowrap;
+  transition: color calc(120ms * var(--k)), background-color calc(120ms * var(--k));
+}
+.b-seg button:hover:not(:disabled) { color: var(--ink-1); }
+.b-seg button.on { background: var(--tile-focus); color: var(--ink-1); }
+.b-seg button:disabled { cursor: default; color: var(--ink-4); }
+.b-seg button + button { border-left: 1px solid var(--line); }
+.b-seg button:focus-visible, :root.keys .b-seg button:focus { outline-offset: -2px; }   /* the control clips outside */
+.b-clear {
+  flex: none; height: 28px; padding: 0 11px; border: 1px solid var(--line); border-radius: var(--radius-button-sm);
+  color: var(--ink-2); font: 600 12px/26px var(--font-display); letter-spacing: .02em;
+  transition: color calc(120ms * var(--k)), border-color calc(120ms * var(--k));
+}
+.b-clear:hover:not(:disabled) { color: var(--ink-1); border-color: var(--line-strong); }
+.b-clear:active:not(:disabled) { transform: translateY(1px); }
+.b-clear:disabled { cursor: default; color: var(--ink-4); border-color: var(--line-faint); }
+body.has-bar #board {
+  top: 44px; bottom: 24px; right: 28px; padding: 6px 12px 40px var(--pad);
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 44px), transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 44px), transparent 100%);
+}
+/* scrolled down, the first 28 px fade as well: a half-scrolled frame never shows a cut line of text */
+body.has-bar #board.scrolled {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 28px, #000 calc(100% - 44px), transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 28px, #000 calc(100% - 44px), transparent 100%);
+}
+
+/* a group: its time and topic over a LINE_FAINT rule (older groups in INK_4), then its frames */
+.group { flex: none; display: flex; flex-direction: column; gap: 12px; }
+/* The frames: always a grid of six columns, each frame across all of them unless it is in a row of small kinds (below).
+   Never switched between flex and grid as the width changes: Chromium then leaves a frame's contents (a size container
+   for its own queries) unlaid, an empty 27 px box. */
+.g-frames {
+  display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); column-gap: 12px; row-gap: 12px; align-items: start;
+}
+.g-frames > .frame { grid-column: 1 / -1; }
+.g-head { display: flex; align-items: center; gap: 10px; min-width: 0; margin: 2px 0 -2px; }
+.g-time { flex: none; color: var(--ink-3); white-space: nowrap; }
+.g-topic {                                    /* at most 40 characters: one line at every width, and wrapped, never cut */
+  flex: 0 1 auto; min-width: 0; color: var(--ink-3); font: 400 12.5px/16px var(--font-body);
+  overflow-wrap: anywhere; unicode-bidi: plaintext;
+}
+.g-rule { flex: 1 1 24px; min-width: 24px; height: 1px; background: var(--line-faint); }
+.group.older .g-time, .group.older .g-topic { color: var(--ink-4); }
+/* a parked answer (it waits under the pill), a group with nothing in sight (a Clear, the Pinned filter), and the room
+   a group arriving makes for itself (220 ms; see board.js) */
+.group.parked, .group.hollow { display: none; }
+.group.making { height: 0; overflow: hidden; }
+.group.sizing { overflow: hidden; }
+.frame.away { display: none; }
+
+/* pairs and three across (2.3): two small kinds side by side once the frames area is 500 px or more, up to three from
+   756 px (each at least 244 px); board.js marks each row. Of the six columns a pair's frames take three, three across
+   two. */
+#board.pairs .g-frames > .frame.pair-a, #board.pairs .g-frames > .frame.pair-b { grid-column: span 3; }
+#board.pairs .g-frames > .frame.trio { grid-column: span 2; }
+
+/* ---- the satellite (3.3): an older answer's unpinned frame as one 48 px row - its glyph in a 30 px square, the
+   title (Chakra 14) and one fact (badge role); a click or Enter expands it in place ---- */
+.f-sat { display: none; }
+.frame.sat { padding: 0; }
+.frame.sat > :not(.f-sat) { display: none; }
+.frame.sat > .f-sat {
+  display: grid; grid-template-columns: 30px minmax(0, 1fr); grid-template-rows: auto auto; column-gap: 10px;
+  row-gap: 2px; align-items: center; align-content: center;
+  width: 100%; min-height: 46px; padding: 7px 12px 7px 9px; border-radius: inherit; text-align: left;
+}
+.s-glyph {
+  grid-row: 1 / 3; display: grid; place-items: center; width: 30px; height: 30px;
+  border: 1px solid var(--line); border-radius: var(--radius-button-sm); color: var(--holo-lo);
+}
+.s-glyph .glyph { width: 15px; height: 15px; }
+.s-title {
+  grid-column: 2; min-width: 0; color: var(--ink-1); font: 500 14px/18px var(--font-display); letter-spacing: .01em;
+  overflow-wrap: anywhere; unicode-bidi: plaintext;
+}
+.s-fact { grid-column: 2; display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--ink-3); }
+.s-fact .s-dia { display: none; width: 9px; height: 9px; color: var(--amber); }
+.s-words { min-width: 0; overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.frame.sat.waits .s-glyph { border-color: var(--amber-line); color: var(--amber); }
+.frame.sat.waits .s-title { color: var(--amber-tx); }
+.frame.sat.waits .s-fact { color: var(--amber); }
+.frame.sat.waits .s-fact .s-dia { display: block; }
+.frame.sat.failed .s-glyph { border-color: var(--alert-line); color: var(--alert); }
+.frame.sat.failed .s-fact { color: var(--alert-tx2); }
+.frame .f-sat:focus, .frame .f-sat:focus-visible, :root.keys .frame .f-sat:focus { outline: none; }   /* the frame's ring */
+
+/* ---- a 7th pin says why, in the meta's place, for 4 s ---- */
+.f-note { display: none; flex: 0 1 auto; max-width: 100%; margin-left: auto; color: var(--ink-2); text-align: right; overflow-wrap: anywhere; }
+.frame.waits .f-note { color: var(--amber-tx); }
+.frame.noted .f-note { display: block; }
+.frame.noted .f-meta, .frame.noted .f-pinned, .frame.noted .f-ctl, .frame.noted:focus-within .f-ctl { display: none; }
+.s-note { display: none; min-width: 0; overflow-wrap: anywhere; color: var(--ink-2); }   /* a folded frame: in its fact's place */
+.frame.noted .s-note { display: inline; }
+.frame.noted .s-words, .frame.sat.noted .s-fact .s-dia { display: none; }
+.frame.waits .s-note { color: var(--amber-tx); }
+
+/* a closed frame's Bring back is offered 8 s; the app then takes the frame away */
+.frame.closed.expired .f-closed .f-act { visibility: hidden; }
+
+/* ---- "Board cleared · 8 FRAMES · Bring back" (3.5): the board's first row for 8 s after Clear ---- */
+.cleared-row {
+  flex: none; display: none; align-items: center; gap: 10px; min-height: 40px; padding: 5px 6px 5px 14px;
+  border: 1px dashed var(--line-strong); border-radius: var(--radius-frame);
+  color: var(--ink-2); font: 400 13px/16px var(--font-body);
+}
+.cleared-row.shown { display: flex; animation: show calc(160ms * var(--k)) var(--ease-out) both; }
+.cleared-row > .glyph { width: 15px; height: 15px; color: var(--ink-3); }
+.cr-count { color: var(--ink-4); }
+.cleared-row .f-act { margin-left: auto; height: 28px; padding: 0 11px; font-size: 12px; }
+
+/* ---- the index strip (3.1): a 26 px glyph button per frame, 4 apart, a 12 px rule between groups; in view LINE_STRONG
+   with a LINE_FOCUS brace down its left; what waits AMBER_LINE with a 9 px diamond pip; an arriving one dashed ---- */
+#strip { position: absolute; top: 46px; bottom: 24px; right: 0; width: 40px; z-index: 2; display: none; }
+body.has-bar #strip { display: block; }
+.s-list {
+  position: absolute; inset: 0; display: flex; flex-direction: column; align-items: flex-end; gap: 4px;
+  padding: 4px 1px 12px 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none;
+}
+.s-list::-webkit-scrollbar { display: none; }
+.ix {
+  position: relative; flex: none; display: grid; place-items: center; width: 26px; height: 26px;
+  border: 1px solid var(--line-faint); border-radius: var(--radius-button-sm); color: var(--ink-4);
+  transition: color calc(120ms * var(--k)), border-color calc(120ms * var(--k)), background-color calc(120ms * var(--k));
+}
+.ix .glyph { width: 13px; height: 13px; }
+.ix:hover { color: var(--ink-2); border-color: var(--line-strong); }
+.ix.in { border-color: var(--line-strong); color: var(--holo-lo); background: color-mix(in srgb, var(--tile-focus) 60%, transparent); }
+.ix.wait { border-color: var(--amber-line); color: var(--amber); }
+.ix.arr { border-style: dashed; color: var(--holo-hi); }
+.ix.arr.wait { color: var(--amber); }
+.ix .glyph.ix-pip {
+  display: none; position: absolute; top: -4px; right: -1px; width: 9px; height: 9px;
+  color: var(--amber); stroke: var(--void); stroke-width: 1.6; paint-order: stroke;
+}
+.ix.wait .glyph.ix-pip { display: block; }
+.ix:focus-visible, :root.keys .ix:focus { outline: 2px solid var(--focus); outline-offset: -1px; }
+.ix-rule { flex: none; width: 12px; height: 1px; margin: 3px 7px 3px 0; background: var(--line); }
+.ix-brace {
+  position: absolute; left: 5px; top: 0; width: 4px; height: 0; display: none; pointer-events: none;
+  border: 1px solid var(--line-focus); border-right: 0; border-radius: 2px 0 0 2px;
+}
+.ix-brace.shown { display: block; }
+
+/* ---- "↓ 7 MORE BELOW" (3.1) in the bottom gutter, whenever a frame below is not fully in view ---- */
+#more {
+  position: absolute; left: var(--pad); bottom: 4px; z-index: 2; display: none; align-items: center; gap: 6px;
+  color: var(--ink-3); line-height: 14px; pointer-events: none; white-space: nowrap;
+}
+body.has-bar #more.shown { display: flex; }
+#more .more-chev { width: 13px; height: 13px; color: var(--holo); transform: rotate(90deg); }
+
+/* ---- parked (3.5): "New answer above · Show" floats under the bar while the owner reads; the scroll holds ---- */
+#pill {
+  position: absolute; left: var(--pad); right: 40px; top: 50px; z-index: 4;
+  display: none; justify-content: center; pointer-events: none;
+}
+body.has-bar #pill.shown { display: flex; }
+/* its fade in: while it arrives only (board.js drops "arriving" once it is over, as it drops the desk's entrance) */
+body.has-bar #pill.shown.arriving { animation: show calc(160ms * var(--k)) var(--ease-out) both; }
+.pill-btn {
+  pointer-events: auto; display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 6px 0 12px;
+  border: 1px solid var(--line-strong); border-radius: 15px;
+  background: color-mix(in srgb, var(--tile-focus) 96%, transparent); color: var(--ink-1);
+  font: 400 13px/16px var(--font-body); box-shadow: 0 8px 20px -8px rgba(0, 0, 0, .9);
+  transition: border-color calc(120ms * var(--k));
+}
+.pill-btn .glyph { width: 13px; height: 13px; color: var(--holo-hi); }
+.pill-show {
+  padding: 0 8px 0 10px; border-left: 1px solid var(--line); color: var(--holo-hi);
+  font: 600 12px/22px var(--font-display); letter-spacing: .02em;
+}
+.pill-btn:hover { border-color: var(--line-focus); }
+.pill-btn:hover .pill-show { color: var(--ink-1); }
+
+/* ---- the keyboard's own focus (3.6): as :focus-visible, also when the app moved it (F6) ---- */
+:root.keys .frame:focus, :root.keys .frame:has(button:focus) { outline: 2px solid var(--focus); outline-offset: 3px; }
+:root.keys button:focus { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* ---- inside a narrow frame (under 300 px: a paired one) the small kinds give way, never cut: the title keeps less
+   room before its meta goes under it, a to-do's state words take a little more. Part 6's small kinds: a maths step's
+   name goes above its line, the chart's labels take a little more (its delta line and titles wrap), and the timeline
+   stays one node per row with TODAY its own row (it lines its nodes up in a row only from 300 px, above). ---- */
+@container frame (max-width: 299px) {
+  .f-title { flex-basis: 6em; }
+  .td-row { column-gap: 8px; grid-template-columns: 16px minmax(0, 1fr) fit-content(45%); }
+  .mx { grid-template-columns: auto minmax(0, 1fr); gap: 3px 10px; }
+  .mx-k { grid-column: 2; white-space: normal; overflow-wrap: anywhere; }
+  .mx-e { grid-column: 2; margin-bottom: 5px; }
+  .ch-bars { grid-template-columns: fit-content(45%) minmax(32px, 1fr) auto; column-gap: 8px; }
+}
+
+/* the desk forms: the board fades in and slides 24 px from the right (280 ms; calm x1.6; off at once). Once it is over the
+   page drops desk-in (board.js entranceOver; part 5c fixes, round 3): an animation left on the board or the bar, even
+   one that is over, outranks open big's dim on their opacity - kept, the dim jumped to 20 % there at the open and back
+   at the close (filled), or eased a frame behind the frame's growth (not filled), while the backdrop's and the strip's
+   eased with it. */
+:root.desk-in #board, :root.desk-in #bar { animation: desk-in calc(280ms * var(--k)) var(--ease-out) both; }
+@keyframes desk-in { from { opacity: 0; transform: translateX(24px); } }
+
+/* ---- open big (3.5): the view is wide (the app set its geometry once, over both columns); the board keeps its own box
+   in it, the app's backdrop stands where the conversation was, and the frame grows to the whole view (board.js: 260 ms
+   expo-out, transform and opacity only) while the backdrop and the other frames dim to 20 % ---- */
+body.wide { position: absolute; left: var(--bx); top: var(--by); width: var(--bw); height: var(--bh); }
+#backdrop {
+  position: fixed; left: 0; top: 0; width: var(--bx, 0px); height: 100%; display: none; object-fit: fill;
+  user-select: none; -webkit-user-drag: none; cursor: default;
+}
+body.wide #backdrop { display: block; }
+#board, #bar, #strip, #more, #pill { transition: opacity calc(220ms * var(--k)) var(--ease-out); }
+body.dim #board, body.dim #bar, body.dim #strip, body.dim #more, body.dim #pill {
+  opacity: .2; transition-duration: calc(260ms * var(--k));
+}
+/* The backdrop stays opaque (the conversation's own widgets lie under the translucent view: at a lower opacity they
+   showed through it undimmed) and dims as a picture: to 20 % of its light. */
+#backdrop { transition: filter calc(220ms * var(--k)) var(--ease-out); }
+body.dim #backdrop { filter: brightness(.2); transition-duration: calc(260ms * var(--k)); }
+#big { position: fixed; inset: 0; z-index: 20; }
+/* Held until its growth starts (board.js grow / start): there and focused, but unseen and untouched, so the view never
+   shows the big frame at its full size before it grows from its rectangle. */
+#big.held { opacity: 0; pointer-events: none; }
+.big-scrim { position: absolute; inset: 0; }
+.frame.big-card {
+  position: absolute; inset: 0; display: flex; flex-direction: column; padding: 18px 22px 0;
+  border-color: var(--line-strong); transform-origin: 0 0; box-shadow: 0 18px 40px -18px rgba(0, 0, 0, .9);
+}
+.frame.big-card.waits { border-color: var(--amber); }
+.frame.big-card:focus, .frame.big-card:focus-visible, :root.keys .frame.big-card:focus { outline: none; }
+.frame.big-card:focus-within .f-meta, .frame.big-card .f-meta { display: block; }   /* "OPEN BIG" stays in its meta */
+.big-card > .f-head { flex: none; }
+.big-card > .f-body {
+  flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; flex-direction: column; overscroll-behavior: contain;
+  --cut-start: #000; --cut-end: #000;
+}
+/* More of it than the card can show, even at the board's own sizes (below): it scrolls, by wheel or by keys (board.js:
+   Down / Up, Page Down / Page Up, Space / Shift+Space, Home / End), and says so - a thin bar (a 4 px thumb in
+   LINE_STRONG, 4 px clear of the words, no arrows, no track), and the cut edge fading over its last 28 px (its first
+   28 px once scrolled), never the bar's own column, so a half-shown row never reads as the end (board.js cutCue) */
+.big-card > .f-body::-webkit-scrollbar { width: 8px; background: transparent; }
+.big-card > .f-body::-webkit-scrollbar-thumb {
+  border-left: 4px solid transparent; border-radius: 4px; background: var(--line-strong); background-clip: padding-box;
+}
+.big-card > .f-body::-webkit-scrollbar-thumb:hover { background-color: var(--line-focus); }
+.big-card > .f-body.cut-start { --cut-start: transparent; }
+.big-card > .f-body.cut-end { --cut-end: transparent; }
+.big-card > .f-body:is(.cut-start, .cut-end) {
+  -webkit-mask-image: linear-gradient(#000, #000),
+    linear-gradient(to bottom, var(--cut-start), #000 28px, #000 calc(100% - 28px), var(--cut-end));
+  mask-image: linear-gradient(#000, #000),
+    linear-gradient(to bottom, var(--cut-start), #000 28px, #000 calc(100% - 28px), var(--cut-end));
+  -webkit-mask-size: 8px 100%, 100% 100%; mask-size: 8px 100%, 100% 100%;
+  -webkit-mask-position: right top, left top; mask-position: right top, left top;
+  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
+}
+.big-card .pic-slot { flex: 1 1 auto; min-height: 0; display: flex; justify-content: center; }
+.big-card .pic-slot .f-pic {
+  width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain; filter: none;
+}
+.big-card .pic-cap { flex: none; }
+.big-card > .f-wait { flex: none; align-self: flex-start; }
+/* part 6's kinds opened big use the room: a table's rows and cells, a chart's bars, a timeline's nodes (all in one row),
+   maths' lines. A table's and maths' sizes step down until the body fits the card (board.js fitBig: fit-1, fit-2, then
+   fit-3, the board's own 448 px sizes, never smaller); past that it scrolls with its cue (above). */
+.big-card {
+  --fit-th: 12px; --fit-th-line: 16px; --fit-th-pad: 10px; --fit-td: 15px; --fit-td-line: 22px; --fit-td-pad: 8px;
+  --fit-delta: 14px; --fit-delta-line: 20px;
+  --fit-mx-row: 14px; --fit-mx-col: 16px; --fit-mx: 24px; --fit-mx-line: 34px;
+  --fit-sup: 15px; --fit-raise: 10px; --fit-frac: 19px; --fit-frac-line: 23px; --fit-idx: 13px; --fit-idx-line: 14px;
+}
+.big-card.fit-1 {
+  --fit-th: 11.5px; --fit-th-line: 15px; --fit-th-pad: 8px; --fit-td: 14px; --fit-td-line: 20px; --fit-td-pad: 6px;
+  --fit-delta: 13px; --fit-delta-line: 19px;
+  --fit-mx-row: 12px; --fit-mx-col: 14px; --fit-mx: 21px; --fit-mx-line: 30px;
+  --fit-sup: 13px; --fit-raise: 9px; --fit-frac: 17px; --fit-frac-line: 20px; --fit-idx: 12px; --fit-idx-line: 13px;
+}
+.big-card.fit-2 {
+  --fit-th: 11px; --fit-th-line: 14px; --fit-th-pad: 7px; --fit-td: 13px; --fit-td-line: 19px; --fit-td-pad: 5px;
+  --fit-delta: 12.5px; --fit-delta-line: 18px;
+  --fit-mx-row: 10px; --fit-mx-col: 12px; --fit-mx: 18px; --fit-mx-line: 26px;
+  --fit-sup: 12px; --fit-raise: 8px; --fit-frac: 15px; --fit-frac-line: 18px; --fit-idx: 11px; --fit-idx-line: 12px;
+}
+.big-card.fit-3 {
+  --fit-th: 11px; --fit-th-line: 14px; --fit-th-pad: 6px; --fit-td: 12.5px; --fit-td-line: 18px; --fit-td-pad: 4px;
+  --fit-delta: 12px; --fit-delta-line: 17px;
+  --fit-mx-row: 7px; --fit-mx-col: 10px; --fit-mx: 15px; --fit-mx-line: 22px;
+  --fit-sup: 10px; --fit-raise: 6px; --fit-frac: 12.5px; --fit-frac-line: 15px; --fit-idx: 9px; --fit-idx-line: 10px;
+}
+.big-card .tb th { padding-bottom: var(--fit-th-pad); font-size: var(--fit-th); line-height: var(--fit-th-line); }
+.big-card .tb td {
+  padding-top: var(--fit-td-pad); padding-bottom: var(--fit-td-pad);
+  font-size: var(--fit-td); line-height: var(--fit-td-line);
+}
+.big-card .delta, .big-card .delta-lead { font-size: var(--fit-delta); line-height: var(--fit-delta-line); }
+.big-card .ch-bars { gap: 16px 16px; }
+.big-card .ch-l { font-size: 15px; line-height: 20px; }
+.big-card .ch-tr { height: 18px; }
+.big-card .ch-v { font-size: 14px; line-height: 18px; }
+.big-card .tl-words { font-size: 15px; line-height: 20px; }
+.big-card .mx { gap: var(--fit-mx-row) var(--fit-mx-col); }
+.big-card .mx-e { font-size: var(--fit-mx); line-height: var(--fit-mx-line); }
+.big-card .mx-sup { font-size: var(--fit-sup); vertical-align: var(--fit-raise); }
+.big-card .mx-frac { font-size: var(--fit-frac); line-height: var(--fit-frac-line); }
+.big-card .mx-idx { font-size: var(--fit-idx); line-height: var(--fit-idx-line); }
+.f-back {
+  flex: none; margin-top: 14px; padding: 12px 0 14px; border-top: 1px solid var(--line-faint);
+  color: var(--holo); text-align: center;
+}
+
+/* ---- changed: one light runs once round the border, then CHANGED stays ---- */
+.frame.lap .fx-light, .frame.sat.lap > .fx-light { display: block; }   /* a satellite's row has its light too */
+.fx-light rect {
+  stroke: var(--holo-hi); stroke-width: 2; stroke-dasharray: 8 92;
+  filter: drop-shadow(0 0 4px var(--holo-hi));
+}
+.frame.lap .fx-light rect { animation: lap calc(900ms * var(--k)) linear both; }
+@keyframes lap { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -100; } }
+
+/* ==== The canvas (PLAN-canvas part 1): Home is this page. One black surface, the orb in three forms (rings on one lit
+   axis seen at an angle; the badge: flat, facing, JARVIS in it; the corner: the badge at a third of its size, bottom
+   right, while the board holds frames), and small controls in the corners. board.js makes every element of it
+   (makeCanvas) at the first orb or canvas message, so a board that is not the canvas has none of it. The orb
+   itself is one 2D canvas that board.js draws (its forms, its states and the moves between them are there); the rest
+   moves with transforms and opacity only, and --k scales it as everywhere (calm 1.6; off: cuts). In canvas mode
+   <body> is the frames' own area (part 2, below: the whole canvas between the top controls and the caption's
+   strip). ==== */
+:root.canvas {
+  --c: #35D3F0;                  /* Jarvis's cyan, as the approved mock draws it */
+  --c-hi: #8FEBFF;
+  --c-tick: #BFF4FF;
+  --c-white: #F2FDFF;
+  --c-ink: #CFE6EB;
+  --c-dim: #7FA3AD;
+  --c-amber: #F5B14A;
+  --c-amber-hi: #FFD08A;
+  --g: 53, 211, 240;             /* the glow's colour (rgb) ... */
+  --g-hi: 143, 235, 255;         /* ... and its bright core */
+  --edge: 28px;                  /* the canvas's side gutter */
+  background: #000;
+}
+:root.canvas, :root.canvas body { background: #000; }
+:root.canvas body { position: absolute; }                   /* (its box: part 2, below) */
+:root.canvas.board-off body { visibility: hidden; }          /* folded away (Ctrl+B), or nothing on it */
+:root.canvas.board-off #canvas, :root.canvas.board-off #big { visibility: visible; }
+:root.canvas .b-clear { display: none; }                      /* the canvas's own "Clear view" is the one Clear */
+:root.canvas ::selection { background: rgba(var(--g), .35); color: #fff; }
+
+#canvas { position: fixed; inset: 0; z-index: 0; overflow: hidden; pointer-events: none; color: var(--c-ink); }
+#canvas button, #canvas .c-drag { pointer-events: auto; }
+body.dim #canvas { opacity: .2; }
+#canvas { transition: opacity calc(220ms * var(--k)) var(--ease-out); }
+
+/* ---- the orb: one 2D canvas board.js draws each frame (the web engine has no GPU here: a stack of glowing layers
+   turned in 3D was composited at about 9 frames a second; see board.js). board.js places and sizes it. ---- */
+#orb { position: absolute; left: 0; top: 0; width: 0; height: 0; }
+#orb .o-pic { position: absolute; display: block; }
+
+/* ---- the corners (the mock's type: the display face for the wordmark, the mono face for labels) ---- */
+.c-corner { position: absolute; display: flex; align-items: center; }
+.c-tl { left: var(--edge); top: 22px; gap: 16px; max-width: calc(100% - 2 * var(--edge)); }
+/* the top right row: ONE line at every width (part 3: board.js fitTopRow folds the least used under More) */
+.c-tr { right: var(--edge); top: 18px; gap: 7px; flex-wrap: nowrap; justify-content: flex-end; }
+.c-bl { left: var(--edge); bottom: 24px; gap: 12px; max-width: calc(50% - 300px); flex-wrap: wrap; row-gap: 8px; }
+.c-word { font: 600 13px/18px var(--font-display); letter-spacing: .38em; color: var(--c-white); white-space: nowrap; cursor: default; user-select: none; }
+.c-mono, .c-btn {
+  font: 500 9.5px/12px var(--font-mono); letter-spacing: .18em; text-transform: uppercase; white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.c-mono { color: var(--c-dim); }
+.c-state { color: var(--c-hi); }
+.c-state.amber { color: var(--c-amber); }
+.c-state.steel { color: var(--c-dim); }
+.c-wake { white-space: normal; min-width: 0; }           /* "Hey Jarvis" in its few words: whole, wrapped if need be */
+/* The window brief: HEY JARVIS on a line of its own - a small lamp, the mark, the state: cyan listening (the lamp
+   breathes), steel paused, amber only when Jarvis can't hear the owner. */
+.c-hear { flex: 1 0 100%; display: flex; align-items: center; gap: 8px; min-width: 0; }
+.c-hear[hidden], .c-note[hidden] { display: none; }
+.c-hear-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--c-dim); opacity: .7; }
+.c-hear-mark { color: var(--c-ink); }
+.c-hear-word { color: var(--c-dim); white-space: normal; }
+.c-hear.s-listening .c-hear-dot {
+  background: var(--c); opacity: 1; box-shadow: 0 0 6px 1px rgba(var(--g), .75);
+  animation: c-lamp calc(2400ms * var(--k)) ease-in-out infinite;
+}
+.c-hear.s-listening .c-hear-word { color: var(--c-hi); }
+/* part 5B: "Hearing you" - a talk "Hey Jarvis" started listens to the owner now: the lamp lit and steady */
+.c-hear.s-hearing .c-hear-dot { background: var(--c-hi); opacity: 1; box-shadow: 0 0 7px 2px rgba(var(--g), .85); }
+.c-hear.s-hearing .c-hear-word { color: var(--c-white); }
+.c-hear.s-cant_hear .c-hear-dot { background: var(--c-amber); opacity: 1; box-shadow: 0 0 6px 1px rgba(245, 177, 74, .7); }
+.c-hear.s-cant_hear .c-hear-word { color: var(--c-amber); }
+@keyframes c-lamp { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+/* ... and when Jarvis can't hear: what to do, in plain words, with its one button (over the meter's row) */
+.c-note { flex: 1 0 100%; order: -1; max-width: 372px; margin-bottom: 4px; }
+.c-note .c-btn { margin-left: 8px; vertical-align: 1px; }      /* its one button at the end of its words */
+.c-note-text {
+  margin: 0; font: 400 12.5px/18px var(--font-body); letter-spacing: 0; color: var(--c-ink); white-space: normal;
+  overflow-wrap: anywhere; text-wrap: pretty;
+}
+.c-note-head { font-weight: 600; color: var(--c-amber-hi); }
+.c-note-name { color: var(--c-white); unicode-bidi: plaintext; }
+.c-note span[hidden] { display: none; }
+.c-btn {
+  font-weight: 600; color: #D8F3F8; background: rgba(var(--g), .04); border: 1px solid rgba(var(--g-hi), .7);
+  padding: 5px 9px; border-radius: 1px; box-shadow: 0 0 8px rgba(var(--g), .25);
+  transition: color calc(120ms * var(--k)), border-color calc(120ms * var(--k)), background-color calc(120ms * var(--k));
+}
+.c-btn:hover { border-color: #fff; color: #fff; }
+.c-btn:active { transform: translateY(1px); }
+.c-btn:focus-visible, :root.keys .c-btn:focus { outline: 2px solid var(--c-hi); outline-offset: 2px; }
+.c-btn.need { border-color: var(--c-amber); color: var(--c-amber-hi); box-shadow: 0 0 8px rgba(245, 177, 74, .35); }
+.c-btn.need:hover { border-color: #FFE2B0; color: #FFE9C7; }
+.c-btn.new { background: rgba(var(--g), .16); border-color: var(--c-hi); color: #fff; }
+.c-btn.on { background: rgba(var(--g), .2); border-color: #fff; color: #fff; }
+.c-btn.quiet { border-color: rgba(var(--g-hi), .34); box-shadow: none; color: var(--c-ink); }
+.c-btn.quiet:hover, .c-btn.quiet.hot { border-color: #fff; color: #fff; }   /* (hot: Windows' own maximise hover) */
+.c-btn.icon { display: grid; place-items: center; width: 26px; height: 24px; padding: 0; }
+.c-btn.icon .glyph { width: 13px; height: 13px; }
+.c-btn[hidden], .c-mono[hidden], .c-rule[hidden], .c-meter[hidden], .c-btn.folded { display: none; }
+/* More's list: over the frames, under its button, the folded buttons one under another */
+.c-menu {
+  position: fixed; z-index: 25; visibility: visible; display: flex; flex-direction: column; align-items: stretch;
+  gap: 6px; min-width: 150px; padding: 8px; background: rgba(2, 8, 11, .96); border: 1px solid rgba(var(--g-hi), .45);
+  border-radius: 1px; box-shadow: 0 8px 24px rgba(0, 0, 0, .55), 0 0 14px rgba(var(--g), .18);
+}
+.c-menu[hidden] { display: none; }
+.c-menu .c-btn { text-align: left; }
+.c-rule { width: 1px; height: 18px; margin: 0 5px; background: rgba(var(--g-hi), .3); }
+.c-group { display: flex; align-items: center; gap: 7px; position: relative; }
+/* part 5B: the window's close says what it does where it is pressed - a small tip under it on hover and focus */
+.c-tip {
+  position: absolute; right: 0; top: calc(100% + 8px); z-index: 30; visibility: hidden; opacity: 0;
+  padding: 6px 9px; max-width: 260px; white-space: normal; text-align: left;
+  font: 400 12px/16px var(--font-body); letter-spacing: 0; color: var(--c-ink);
+  background: rgba(2, 8, 11, .96); border: 1px solid rgba(var(--g-hi), .45); border-radius: 1px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .55); pointer-events: none;
+  transition: opacity calc(120ms * var(--k)) var(--ease-out);
+}
+.c-btn.c-close:hover ~ .c-tip, .c-btn.c-close:focus-visible ~ .c-tip,
+:root.keys .c-btn.c-close:focus ~ .c-tip { visibility: visible; opacity: 1; transition-delay: calc(350ms * var(--k)); }
+.c-clock { color: var(--c-dim); }
+button.c-clock { padding: 3px 0; border-bottom: 1px solid transparent; }
+button.c-clock:hover { color: var(--c-white); border-bottom-color: rgba(var(--g-hi), .5); }
+button.c-clock:focus-visible, :root.keys button.c-clock:focus { outline: 2px solid var(--c-hi); outline-offset: 3px; }
+.c-hold { color: #9FE6C4; }
+.c-rec { color: #FF9A8C; }
+.c-meter { display: flex; gap: 2px; align-items: center; height: 14px; }
+.c-meter i { display: block; width: 3px; height: 10px; background: #12323B; transition: background-color 90ms linear; }
+.c-meter i.on { background: var(--c); }
+.c-meter i.edge { background: #1B6E80; }
+@media (max-width: 1180px) {
+  .c-tl { flex-wrap: wrap; row-gap: 4px; max-width: 300px; }      /* (two lines: over the frames' area, at 64 px) */
+}
+
+/* ---- open big on the canvas: the card over the whole canvas but the corners' rows and the ask line ---- */
+:root.canvas .frame.big-card { inset: 58px var(--edge) 150px var(--edge); }
+/* part 5B: open big's ground hides the frames behind it: the card is opaque (the rest stays dimmed to 20 %) */
+:root.canvas .frame.big-card { background-color: #030A0D; }
+:root.canvas .frame.big-card.waits { background-color: #0E0903; }
+
+/* ==== The canvas, part 2 (PLAN-canvas part 2): frames across the screen. <body> is the whole area between the top
+   controls and the caption's strip; board.js places every frame in it on a 12-column grid (packCanvas: left, top,
+   width and height, the page's own numbers) and nothing scrolls. The frames are the approved mock's: a thin bright
+   outline, square corners, a soft outer glow and a faint inner one, caps headings, small mono labels, amber for what
+   waits on the owner. The glows are two layers that only ever change their opacity (the web engine has no GPU here:
+   a shadow is painted once, never animated), and everything that moves does so by transform and opacity. The old
+   bar, the index strip, "N more below" and the groups' rule lines are not drawn here. ==== */
+:root.canvas {
+  --board-bottom: 160px;         /* the caption's strip and the ask line under the frames */
+  /* the mock's palette over the board's tokens: every kind's rows, words and marks take it */
+  --tile: rgba(3, 10, 13, .94);
+  --tile-focus: rgba(5, 19, 25, .96);
+  --tile-amber: rgba(14, 9, 3, .95);
+  --tile-amber-lit: rgba(26, 16, 4, .96);
+  --tile-alert: rgba(17, 6, 5, .95);
+  --raised: rgba(53, 211, 240, .07);
+  --frame-edge: rgba(175, 240, 255, .8);
+  --line-faint: rgba(143, 235, 255, .16);
+  --line: rgba(143, 235, 255, .3);
+  --line-strong: rgba(143, 235, 255, .55);
+  --line-focus: rgba(175, 240, 255, .9);
+  --ink-1: #FFFFFF;
+  --ink-2: #CFE6EB;
+  --ink-3: #A9C7CF;
+  --ink-4: #7FA3AD;
+  --holo: #35D3F0;
+  --holo-hi: #8FEBFF;
+  --holo-lo: #2A93A9;
+  --amber: #F5B14A;
+  --amber-hi: #FFD08A;
+  --amber-line: #F5B14A;
+  --amber-tx: #FFE2B0;
+  --amber-tx2: #F3D9AE;
+  --focus: #8FEBFF;
+  --radius-frame: 1px;
+  --radius-amber: 1px;
+  --radius-badge: 1px;
+  --radius-button-sm: 1px;
+  --ga: 245, 177, 74;            /* the amber glow */
+}
+:root.canvas body {
+  left: var(--edge); right: var(--edge); top: var(--board-top, 64px); bottom: var(--board-bottom);
+  width: auto; height: auto; overflow: visible;
+  background: transparent;       /* the canvas's black is the page's own (:root). MEASURED: a ground of its own on this
+                                    box, now the whole area, halved the frame rate of everything moving under it */
+}
+:root.canvas #board {
+  inset: 0; display: block; padding: 0; overflow: visible;
+  -webkit-mask-image: none; mask-image: none;
+}
+:root.canvas #bar, :root.canvas #strip, :root.canvas body #more, :root.canvas body #more.shown { display: none; }
+:root.canvas .group, :root.canvas .g-frames { display: contents; }
+:root.canvas .group.parked { display: none; }
+:root.canvas .g-head { display: none; }
+
+/* ---- a frame in its place ---- */
+:root.canvas .frame {
+  background: var(--tile); border: 1px solid var(--frame-edge); border-radius: 1px;
+  transition: border-color calc(160ms * var(--k)) var(--ease-out), background-color calc(160ms * var(--k)) var(--ease-out);
+}
+:root.canvas #board .frame {
+  position: absolute; left: 0; top: 0; display: flex; flex-direction: column; min-width: 0;
+  padding: 13px 15px 11px;
+}
+:root.canvas .frame::before, :root.canvas .frame::after {
+  content: ''; position: absolute; inset: -1px; border-radius: 1px; pointer-events: none;
+}
+:root.canvas .frame::before { box-shadow: 0 0 14px rgba(var(--g), .28), inset 0 0 22px rgba(var(--g), .06); }
+:root.canvas .frame::after {
+  box-shadow: 0 0 24px 2px rgba(var(--g), .5), inset 0 0 30px rgba(var(--g), .13);
+  opacity: 0; transition: opacity calc(180ms * var(--k)) var(--ease-out);
+}
+:root.canvas #board .frame:not(.sat):hover, :root.canvas #board .frame:not(.sat):focus-within { border-color: #fff; }
+:root.canvas #board .frame:hover::after, :root.canvas #board .frame:focus-within::after { opacity: .7; }
+:root.canvas .frame:focus-visible, :root.canvas .frame:has(button:focus-visible),
+:root.canvas.keys .frame:focus, :root.canvas.keys .frame:has(button:focus) { outline: 2px solid var(--focus); outline-offset: 4px; }
+/* part 5B: a frame clicked (focused by the pointer) looks otherwise than one only hovered - its ground a step lighter
+   and a thin ring outside its edge, where it was clicked */
+:root.canvas #board .frame:not(.sat):focus { background-color: var(--tile-focus); outline: 1px solid rgba(var(--g-hi), .6); outline-offset: 3px; }
+:root.canvas #board .frame.waits:not(.sat):focus { background-color: var(--tile-amber-lit); outline-color: rgba(var(--ga), .7); }
+
+:root.canvas .f-head {
+  flex: none; align-items: baseline; column-gap: 12px; row-gap: 3px; min-height: 22px; margin-bottom: 9px;
+}
+:root.canvas .f-glyph { display: none; }
+:root.canvas .f-title {
+  position: relative; flex: 1 1 7em; color: #fff;
+  font: 700 19px/22px var(--font-display); letter-spacing: .02em; text-transform: uppercase;
+}
+:root.canvas .t-badge, :root.canvas .f-meta, :root.canvas .f-note {
+  font: 500 10px/13px var(--font-mono); letter-spacing: .16em; text-transform: uppercase;
+}
+:root.canvas .f-meta { color: var(--ink-4); }
+:root.canvas .f-tag { padding: 2px 6px; border-color: var(--c-hi); color: #fff; }
+:root.canvas .f-pinned { color: var(--c-hi); }
+:root.canvas #board .frame > .f-body { flex: 1 1 auto; min-height: 0; overflow: hidden; color: var(--ink-2); font: 400 13px/19px var(--font-body); }
+:root.canvas #board .frame.measuring { height: auto !important; }
+:root.canvas #board .frame.measuring > .f-body { flex: none; overflow: visible; }
+:root.canvas .f-keys { display: none; }
+:root.canvas #board .frame.unplaced, :root.canvas .task.unplaced { visibility: hidden; }
+:root.canvas #board .frame.folding { pointer-events: none; }
+
+/* a body its place cuts: its last lines fade and the frame says so (Enter, or Open big, shows all of it) */
+.f-cut { display: none; }
+:root.canvas #board .frame.cut > .f-body {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 30px), transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 30px), transparent 100%);
+}
+:root.canvas #board .frame.cut > .f-cut {
+  display: block; position: absolute; right: 13px; bottom: 7px; padding: 2px 6px;
+  background: var(--tile); border: 1px solid var(--line); color: var(--c-hi);
+}
+:root.canvas #board .frame.waits.cut > .f-cut { background: var(--tile-amber); border-color: rgba(var(--ga), .5); color: var(--amber-hi); }
+
+/* Pin, Open big and Close: over the heading's end while the pointer or the keyboard is on the frame (nothing in the
+   frame moves for them), with corner ticks */
+:root.canvas #board .frame .f-ctl {
+  position: absolute; top: 8px; right: 9px; z-index: 2; display: flex; gap: 4px; margin: 0; padding: 2px 0 2px 10px;
+  background: linear-gradient(to right, transparent, var(--tile) 10px);
+  opacity: 0; pointer-events: none; transition: opacity calc(120ms * var(--k)) var(--ease-out);
+}
+:root.canvas #board .frame.waits .f-ctl { background: linear-gradient(to right, transparent, var(--tile-amber) 10px); }
+:root.canvas #board .frame:hover .f-ctl, :root.canvas #board .frame:focus-within .f-ctl { opacity: 1; pointer-events: auto; }
+:root.canvas #board .frame:hover .f-meta, :root.canvas #board .frame:hover .f-pinned,
+:root.canvas #board .frame:focus-within .f-meta, :root.canvas #board .frame:focus-within .f-pinned { visibility: hidden; }
+:root.canvas #board .frame:focus-within .f-meta { display: inline; }
+:root.canvas #board .frame.pinned:focus-within .f-pinned { display: block; }
+:root.canvas #board .frame.noted .f-ctl { display: none; }
+:root.canvas #board .frame.noted .f-meta { display: none; }
+:root.canvas .f-icon {
+  width: 24px; height: 22px; border: 1px solid rgba(var(--g-hi), .5); border-radius: 1px; color: #D8F3F8;
+  background: rgba(var(--g), .04);
+}
+:root.canvas .f-icon:first-child { border-color: rgba(var(--g-hi), .5); }
+:root.canvas .f-icon:hover { border-color: #fff; color: #fff; background: rgba(var(--g), .12); }
+:root.canvas .f-icon.on { border-color: var(--c-hi); color: #fff; background: rgba(var(--g), .2); }
+:root.canvas .frame.waits .f-icon { border-color: rgba(var(--ga), .6); color: var(--amber-tx); background: rgba(var(--ga), .05); }
+:root.canvas .frame.waits .f-icon:hover { border-color: #FFE2B0; color: #fff; }
+:root.canvas #board .frame .fx-tick {
+  display: block; width: 10px; height: 10px; border-color: #fff; opacity: 0;
+  transition: opacity calc(140ms * var(--k)) var(--ease-out);
+}
+:root.canvas #board .frame .fx-tick.tl { left: -5px; top: -5px; }
+:root.canvas #board .frame .fx-tick.tr { right: -5px; top: -5px; }
+:root.canvas #board .frame .fx-tick.bl { left: -5px; bottom: -5px; }
+:root.canvas #board .frame .fx-tick.br { right: -5px; bottom: -5px; }
+:root.canvas #board .frame:hover .fx-tick, :root.canvas #board .frame:focus-within .fx-tick { opacity: 1; }
+:root.canvas .frame.waits .fx-tick { border-color: var(--amber-hi); }
+:root.canvas .fx-bracket { display: none; }
+
+/* ---- what waits on the owner: amber ---- */
+:root.canvas .frame.waits { background: var(--tile-amber); border-color: var(--amber); }
+:root.canvas .frame.waits::before { box-shadow: 0 0 16px rgba(var(--ga), .4), inset 0 0 22px rgba(var(--ga), .07); }
+:root.canvas .frame.waits::after { box-shadow: 0 0 26px 2px rgba(var(--ga), .55), inset 0 0 30px rgba(var(--ga), .14); }
+:root.canvas #board .frame.waits:not(.sat):hover, :root.canvas #board .frame.waits:not(.sat):focus-within { border-color: #FFE2B0; }
+:root.canvas .frame.waits .f-title { color: #FFE2B0; }
+:root.canvas .frame.waits .f-meta { color: var(--amber); }
+:root.canvas .frame.waits .f-body { color: var(--amber-tx2); }
+:root.canvas .f-wait {
+  flex: none; align-self: flex-start; min-height: 0; margin-top: auto; padding: 5px 9px; gap: 8px;
+  border: 1px solid var(--amber); border-radius: 1px; background: rgba(var(--ga), .05);
+  color: var(--amber-hi); font: 600 10px/13px var(--font-mono); letter-spacing: .16em; text-transform: uppercase;
+  box-shadow: 0 0 8px rgba(var(--ga), .35);
+}
+:root.canvas #board .frame > .f-wait { margin-top: auto; }
+:root.canvas #board .frame.waits > .f-body { flex: 0 1 auto; margin-bottom: 10px; }
+:root.canvas .f-wait:hover { background: rgba(var(--ga), .14); border-color: #FFE2B0; color: #FFE9C7; }
+:root.canvas .f-wait .f-dia { width: 9px; height: 9px; }
+:root.canvas .f-wait .f-key { padding: 0 4px; border-color: rgba(var(--ga), .5); border-radius: 1px; font: inherit; letter-spacing: .12em; }
+:root.canvas .frame.waits:focus-within .f-wait { box-shadow: 0 0 8px rgba(var(--ga), .35); }
+
+/* ---- failed, empty (also a frame still waiting for what it shows), closed ---- */
+:root.canvas .frame.failed { background: var(--tile-alert); border-color: var(--alert-line); }
+:root.canvas .frame.failed::before { box-shadow: 0 0 14px rgba(255, 122, 104, .3), inset 0 0 22px rgba(255, 122, 104, .06); }
+:root.canvas .frame.failed::after { box-shadow: 0 0 24px 2px rgba(255, 122, 104, .45), inset 0 0 30px rgba(255, 122, 104, .12); }
+:root.canvas .frame.failed .f-title { color: var(--alert-tx); }
+:root.canvas .frame.empty { border-color: rgba(143, 235, 255, .5); }
+:root.canvas .frame.empty::before { box-shadow: 0 0 12px rgba(var(--g), .16), inset 0 0 20px rgba(var(--g), .04); }
+:root.canvas .f-ring { border-color: var(--c-hi); }
+:root.canvas .f-act {
+  height: auto; padding: 5px 9px; border: 1px solid rgba(var(--g-hi), .7); border-radius: 1px;
+  background: rgba(var(--g), .04); color: #D8F3F8; box-shadow: 0 0 8px rgba(var(--g), .25);
+  font: 600 10px/13px var(--font-mono); letter-spacing: .16em; text-transform: uppercase;
+}
+:root.canvas .f-act:hover { border-color: #fff; color: #fff; background: rgba(var(--g), .1); }
+:root.canvas .f-act.alert { border-color: var(--alert-line); background: var(--alert-wash); color: var(--alert-tx2); box-shadow: 0 0 8px rgba(255, 122, 104, .25); }
+:root.canvas .f-closed { border: 1px dashed rgba(var(--g-hi), .45); border-radius: 1px; color: var(--ink-3); min-height: 36px; }
+:root.canvas .f-closed .f-act { height: auto; padding: 4px 8px; font-size: 10px; }
+
+/* ---- lit: the frame Jarvis speaks of brightens (no cue line here) ---- */
+:root.canvas .frame.lit { background: var(--tile-focus); border-color: #fff; box-shadow: none; }
+:root.canvas .frame.lit::after { opacity: 1; }
+:root.canvas .frame.waits.lit { background: var(--tile-amber-lit); border-color: #FFE2B0; }
+:root.canvas .frame.lit .f-pic, :root.canvas #board .frame:hover .f-pic { filter: none; }
+
+/* ---- changed: the frame pulses once in its changed light, then CHANGED stays ---- */
+.fx-pulse, .fx-scanbox { display: none; }
+:root.canvas .frame.lap .fx-light { display: none; }
+:root.canvas #board .frame .fx-pulse {
+  display: block; position: absolute; inset: -1px; pointer-events: none; opacity: 0;
+  border: 1px solid #fff; box-shadow: 0 0 28px 4px rgba(var(--g-hi), .85), inset 0 0 36px rgba(var(--g-hi), .32);
+}
+:root.canvas #board .frame.waits .fx-pulse { box-shadow: 0 0 28px 4px rgba(var(--ga), .85), inset 0 0 36px rgba(var(--ga), .3); }
+:root.canvas #board .frame.lap .fx-pulse { animation: changed-light calc(900ms * var(--k)) cubic-bezier(.2, .7, .3, 1) both; }
+@keyframes changed-light { 0% { opacity: 0; } 22% { opacity: 1; } 100% { opacity: 0; } }
+
+/* ---- a tile: a folded frame, its title and its one fact; a click or Enter opens it again ---- */
+:root.canvas #board .frame.sat { padding: 0; border-color: rgba(143, 235, 255, .42); background: rgba(3, 10, 13, .8); }
+:root.canvas #board .frame.sat::before { box-shadow: none; }
+:root.canvas #board .frame.sat:hover, :root.canvas #board .frame.sat:focus-within { border-color: #fff; }
+:root.canvas #board .frame.sat.waits { border-color: rgba(var(--ga), .7); background: rgba(14, 9, 3, .85); }
+:root.canvas #board .frame.sat > .f-sat {
+  display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; align-content: center;
+  row-gap: 4px; width: 100%; height: 100%; min-height: 0; padding: 0 13px; border-radius: 1px; text-align: left;
+}
+:root.canvas .s-glyph { display: none; }
+:root.canvas .s-title {
+  grid-column: 1; color: #fff; font: 600 13px/16px var(--font-display); letter-spacing: .04em; text-transform: uppercase;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+:root.canvas .s-fact { grid-column: 1; color: var(--ink-4); white-space: nowrap; overflow: hidden; }
+:root.canvas .s-words, :root.canvas .s-note { overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
+:root.canvas .frame.sat.waits .s-title { color: #FFE2B0; }
+:root.canvas #board.tight .frame.sat .s-fact { display: none; }
+:root.canvas #board.tight .frame.sat > .f-sat { padding: 0 10px; }
+:root.canvas #board.tight .s-title { font-size: 12px; line-height: 15px; }
+
+/* ---- the kinds in the mock's rows, numbers and bars ---- */
+:root.canvas .cal-time { min-width: 0; color: var(--ink-2); font: 500 13px/19px var(--font-mono); letter-spacing: 0; text-transform: none; }
+:root.canvas .cal-rows { column-gap: 12px; }
+:root.canvas .cal-title, :root.canvas .tx-text, :root.canvas .td-text { font: 400 13px/19px var(--font-body); }
+:root.canvas .cal-meta, :root.canvas .tx-meta { font: 500 10px/13px var(--font-mono); letter-spacing: .16em; text-transform: uppercase; color: var(--ink-4); }
+:root.canvas .cal-row.next .cal-title, :root.canvas .cal-row.now .cal-title { color: #fff; }
+:root.canvas .cal-row:not(.next):not(.now):not(.new):not(.past):not(.struck):not(.free) .cal-title { color: var(--ink-2); }
+:root.canvas .cal-bar { border-radius: 0; height: 12px; background: #0B1B20; border-color: transparent; }
+:root.canvas .cal-span { border-radius: 0; background: #1B6E80; }
+:root.canvas .cal-span.next { background: var(--holo); box-shadow: 0 0 10px rgba(var(--g), .8); }
+:root.canvas .cal-pill { border-radius: 1px; background: var(--c-hi); color: #021014; }
+:root.canvas .cal-row.free::before { border-radius: 1px; }
+:root.canvas .mt-sender, :root.canvas .ml-sender { font: 600 13px/19px var(--font-body); }
+:root.canvas .frame.waits .mt-sender { color: #FFE9C7; }
+:root.canvas .mt-text { margin-top: 4px; }
+:root.canvas .ml-subject { font: 400 13px/19px var(--font-body); }
+:root.canvas .td-box { border-radius: 1px; border-width: 1px; border-color: var(--ink-4); }
+:root.canvas .td-row.waits .td-text { color: #FFE2B0; }
+:root.canvas .cp-text { font: 400 13px/19px var(--font-body); }
+:root.canvas .cp-row.waits .cp-text { color: #FFE2B0; }
+:root.canvas .ch-bars { gap: 9px 12px; }
+:root.canvas .ch-l { color: var(--ink-2); font: 400 13px/19px var(--font-body); }
+:root.canvas .ch-tr { height: 12px; border-radius: 0; background: #0B1B20; }
+:root.canvas .ch-fl { border-radius: 0; background: #1B6E80; }
+:root.canvas .ch-fl.hot { background: var(--holo); box-shadow: 0 0 10px rgba(var(--g), .8); }
+:root.canvas .ch-v { color: #E6FBFF; font: 500 13px/19px var(--font-mono); }
+:root.canvas .delta { margin-top: auto; padding-top: 8px; color: var(--ink-3); font: 400 13px/19px var(--font-body); }
+:root.canvas .delta-lead { color: var(--c-hi); font: 600 13px/19px var(--font-body); }
+:root.canvas #board .frame > .f-body:has(> .delta) { display: flex; flex-direction: column; }
+:root.canvas .tb th { color: var(--ink-4); font: 500 10px/13px var(--font-mono); letter-spacing: .16em; }
+:root.canvas .tb td { font: 400 13px/19px var(--font-body); }
+:root.canvas .tb td:not(:first-child) { font-family: var(--font-mono); font-weight: 500; }
+:root.canvas .tb tr.hot td { background: rgba(var(--g), .1); }
+:root.canvas .tb-src { color: var(--ink-4); }
+:root.canvas .tl-o { background: #020a0d; }
+:root.canvas .tl-words { font: 400 13px/18px var(--font-body); }
+:root.canvas .mx-ans { border-radius: 1px; border-color: var(--c-hi); background: rgba(var(--g), .1); box-shadow: 0 0 10px rgba(var(--g), .3); }
+:root.canvas .mx-k { color: var(--ink-3); }
+:root.canvas .f-pic { margin-top: 0; border: 0; border-radius: 0; background: #0A1418; }
+:root.canvas #board .frame > .f-body:has(> .pic-slot) { display: flex; flex-direction: column; }
+:root.canvas #board .frame .pic-slot { flex: 1 1 auto; min-height: 0; overflow: hidden; border: 1px solid rgba(var(--g-hi), .3); background: #0A1418; }
+:root.canvas #board .frame .pic-slot .f-pic { width: 100%; height: 100%; object-fit: cover; object-position: top left; }
+:root.canvas .pic-cap { flex: none; margin-top: 9px; }
+:root.canvas .pic-host { color: #E6FBFF; font: 400 13px/19px var(--font-body); }
+:root.canvas .x-more { color: var(--ink-4); }
+
+/* the big number: the figure large, what it was and is, where it comes from at the frame's foot */
+.nb-fig { margin: 0; color: var(--holo-hi); font: 600 44px/46px var(--font-display); font-variant-numeric: tabular-nums; }
+.nb-text { margin: 6px 0 0; color: var(--ink-3); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.nb-src { margin: 8px 0 0; color: var(--ink-4); overflow-wrap: anywhere; }
+:root.canvas #board .frame > .f-body:has(> .nb-fig) { display: flex; flex-direction: column; align-items: flex-start; }
+:root.canvas .nb-fig {
+  color: #8FEBFF; font: 700 66px/64px var(--font-display); letter-spacing: 0;
+  text-shadow: 0 0 18px rgba(var(--g), .7); white-space: nowrap;
+}
+:root.canvas .nb-text { margin-top: 8px; color: var(--ink-3); font: 400 13px/19px var(--font-body); }
+:root.canvas .nb-src { margin-top: auto; padding-top: 8px; }
+@container frame (max-width: 330px) { :root.canvas .nb-fig { font-size: 52px; line-height: 52px; } }
+
+/* ---- the canvas, part 3: the resting frames. "Waits for your OK" is amber all through (what waits is amber
+   everywhere): each card that waits its kind label in mono over its title, then its one button, Open Approvals.
+   Agents (the mock's frame): each agent's name and state, when it ran and what came of it, when it runs next, an
+   amber line while its proposals wait; at the foot what waits in all and Open Agents. The rows give way to the foot:
+   the button is never cut (the frame says CUT, and Enter shows all of it). ---- */
+.rs-rows { min-width: 0; }
+.rs-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 10px; }
+.rs-waits { min-width: 0; color: var(--amber); overflow-wrap: anywhere; }
+.rs-go[hidden] { display: none; }
+.ap-row {
+  display: grid; grid-template-columns: 10px minmax(0, 1fr); column-gap: 9px; row-gap: 2px; align-items: baseline;
+  padding: 6px 0; border-top: 1px solid var(--line-faint);
+}
+.rs-rows > .ap-row:first-child, .rs-rows > .ag-row:first-child { border-top: 0; padding-top: 0; }
+.ap-dia { width: 9px; height: 9px; color: var(--amber); align-self: center; }
+.ap-kind { min-width: 0; color: var(--amber); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.ap-title { grid-column: 2; min-width: 0; color: var(--amber-tx); font: 400 13px/18px var(--font-body); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.ag-row { padding: 7px 0; border-top: 1px solid var(--line-faint); }
+.ag-top { display: flex; align-items: baseline; gap: 12px; }
+.ag-name { flex: 1 1 auto; min-width: 0; color: var(--ink-1); font: 500 13px/18px var(--font-body); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.ag-state { flex: none; color: var(--holo-hi); }
+.ag-row.paused .ag-state, .ag-row.off .ag-state { color: var(--ink-4); }
+.ag-row.off .ag-name { color: var(--ink-3); }
+.ag-when { margin: 3px 0 0; color: var(--ink-4); overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.ag-wait { display: flex; align-items: center; gap: 7px; margin: 4px 0 0; color: var(--amber); }
+.ag-dia { flex: none; width: 9px; height: 9px; color: var(--amber); }
+:root.canvas #board .frame > .f-body:has(> .rs-foot), :root.canvas .big-card > .f-body:has(> .rs-foot) {
+  display: flex; flex-direction: column;
+}
+:root.canvas .f-body > .rs-rows { flex: 0 1 auto; min-height: 0; overflow: hidden; }
+:root.canvas #board .frame.cut > .f-body > .rs-rows {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent 100%);
+}
+:root.canvas #board .frame.cut > .f-body:has(> .rs-foot) { -webkit-mask-image: none; mask-image: none; }
+:root.canvas #board .frame.cut:has(.rs-foot) > .f-cut { bottom: 50px; }    /* over the rows' faded end */
+:root.canvas .big-card .f-body > .rs-rows { overflow: visible; }
+:root.canvas .rs-foot { flex: none; margin-top: auto; padding-top: 10px; }
+:root.canvas .rs-waits { font: 500 10px/13px var(--font-mono); letter-spacing: .16em; text-transform: uppercase; }
+:root.canvas .rs-go.need {
+  border-color: var(--amber); color: var(--amber-hi); background: rgba(var(--ga), .05); box-shadow: 0 0 8px rgba(var(--ga), .35);
+}
+:root.canvas .rs-go.need:hover { border-color: #FFE2B0; color: #FFE9C7; background: rgba(var(--ga), .14); }
+:root .frame.needs.waits > .f-wait, :root .frame.needs.waits .f-wait { display: none; }
+:root.canvas .ap-kind, :root.canvas .ag-when, :root.canvas .ag-wait, :root.canvas .ag-state { font: 500 10px/13px var(--font-mono); letter-spacing: .16em; text-transform: uppercase; }
+:root.canvas .ap-title { color: #FFE2B0; font: 400 13px/19px var(--font-body); }
+:root.canvas .ag-name { color: #fff; font: 400 13px/19px var(--font-body); }
+:root.canvas .ag-row.off .ag-name { color: var(--ink-3); }
+:root.canvas .ag-state { color: var(--c-hi); }
+:root.canvas .ag-row.paused .ag-state, :root.canvas .ag-row.off .ag-state { color: var(--ink-4); }
+:root.canvas .big-card .ap-title, :root.canvas .big-card .ag-name { font-size: 15px; line-height: 23px; }
+
+/* ---- an arriving frame boots (board.js boot: --d is its place in the stagger): the outline draws itself from the
+   top left corner, the ground and the glow come in behind it, a scan line wipes down, the content rises behind the
+   line, the corner ticks stand for a moment, bars grow a little past their end. Calm: 1.6 times slower, no overshoot,
+   no rise. Off: nothing of this runs (the frame is there at once). ---- */
+:root.canvas #board .frame.boot {
+  animation:
+    boot-ground calc(240ms * var(--k)) var(--ease-out) calc(var(--d, 0ms) + 200ms * var(--k)) both,
+    boot-edge calc(160ms * var(--k)) linear calc(var(--d, 0ms) + 400ms * var(--k)) both;
+}
+@keyframes boot-ground { from { background-color: rgba(3, 10, 13, 0); } }
+@keyframes boot-edge { from { border-color: transparent; } }
+:root.canvas #board .frame.boot::before { animation: show calc(300ms * var(--k)) var(--ease-out) calc(var(--d, 0ms) + 380ms * var(--k)) both; }
+:root.canvas #board .frame.boot .fx-outline {
+  display: block; animation: relax calc(220ms * var(--k)) linear calc(var(--d, 0ms) + 440ms * var(--k)) forwards;
+}
+:root.canvas #board .frame.boot .fx-outline rect {
+  rx: 1px; stroke: #fff; stroke-width: 1.4;
+  animation: trace calc(420ms * var(--k)) cubic-bezier(.55, 0, .2, 1) var(--d, 0ms) both;
+}
+:root.canvas #board .frame.waits.boot .fx-outline rect { stroke: #FFE2B0; }
+:root.canvas #board .frame.boot .fx-tick { animation: tick-stand calc(760ms * var(--k)) linear calc(var(--d, 0ms) + 320ms * var(--k)) both; }
+@keyframes tick-stand { 0% { opacity: 0; } 8%, 70% { opacity: 1; } 100% { opacity: 0; } }
+:root.canvas #board .frame .fx-scanbox { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+:root.canvas #board .frame.boot .fx-scanbox { display: block; }
+.fx-scan {
+  position: absolute; left: 0; right: 0; top: 0; height: 100%; transform: translateY(-100%);
+  background: linear-gradient(to bottom, transparent calc(100% - 72px), rgba(var(--g), .2) calc(100% - 2px), #fff calc(100% - 2px), #fff 100%);
+}
+:root.canvas .frame.waits .fx-scan {
+  background: linear-gradient(to bottom, transparent calc(100% - 72px), rgba(var(--ga), .22) calc(100% - 2px), #FFE2B0 calc(100% - 2px), #FFE2B0 100%);
+}
+:root.canvas #board .frame.boot .fx-scan { animation: scan calc(540ms * var(--k)) cubic-bezier(.45, 0, .25, 1) calc(var(--d, 0ms) + 200ms * var(--k)) both; }
+@keyframes scan { 0% { transform: translateY(-100%); opacity: 1; } 88% { opacity: 1; } 100% { transform: translateY(0); opacity: 0; } }
+:root.canvas #board .frame.boot > .f-head, :root.canvas #board .frame.boot > .f-body,
+:root.canvas #board .frame.boot > .f-wait, :root.canvas #board .frame.boot > .f-sat,
+:root.canvas #board .frame.boot > .f-cut {
+  animation: rise calc(240ms * var(--k)) var(--ease-out) calc(var(--d, 0ms) + 260ms * var(--k)) both;
+}
+:root.canvas.motion-calm #board .frame.boot > .f-head, :root.canvas.motion-calm #board .frame.boot > .f-body,
+:root.canvas.motion-calm #board .frame.boot > .f-wait, :root.canvas.motion-calm #board .frame.boot > .f-sat,
+:root.canvas.motion-calm #board .frame.boot > .f-cut { animation-name: show; }
+:root.canvas #board .frame.boot .ch-fl, :root.canvas #board .frame.boot .cal-span {
+  animation: bar-grow calc(640ms * var(--k)) cubic-bezier(.3, 1.5, .5, 1) calc(var(--d, 0ms) + 340ms * var(--k)) both;
+}
+:root.canvas #board .frame.boot .cal-span { transform-origin: 0 50%; }
+:root.canvas.motion-calm #board .frame.boot .ch-fl, :root.canvas.motion-calm #board .frame.boot .cal-span { animation-timing-function: cubic-bezier(.33, 1, .68, 1); }
+/* the heading decodes (board.js decode): its real words keep its size and its name, unseen, under the letters settling */
+:root.canvas .f-title.decoding { color: transparent; }
+:root.canvas .frame.waits .f-title.decoding { color: transparent; }
+.d-fx { position: absolute; left: 0; top: 0; right: 0; color: #fff; }
+:root.canvas .frame.waits .d-fx { color: #FFE2B0; }
+
+/* ---- the task card (what Jarvis is doing while he works) and a group's head tile: one element - the card shrinks
+   to the head of its answer's frames (board.js makeHead, HANDLERS.task) ---- */
+.task { display: none; }
+:root.canvas .task {
+  position: absolute; left: 0; top: 0; z-index: 1; display: flex; flex-direction: column; min-width: 0; overflow: hidden;
+  padding: 16px 18px 12px; border: 1px solid rgba(175, 240, 255, .9); border-radius: 1px;
+  background: rgba(3, 10, 13, .92); color: var(--c-ink);
+  box-shadow: 0 0 18px rgba(var(--g), .35), inset 0 0 24px rgba(var(--g), .08);
+}
+:root.canvas .task.working:not(.unplaced) { visibility: visible; }     /* shown while the board itself is away, too */
+:root.canvas .task.away { display: none; }
+:root.canvas .task.leaving { pointer-events: none; }
+.t-hd { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; min-width: 0; }
+.t-h {
+  margin: 0; min-width: 0; color: #fff; font: 700 30px/32px var(--font-display); letter-spacing: .01em;
+  text-transform: uppercase; overflow-wrap: anywhere; unicode-bidi: plaintext;
+}
+.t-time { flex: none; color: var(--c-hi); }
+.t-words { margin-top: 10px; color: #D8F3F8; white-space: normal; overflow-wrap: anywhere; }
+.t-blocks { display: flex; gap: 3px; margin: 14px 0 12px; }
+.t-blocks i { flex: 1; height: 9px; background: #1A3A44; }
+.t-blocks i.on { background: #fff; box-shadow: 0 0 8px rgba(var(--g-hi), .9); animation: block-on calc(320ms * var(--k)) cubic-bezier(.3, 1.6, .5, 1) both; }
+.t-blocks i.next { background: #3F7482; }                 /* the step he is on (still: nothing here moves by itself) */
+@keyframes block-on { from { transform: scaleY(.25); } }
+:root.motion-calm .t-blocks i.on { animation-timing-function: var(--ease-out); }
+:root.motion-off .t-blocks i.on { animation: none; }
+.t-ft { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 24px; margin-top: auto; }
+.t-counts { min-width: 0; white-space: normal; }
+.task .c-btn[hidden] { display: none; }
+:root.canvas .task.head {
+  flex-direction: row; align-items: center; justify-content: space-between; gap: 14px; padding: 0 12px 0 15px; z-index: 0;
+  border-color: rgba(143, 235, 255, .34); background: rgba(3, 10, 13, .55); box-shadow: none;
+}
+:root.canvas .task.head .t-hd { flex: 0 1 auto; justify-content: flex-start; gap: 10px; }
+:root.canvas .task.head .t-h {
+  font: 700 13px/16px var(--font-display); letter-spacing: .08em; color: var(--c-hi);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+:root.canvas .task.head .t-time { color: var(--c-dim); }
+:root.canvas .task.head .t-words, :root.canvas .task.head .t-blocks, :root.canvas .task.head .c-btn { display: none; }
+:root.canvas .task.head .t-ft { flex: none; min-height: 0; margin: 0; }
+:root.canvas .task.head .t-counts { white-space: nowrap; }
+
+/* ---- Clear view: each frame folds to a bright line that the orb draws in (board.js drawIntoOrb); Bring back lets
+   them out again. The row that offers it stands over the caption's strip. ---- */
+.fx-line { display: none; }
+:root.canvas .fx-line {
+  display: block; position: absolute; z-index: 6; height: 2px; opacity: 0; pointer-events: none; background: #fff;
+  box-shadow: 0 0 10px 2px rgba(var(--g-hi), .95), 0 0 26px 6px rgba(var(--g), .5);
+}
+:root.canvas .fx-line.amber { background: #FFE2B0; box-shadow: 0 0 10px 2px rgba(var(--ga), .95), 0 0 26px 6px rgba(var(--ga), .5); }
+:root.canvas .cleared-row {
+  position: absolute; left: 50%; bottom: 4px; z-index: 4; transform: translateX(-50%); min-height: 0;
+  gap: 12px; padding: 7px 8px 7px 14px; border: 1px solid rgba(var(--g-hi), .6); border-radius: 1px;
+  background: rgba(3, 10, 13, .94); box-shadow: 0 0 12px rgba(var(--g), .25);
+  color: #D8F3F8; font: 500 10px/13px var(--font-mono); letter-spacing: .16em; text-transform: uppercase; white-space: nowrap;
+}
+:root.canvas .cleared-row > .glyph { display: none; }
+:root.canvas .cr-count { color: var(--c-dim); }
+:root.canvas .cleared-row .f-act { margin-left: 4px; height: auto; padding: 5px 9px; font-size: 10px; }
+:root.canvas.board-off .cleared-row.shown { visibility: visible; }
+
+/* ---- a parked answer: "New answer · Show" over the frames' top edge ---- */
+:root.canvas #pill { left: 0; right: 0; top: 6px; }
+:root.canvas .pill-btn {
+  height: auto; padding: 0 0 0 12px; border: 1px solid var(--c-hi); border-radius: 1px; background: rgba(3, 10, 13, .96);
+  color: #fff; font: 500 10px/13px var(--font-mono); letter-spacing: .16em; text-transform: uppercase;
+  box-shadow: 0 0 14px rgba(var(--g), .45);
+}
+:root.canvas .pill-show { padding: 7px 10px; border-left-color: rgba(var(--g-hi), .5); font: inherit; letter-spacing: inherit; color: var(--c-hi); }
+
+/* ---- open big on the canvas: the mock's frame, larger. The canvas under it dims at once (a fade of the whole
+   screen under the growing frame cost a third of the frame rate, measured) ---- */
+:root.canvas #board, :root.canvas #canvas, :root.canvas #pill { transition: none; }
+:root.canvas .frame.big-card { padding: 20px 24px 0; border-color: #fff; box-shadow: none; }
+:root.canvas .frame.big-card::before { box-shadow: 0 0 30px 2px rgba(var(--g), .45), inset 0 0 40px rgba(var(--g), .08); }
+:root.canvas .frame.big-card.waits { border-color: #FFE2B0; }
+:root.canvas .frame.big-card.waits::before { box-shadow: 0 0 30px 2px rgba(var(--ga), .5), inset 0 0 40px rgba(var(--ga), .08); }
+:root.canvas .big-card .f-title { font-size: 26px; line-height: 30px; }
+:root.canvas .big-card > .f-head { margin-bottom: 14px; }
+:root.canvas .big-card > .f-body { font: 400 15px/23px var(--font-body); color: var(--ink-2); }
+:root.canvas .big-card .mt-text { -webkit-line-clamp: unset; line-clamp: unset; display: block; overflow: visible; }
+:root.canvas .big-card .cal-title, :root.canvas .big-card .tx-text, :root.canvas .big-card .td-text,
+:root.canvas .big-card .mt-sender, :root.canvas .big-card .ml-sender, :root.canvas .big-card .ml-subject { font-size: 15px; line-height: 23px; }
+:root.canvas .big-card .nb-fig { font-size: 120px; line-height: 116px; }
+:root.canvas .big-card > .f-wait { margin-top: 14px; }
+:root.canvas .f-back { color: var(--c-hi); border-top-color: rgba(var(--g-hi), .2); }
+
+/* the states that take a whole frame's contents away come last: nothing above shows through them */
+:root.canvas #board .frame.away, :root.canvas #board .frame.over { display: none; }
+:root.canvas #board .frame.closed { padding: 0; background: transparent; border-color: transparent; }
+:root.canvas #board .frame.closed::before, :root.canvas #board .frame.closed::after { display: none; }
+:root.canvas #board .frame.closed > :not(.f-closed), :root.canvas #board .frame.sat > :not(.f-sat) { display: none; }
+:root.canvas #board .frame.closed > .f-closed { display: flex; }

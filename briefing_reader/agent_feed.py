@@ -19,12 +19,20 @@ only:
   they take no keyboard, the bar's words never reach them (agent.runner), a click passes the app's guards and a card
   that has only just appeared - or has just come up with the HUD - does not take one yet. Words typed at one are told
   it needs a click, and how to reach it (``clickNeeded``), and so is a card asked for while the HUD is away.
+* the Send card (a task filling in a page, agent.drive): SEND ON <host>?, what Jarvis wants to press, every value he
+  put into the page exactly as it goes (label, then the value whole), a value from the owner's mail, files or calendar
+  and a form going anywhere but the page's own site tagged in amber, what the page set itself, the note that only a
+  click sends, and Don't and Send. Click only, as the firewall's: the bar's words never answer it, and a Stop
+  withdraws it (a late click does nothing).
 * one that times out goes, with words saying so.
 * a card of file steps (propose_files) is the desktop's own, with its own guards, journal and Undo: here the panel only
   says WAITING, in amber, until the owner's click starts its batch, and then that it is at work, until its end. It counts
   in "N need your OK" as it always does. On no screen does that card have the room with the watch window beside the
   panel, and the task is resting anyway, so the window is off the screen until the card's end; the panel's Show brings
   it back at once, and the owner's own Hide still holds after.
+
+A task that may fill in pages has Pause on its panel (Resume while paused): every web and drive call is held meanwhile,
+the seal with it (agent.runner.AgentRun.pause_drive), and Resume tells the model it may carry on.
 
 While the plan's limit holds the task nothing thinks and nothing is for the owner to decide: the orb rests, and the state
 word and the panel's header say WAITING, never in amber, on the bar and in the window's header (``limitPaused``).
@@ -53,11 +61,12 @@ from PySide6.QtCore import QObject, QTimer
 
 from . import holo, hud, hud_overlay
 from . import orb as orb_mod
+from .agent import drive as agent_drive
 from .agent import firewall as agent_firewall
 from .agent import runner as agent_runner
 from .agent.tools import OUTCOME_DONE, OUTCOME_FAILED, OUTCOME_PARTIAL, STEP_DOING, STEP_DONE, STEP_FAILED
 from .hotkey import describe_combo
-from .hud_overlay import CardButton, PanelContent, PlanRow, TaskContent, TaskRow
+from .hud_overlay import CardButton, PanelContent, PlanRow, TaskContent, TaskField, TaskRow
 from .persona import sentences, with_address
 from .settings_view import effective_hud_key
 
@@ -86,20 +95,26 @@ QUESTION_NOTE = "Or type your answer in the bar. Jarvis never needs a password o
 QUESTION_FREE_NOTE = "Type your answer in the bar. Jarvis never needs a password or a code."
 CLICK_ONLY_NOTE = "Only a click answers this."
 ALLOW_TEXT, DONT_TEXT = agent_firewall.WEB_ALLOW, agent_firewall.WEB_DONT
+SEND_TEXT, DONT_SEND_TEXT = agent_runner.SUBMIT_SEND_WORD, agent_runner.SUBMIT_DONT_WORD
+DEST_TAG = "check where it goes"         # the Send card: a form going elsewhere, unencrypted, or where it can't be seen
+PAUSED_ACTIVITY = "Paused - Resume carries on"
 DONE_TEXT = "Done"
 DONE_KEY = "done"
 EXPIRED_WORDS = {agent_runner.Q_TASK: "No answer came, so that question went, {sir}.",
                  agent_runner.Q_KEEP_GOING: "No answer came, so the task stops here, {sir}.",
                  agent_runner.Q_RESUME: "No answer came, so the task stops here, {sir}.",
                  agent_runner.Q_WEB: "No answer came, so Jarvis left that out, {sir}. The task goes on.",
-                 agent_runner.Q_CARD: "No answer came, so nothing was changed, {sir}. The task goes on."}
+                 agent_runner.Q_CARD: "No answer came, so nothing was changed, {sir}. The task goes on.",
+                 agent_runner.Q_SUBMIT: "No answer came, so nothing was sent, {sir}. The task goes on."}
 # Words came while only a click can answer: what came of them, and that the click is what counts.
 _NO_CLICK_WORDS = "Only a click answers that card, {sir}, and none came, so the task stops here."
 EXPIRED_TYPED_WORDS = {agent_runner.Q_KEEP_GOING: _NO_CLICK_WORDS, agent_runner.Q_RESUME: _NO_CLICK_WORDS,
                        agent_runner.Q_WEB: "Only a click allows that, {sir}, and none came, so Jarvis left it out. "
                                            "The task goes on.",
                        agent_runner.Q_CARD: "Only a click carries that out, {sir}, and none came, so nothing was changed. "
-                                            "The task goes on."}
+                                            "The task goes on.",
+                       agent_runner.Q_SUBMIT: "Only a click sends that, {sir}, and none came, so nothing was sent. "
+                                              "The task goes on."}
 # (One sentence, of about 85 characters at most: all the window's status line and Home's caption show at once.)
 CLICK_LEADS = {"sent": "Passed on, {sir}, but", "held": "Held for now, {sir}, but"}
 CLICK_ON_THE_HUD = "only a click answers that card."
@@ -256,6 +271,8 @@ class TaskFeed(QObject):
             panel.shapeChanged.connect(self._place)
             buttons.stopClicked.connect(self._on_stop)
             buttons.showClicked.connect(self._on_show_window)
+            buttons.pauseClicked.connect(self._on_pause)
+            buttons.resumeClicked.connect(self._on_resume)
         self._render()
         self.overlay.set_feed_shown(True)
         self._tick.start()
@@ -331,7 +348,7 @@ class TaskFeed(QObject):
         else:
             tone = hud_overlay.TONE_AMBER if self._waiting else hud_overlay.TONE_CYAN
             head = self._head()
-        buttons.set_buttons(self._running, self.agent.window_hidden(), tone)
+        buttons.set_buttons(self._running, self.agent.window_hidden(), tone, self._pause_button())
         panel.set_panel(PanelContent(head, tone, self._rows(), self._activity))
         self._place()
         if self.overlay.is_shown() and (panel.isHidden() or buttons.any_shown() == buttons.isHidden()):
@@ -424,6 +441,29 @@ class TaskFeed(QObject):
             logger.info("Task feed: Esc in the bar")
             self.agent.stop("esc")
 
+    def _pause_button(self) -> str:
+        """Which of Pause and Resume the panel shows ("": neither, a task that fills in no pages)."""
+        can = getattr(self.agent, "can_pause", None)
+        if not self._running or not callable(can) or not can():
+            return ""
+        return "resume" if self.agent.paused() else "pause"
+
+    def _on_pause(self) -> None:
+        """Pause: the task's web and drive calls are held (what it typed stays sealed in its window)."""
+        if self._running and self.agent.pause():
+            logger.info("Task feed: Pause was clicked")
+            if not self._waiting:
+                self._quiet.stop()
+                self._activity = PAUSED_ACTIVITY
+            self._render()
+
+    def _on_resume(self) -> None:
+        if self._running and self.agent.resume():
+            logger.info("Task feed: Resume was clicked")
+            if not self._waiting:
+                self._activity = THINKING_ACTIVITY
+            self._render()
+
     def _on_show_window(self) -> None:
         self.agent.set_window_hidden(False)
         self._render()
@@ -477,6 +517,8 @@ class TaskFeed(QObject):
                             for index, choice in enumerate(question.choices))
             return TaskContent(QUESTION_KICKER, question.text, amber, buttons,
                                QUESTION_NOTE if buttons else QUESTION_FREE_NOTE)
+        if question.kind == agent_runner.Q_SUBMIT:
+            return TaskFeed._send_content(question)
         if question.kind == agent_runner.Q_WEB:
             return TaskContent(OK_KICKER, question.text, amber,
                                (CardButton(f"{CHOICE_KEY}1", DONT_TEXT, holo.AMBER_GHOST),
@@ -485,6 +527,26 @@ class TaskFeed(QObject):
         return TaskContent(OK_KICKER, question.text, amber, (CardButton(f"{CHOICE_KEY}1", stop, holo.AMBER_GHOST),
                                                              CardButton(f"{CHOICE_KEY}0", go, holo.AMBER_COMMIT)),
                            CLICK_ONLY_NOTE)
+
+    @staticmethod
+    def _send_content(question: Any) -> TaskContent:
+        """The Send card from its lines (agent.drive.CardLine): every value exactly as it goes, Don't and Send."""
+        fields: list[TaskField] = []
+        note = agent_drive.SEND_NOTE
+        for line in question.lines:
+            kind = getattr(line, "kind", "")
+            if kind in (agent_drive.L_VALUE, agent_drive.L_PAGE_VALUE):   # a value the page set: whole too
+                fields.append(TaskField(line.text, line.value, line.tag, bool(line.amber)))
+            elif kind == agent_drive.L_DEST:
+                fields.append(TaskField("", line.text, DEST_TAG if line.amber and line.text != agent_drive.NO_FORM_DEST
+                                        else "", bool(line.amber)))
+            elif kind == agent_drive.L_PAGE_SET:
+                fields.append(TaskField("", line.text, "", bool(line.amber)))
+            elif kind == agent_drive.L_NOTE:
+                note = line.text
+        return TaskContent(question.kicker or OK_KICKER, question.text, hud_overlay.TONE_AMBER,
+                           (CardButton(f"{CHOICE_KEY}1", DONT_SEND_TEXT, holo.AMBER_GHOST),
+                            CardButton(f"{CHOICE_KEY}0", SEND_TEXT, holo.AMBER_COMMIT)), note, fields=tuple(fields))
 
     def _on_question_gone(self, question: Any) -> None:
         """Answered, or it moved on: the card goes, and the panel is cyan again."""
@@ -502,7 +564,8 @@ class TaskFeed(QObject):
             self._drop_card()
         if self._running:
             self._at_rest_or_thinking()
-            self._activity = agent_runner.LIMIT_ACTIVITY if self._limit_held else THINKING_ACTIVITY
+            self._activity = (agent_runner.LIMIT_ACTIVITY if self._limit_held
+                              else PAUSED_ACTIVITY if self._pause_button() == "resume" else THINKING_ACTIVITY)
             self._sync_chip()
             self._render()
 
@@ -590,6 +653,8 @@ class TaskFeed(QObject):
             return
         if question.kind == agent_runner.Q_WEB:
             choice = ALLOW_TEXT if index == 0 else DONT_TEXT
+        elif question.kind == agent_runner.Q_SUBMIT:
+            choice = SEND_TEXT if index == 0 else DONT_SEND_TEXT
         elif 0 <= index < len(question.choices):
             choice = question.choices[index]
         else:

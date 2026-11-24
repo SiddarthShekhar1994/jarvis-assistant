@@ -66,6 +66,7 @@ from types import ModuleType
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+from . import atomic
 from .format_chars import invisible_char
 from .models import DIVIDER, HEADING, PARAGRAPH, FlatLine
 
@@ -81,15 +82,19 @@ SHARE = "share"       # a Drive access request
 SLACK = "slack"       # answer a Slack message
 TODO = "todo"         # something due, optionally with a calendar block to work on it
 OPEN = "open"         # a page to look at
+# Stop a mailing list's mail (mail extras): Jarvis tells the list's own server once, by the message's List-Unsubscribe
+# header (RFC 8058 one-click). Only Ask proposes it, for a message it was shown; Jarvis builds the card from the header
+# (make_unsubscribe), never from a line.
+UNSUBSCRIBE = "unsubscribe"
 UNKNOWN = "unknown"
-STRUCTURED_KINDS = frozenset({REPLY, EMAIL, RSVP, MOVE, CANCEL, SHARE, SLACK, TODO, OPEN})
+STRUCTURED_KINDS = frozenset({REPLY, EMAIL, RSVP, MOVE, CANCEL, SHARE, SLACK, TODO, OPEN, UNSUBSCRIBE})
 # Calendar kinds that act at once on Approve and whose Undo reverses exactly Jarvis's change for
 # 10 minutes (delete the created event, put the answer back, move the event back).
 UNDO_KINDS = frozenset({CALENDAR, TODO, RSVP, MOVE})
 # Kinds Google tells other people about at once (an email, guests told of a cancellation): the card
 # shows "Sent" / "Cancelled" with Undo at once and the real call waits a hidden hold ([actions]
 # undo_seconds); Undo during the hold sends nothing.
-HOLD_KINDS = frozenset({CANCEL, REPLY, EMAIL})
+HOLD_KINDS = frozenset({CANCEL, REPLY, EMAIL, UNSUBSCRIBE})   # an Unsubscribe tells a third party once, for good
 # Kinds Jarvis carries out after Approve: "running" is saved right before the one call; never retried
 # by itself (executor.run_action).
 CARRIED_KINDS = UNDO_KINDS | HOLD_KINDS
@@ -106,9 +111,19 @@ BUILTIN_LINK_HOSTS = ("mail.google.com", "docs.google.com", "drive.google.com",
                       "calendar.google.com", "meet.google.com", "*.slack.com", "*.instructure.com")
 DEFAULT_HEADINGS = ("Proposed actions",)
 DEFAULT_DURATION = timedelta(minutes=60)
-# Who proposed a card (ProposedAction.source): the briefing page, or Ask Jarvis (briefing_reader.ask).
+# Who proposed a card (ProposedAction.source): the briefing page, Ask Jarvis (briefing_reader.ask), or a
+# standing agent or rule (briefing_reader.standing: a run that happened on its own, maybe while Jarvis was closed).
 SOURCE_BRIEFING = "briefing"
 SOURCE_ASK = "ask"
+SOURCE_STANDING = "standing"
+# A capture (briefing_reader.capture): a picture, PDF, text or calendar file the owner dropped or pasted and then
+# clicked "Read it" on. Its cards have mode MODE_CAPTURE.
+SOURCE_CAPTURE = "capture"
+MODE_CAPTURE = "capture"
+# A standing card's mode (ProposedAction.mode): which kind of standing job proposed it.
+MODE_STANDING_AGENT = "standing-agent"
+MODE_STANDING_RULE = "standing-rule"
+STANDING_MODES = frozenset({MODE_STANDING_AGENT, MODE_STANDING_RULE})
 
 STATUS_CREATED = "created"   # Approve created the event
 STATUS_EXISTS = "exists"     # Approve found it already on the calendar
@@ -133,6 +148,7 @@ _UNDO_FORWARD = frozenset({STATUS_CREATED, STATUS_EXISTS, STATUS_SENT})
 # A hold Jarvis could not finish before it closed (the next start shows the card as not sent).
 CLOSED_FIRST_MESSAGE = "Not sent - Jarvis closed first"
 CLOSED_FIRST_CANCEL_MESSAGE = "Not cancelled - Jarvis closed first"
+CLOSED_FIRST_UNSUBSCRIBE_MESSAGE = "Not unsubscribed - Jarvis closed first"
 
 _WEEKDAY_SHORT = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _WEEKDAY_LONG = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
@@ -177,8 +193,10 @@ class ProposedAction:
     line, kept in memory only).
 
     ``source`` says who proposed it: the briefing page (SOURCE_BRIEFING, every
-    line of extract_actions) or Ask Jarvis (SOURCE_ASK). It is not part of the
-    id, so the same proposal from both has one id (and one decision).
+    line of extract_actions), Ask Jarvis (SOURCE_ASK) or a standing agent or rule
+    (SOURCE_STANDING). It is not part of the id, so the same proposal from two
+    sources has one id (and one decision). Only a SOURCE_BRIEFING card is the
+    briefing's own: never test for "not Ask" to mean it.
     ``unverified`` holds the recipients of an Ask Reply / Email that you did not
     type yourself (casefolded; memory only): each counts as NEW, even in a
     trusted domain, unless Jarvis sent to it before (recipients.review).
@@ -189,6 +207,9 @@ class ProposedAction:
     ``mode`` marks a card of the productivity bundle's planner modes ("plan":
     a day plan's time block; later "prep" / "nudge"); ``serves`` is a plan
     block's Todo card (that card's id; memory only). Neither is part of the id.
+    ``uid`` is a captured event's UID (the calendar file's own, else one Jarvis
+    made): written into the event as a private property, so a later capture of
+    the same file finds it. Not part of the id.
     """
 
     id: str
@@ -211,11 +232,12 @@ class ProposedAction:
     warnings: tuple[str, ...] = ()             # soft problems, shown as the card's amber note
     structured: bool = False                   # read by the key=value path (errored lines too)
     confirmed: frozenset[str] = frozenset()    # new recipients ticked on the card (casefolded; memory only)
-    source: str = "briefing"                   # SOURCE_BRIEFING or SOURCE_ASK; never part of the id
+    source: str = "briefing"                   # SOURCE_BRIEFING, SOURCE_ASK or SOURCE_STANDING; never in the id
     unverified: frozenset[str] = frozenset()   # Ask recipients you did not type (casefolded; memory only)
     web: bool = False                          # a web research card: its link follows the web rule
-    mode: str = ""                             # MODE_PLAN ("plan"), ...; "" for any other card; not in the id
+    mode: str = ""                             # MODE_PLAN ("plan"), STANDING_MODES, ...; "" for others; not in the id
     serves: str = ""                           # a plan block: the id of the Todo card it serves (memory only)
+    uid: str = ""                              # a captured event's own UID (an .ics UID or Jarvis's); not in the id
 
     @property
     def decidable(self) -> bool:
@@ -334,7 +356,7 @@ class ProposedAction:
         if self.kind != CALENDAR:
             return _describe_structured(self, today)
         parts = _describe_when(self, today)
-        repeat = _repeat_words(self.repeat, today, spoken=False)
+        repeat = self.repeat if self.mode == MODE_CAPTURE else _repeat_words(self.repeat, today, spoken=False)
         return _SEPARATOR.join(part for part in (*parts, repeat) if part)
 
     def spoken(self, today: date | None = None) -> str:
@@ -348,7 +370,8 @@ class ProposedAction:
         if self.kind != CALENDAR:
             return _spoken_structured(self, today)
         title = _spoken_title(self.title)
-        repeat = _repeat_words(self.repeat, today, spoken=True)
+        repeat = (self.repeat.replace(_SEPARATOR, ", ") if self.mode == MODE_CAPTURE
+                  else _repeat_words(self.repeat, today, spoken=True))
         return ", ".join(part for part in (title, *_spoken_when(self, today), repeat) if part)
 
 
@@ -374,10 +397,17 @@ def approve_label(action: ProposedAction) -> str:
         return "Cancel event"
     if action.kind in MAIL_KINDS:
         return SEND_TEXT
+    if action.kind == UNSUBSCRIBE and action.field("method") == UNSUBSCRIBE_ONE_CLICK and action.field("url"):
+        return UNSUBSCRIBE_TEXT
     return ""
 
 
 SEND_TEXT = "Send"
+UNSUBSCRIBE_TEXT = "Unsubscribe"
+UNSUBSCRIBE_ONE_CLICK = "one_click"     # the one method an Unsubscribe card carries out (the others are Email / Open)
+UNSUBSCRIBE_BODY = ("Jarvis tells the sender's server once that you want no more of this list. Undo works only "
+                    "until it goes.")
+ONLY_ASK_UNSUBSCRIBE = "Only Ask can propose unsubscribing"
 ADD_BLOCK_TEXT = "Add block"
 MODE_PLAN = "plan"            # ProposedAction.mode of a day plan's time block (ask.modes.MODE_PLAN)
 MODE_MEETING = "meeting"      # ... of a meeting summary's card: a follow-up or an Add block (ask.modes.MODE_MEETING)
@@ -395,6 +425,7 @@ _SPEECH_NOUNS = {
     SLACK: ("a Slack reply", "Slack replies"),
     TODO: ("a to-do", "to-dos"),
     OPEN: ("a link to check", "links to check"),
+    UNSUBSCRIBE: ("a list to unsubscribe from", "lists to unsubscribe from"),
 }
 
 
@@ -454,6 +485,8 @@ def _structured_target(action: ProposedAction) -> tuple[str, ...]:
         return "", field("team"), field("channel"), field("thread"), field("ts")
     if kind == TODO:
         return "", " ".join(action.title.casefold().split()), field("due")
+    if kind == UNSUBSCRIBE:   # one decision per list (or sender) of an account, whichever message showed it
+        return action.account, (field("list") or field("sender")).casefold()
     return "", action.link   # OPEN
 
 
@@ -470,8 +503,34 @@ def _make_action(kind: str, raw: str, **fields: Any) -> ProposedAction:
     return replace(action, id=_action_id(action))
 
 
+def make_calendar(title: str, *, start: datetime | None = None, end: datetime | None = None,
+                  all_day_start: date | None = None, all_day_end: date | None = None, repeat: str = "",
+                  rrule: str = "", where: str = "", notes: str = "", raw: str = "") -> ProposedAction:
+    """A Calendar proposal Jarvis builds himself (a capture's): its id is made the way a Calendar line's is
+    (kind, title, start, end, all-day, rrule), so the same event captured, asked or briefed has one id and one
+    decision. ``raw`` is the text the card keeps (a Calendar line; "Calendar: <title>" when empty)."""
+    return _make_action(CALENDAR, raw or f"Calendar: {title}", title=title, start=start, end=end,
+                        all_day_start=all_day_start, all_day_end=all_day_end, repeat=repeat, rrule=rrule,
+                        where=where, notes=notes)
+
+
 _KIND_NAMES = {CALENDAR: "Calendar", REPLY: "Reply", EMAIL: "Email", RSVP: "RSVP", MOVE: "Move",
-               CANCEL: "Cancel", SHARE: "Share", SLACK: "Slack", TODO: "Todo", OPEN: "Open"}
+               CANCEL: "Cancel", SHARE: "Share", SLACK: "Slack", TODO: "Todo", OPEN: "Open",
+               UNSUBSCRIBE: "Unsubscribe"}
+
+
+def make_unsubscribe(alias: str, *, thread: str, gmid: str, url: str, sender: str, list_id: str = "",
+                     name: str = "", source: str = SOURCE_ASK, raw: str = "") -> ProposedAction:
+    """An Unsubscribe card Jarvis builds himself from a message's List-Unsubscribe header (unsubscribe.read_headers;
+    one-click only): the account, the thread and message it was read from, the https ``url`` to POST to once, the
+    sender's address and the list's id. Its id is the account and the list (else the sender): one decision per list.
+    ``name``: the list's own words for its headline ("" = the sender)."""
+    shown = " ".join(str(name or "").split())[:80] or sender
+    fields = (("acct", alias), ("thread", thread), ("gmid", gmid), ("method", UNSUBSCRIBE_ONE_CLICK), ("url", url),
+              ("sender", sender), ("list", list_id))
+    return _make_action(UNSUBSCRIBE, raw or f"Unsubscribe: acct={alias} | thread={thread} | gmid={gmid}",
+                        title=f"Unsubscribe from {shown}", account=alias, fields=tuple(f for f in fields if f[1]),
+                        body=UNSUBSCRIBE_BODY, structured=True, source=source)
 
 
 def with_error(action: ProposedAction, message: str) -> ProposedAction:
@@ -524,6 +583,10 @@ def parse_action_line(text: str, *, link_hosts: Sequence[str] = ()) -> ProposedA
     """
     structured = _structured_line(text or "", link_hosts)
     if structured is not None:
+        if structured.kind == UNSUBSCRIBE and not structured.error:
+            # Never carried out from a line (a briefing's, an agent's, a model's): Ask's checks rebuild it from the
+            # message's own header (ask.validate); its fields stay for them.
+            return with_error(structured, ONLY_ASK_UNSUBSCRIBE)
         return structured
     raw = _clean_line(text or "")
     if not raw:
@@ -597,7 +660,7 @@ _MAX_RANGE = timedelta(hours=12)
 
 _STRUCTURED_LABELS = {
     "reply": REPLY, "email": EMAIL, "e mail": EMAIL, "rsvp": RSVP, "move": MOVE, "cancel": CANCEL,
-    "share": SHARE, "slack": SLACK, "todo": TODO, "to do": TODO, "open": OPEN,
+    "share": SHARE, "slack": SLACK, "todo": TODO, "to do": TODO, "open": OPEN, "unsubscribe": UNSUBSCRIBE,
 }
 
 
@@ -634,6 +697,9 @@ _SCHEMAS: dict[str, tuple[_Key, ...]] = {
     TODO: (_Key("title", "title", True), _Key("due", "due", True), _Key("block", "range"),
            _Key("acct", "alias"), _Key("link", "link")),
     OPEN: (_Key("title", "title", True), _Key("link", "link", True)),
+    # Read only so Ask's checks can refuse a line that writes more than acct, thread and gmid (ask.validate).
+    UNSUBSCRIBE: (_Key("acct", "alias", True), _Key("thread", "gmail_id", True), _Key("gmid", "gmail_id", True),
+                  _Key("method", "title"), _Key("url", "title"), _Key("sender", "title"), _Key("list", "title")),
 }
 _KEYS = {kind: frozenset(key.name for key in keys) for kind, keys in _SCHEMAS.items()}
 _BODY_CAPS = {REPLY: _LONG_BODY_CAP, EMAIL: _LONG_BODY_CAP, SLACK: _LONG_BODY_CAP,
@@ -1919,6 +1985,8 @@ def _describe_structured(action: ProposedAction, today: date) -> str:
         parts.append(link_host(action.link))
         if action.web:
             parts += list(WEB_SOURCE_WORDS)
+    elif kind == UNSUBSCRIBE:   # "One-click", the host, the account (the middle dot between them)
+        parts += ["One-click", link_host(field("url")), action.account]
     return _SEPARATOR.join(part for part in parts if part)
 
 
@@ -1953,6 +2021,8 @@ def _spoken_structured(action: ProposedAction, today: date) -> str:
         block = _spoken_when(action, today)
         parts = [_spoken_title(action.title), _spoken_due(action.due(), today),
                  "with a block " + ", ".join(block) if block else ""]
+    elif kind == UNSUBSCRIBE:
+        parts = [_spoken_title(action.title), account]
     else:   # OPEN
         parts = [_spoken_title(action.title)]
     return ", ".join(part for part in parts if part)
@@ -2149,6 +2219,7 @@ RSVP_NOTE_PREFIX = "Note to the organizer: "
 NOTE_NOT_SENT = "The note is not sent with the change (Google Calendar has no message) - Copy it"
 UNKNOWN_CALENDAR = "Unknown: check the calendar before retrying"
 UNKNOWN_MAIL = "Unknown: check Sent mail before retrying"
+UNKNOWN_UNSUBSCRIBE = "Unknown: the list's server did not answer clearly - watch for its next mail"
 SENT_TEXT = "Sent"
 # A Reply with gmid= but no msgid=: without the Message-ID there is no In-Reply-To header.
 NO_MSGID_NOTE = "No Message-ID on this line: the reply joins the thread in Gmail only"
@@ -2157,7 +2228,7 @@ ENCODED_WORD_PROBLEM = ('The subject contains "=?...?=" (an encoded word that ma
 EMPTY_MAIL_PROBLEM = "The message is empty - Edit it first"
 _SENT_TEXTS = {(RSVP, "yes"): "Accepted", (RSVP, "no"): "Declined", (RSVP, "maybe"): "Answered maybe",
                (MOVE, ""): "Moved", (CANCEL, ""): "Cancelled", (REPLY, ""): SENT_TEXT,
-               (EMAIL, ""): SENT_TEXT}
+               (EMAIL, ""): SENT_TEXT, (UNSUBSCRIBE, ""): "Unsubscribed"}
 _ALREADY_TEXTS = {(RSVP, "yes"): "Already accepted", (RSVP, "no"): "Already declined",
                   (RSVP, "maybe"): "Already answered maybe", (MOVE, ""): "Already at that time",
                   (CANCEL, ""): "Already cancelled"}
@@ -2255,6 +2326,19 @@ def copied_text(action: ProposedAction) -> str:
     return _COPIED_TEXTS.get(action.kind, "Copied the text")
 
 
+# Where an approved Calendar card's event goes: always the personal account's calendar (executor.account_of), said in
+# the words the day picture's chip uses ("PERSONAL CALENDAR").
+CALENDAR_TARGET = "Personal calendar"
+
+
+def capture_origin(action: ProposedAction) -> str:
+    """A capture card's source words ("From syllabus.pdf, p. 2": the end of its notes); "" for every other card."""
+    if action.source != SOURCE_CAPTURE or not action.notes:
+        return ""
+    origin = action.notes.rsplit(" - ", 1)[-1]
+    return origin if origin.startswith("From ") else ""
+
+
 def card_view(action: ProposedAction, today: date) -> CardView:
     """Kind label, texts and buttons of ``action``'s card (README: "Other proposals")."""
     label = kind_label(action)
@@ -2270,6 +2354,8 @@ def card_view(action: ProposedAction, today: date) -> CardView:
         parts = [action.describe(today)]
         if action.where and "://" not in action.where:
             parts.append(action.where)
+        parts.append(capture_origin(action))     # a capture's "From syllabus.pdf, p. 2" (build plan item 3)
+        parts.append(CALENDAR_TARGET)            # canvas part 5B (the walk's 21): which calendar it goes to
         return CardView(label, title, _SEPARATOR.join(part for part in parts if part),
                         approve_text=approve_label(action), decidable=True)
     if not action.structured:
@@ -2277,6 +2363,8 @@ def card_view(action: ProposedAction, today: date) -> CardView:
     if not action.decidable:   # a Reply the briefing says was sent already
         return CardView(label, title, ALREADY_REPLIED, open_text=open_text(action))
     detail = action.describe(today)
+    if action.source == SOURCE_CAPTURE:
+        detail = _SEPARATOR.join(part for part in (detail, capture_origin(action)) if part)
     notes = list(action.warnings[:_MAX_WARNINGS_SHOWN])
     if action.web and action.link and idn_host(action.link):
         # In the detail, above Open page (the note is drawn below Deny / Done).
@@ -2309,6 +2397,8 @@ def result_text(action: ProposedAction, status: str) -> str:
     if status == STATUS_SENT:
         return sent_text(action)
     if status == STATUS_UNKNOWN and action.carried:
+        if action.kind == UNSUBSCRIBE:
+            return UNKNOWN_UNSUBSCRIBE
         return UNKNOWN_MAIL if action.kind in MAIL_KINDS else UNKNOWN_CALENDAR
     return ""
 
@@ -2744,7 +2834,8 @@ def _mark_interrupted(entries: dict[str, dict[str, str]]) -> bool:
             count += 1
         elif entry["status"] == STATUS_HELD:
             entry["status"] = STATUS_FAILED
-            entry["message"] = CLOSED_FIRST_CANCEL_MESSAGE if entry.get("kind") == CANCEL else CLOSED_FIRST_MESSAGE
+            entry["message"] = {CANCEL: CLOSED_FIRST_CANCEL_MESSAGE,
+                                UNSUBSCRIBE: CLOSED_FIRST_UNSUBSCRIBE_MESSAGE}.get(entry.get("kind"), CLOSED_FIRST_MESSAGE)
             held += 1
     if count:
         logger.warning("%d action(s) were interrupted; marked unknown", count)
@@ -2766,7 +2857,8 @@ def _write_entries(path: Path, entries: dict[str, dict[str, str]]) -> bool:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(part, path)
+        # Another Jarvis process (a standing check) may be reading it this very moment: retry briefly.
+        atomic.replace(part, path)
         part = None
         return True
     except OSError as exc:

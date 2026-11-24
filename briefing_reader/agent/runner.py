@@ -27,6 +27,12 @@ unless the task is stopping. With no row ended for BATCH_QUIET_MINUTES (card_pro
 stops waiting on it, in true words: the batch is still at work, untouched, and its card has the truth. A choice clicked
 answers, but it is the model's words, so it licenses nothing and clears nothing; words typed are the owner's, and those
 the model asked for, or that plainly hold something private, turn the firewall on for the rest of the run (_typed).
+A Send card waits the same way (Q_SUBMIT: agent.drive's press of a filled-in page), and only a click answers it: voice
+and typed words never do. Send keeps the run waiting while Jarvis, not the model, carries out the press (submit_ended(id,
+outcome) puts what came of it in as the next message); Don't, no click in time and Stop tell the plan no, and its page
+goes with what was typed into it. The owner's Pause (pause_drive) holds every web and drive call ("end your turn") until
+their Resume (resume_drive), which tells the model so; the seal holds meanwhile. The drive caps (agent.drive.DriveCaps:
+pages, page actions, Send cards) ask "Keep going?" exactly as the turn and minute budget does.
 Words typed in answer to ask_owner's question, or the first typed after a line of the model's that asked something (a
 say, its own text or its plan's: guard.line_asks, or one telling the owner to choose), or that only echo what its lines
 said since the owner last typed, are marked so for the firewall (owner_said's ``answer``): they license what they
@@ -34,7 +40,9 @@ say, but ask for nothing at once, for the question was the model's (agent.owner)
 ``result`` with no wait pending and no
 finish gets one prompt to carry on or finish, and after another one the task ends as partial. A message sent mid-run is
 delivered by Claude Code after the running tool returns (``--replay-user-messages`` shows when; a ``result`` while one is
-on its way is not idle). Words typed before the goal has gone in go in right after it, in order.
+on its way is not idle). Words typed before the goal has gone in go in right after it, in order. Each message sent is
+remembered as the owner's or Jarvis's, in order; when the owner's shows as delivered, an E_NOTICE with the code
+C_DELIVERED (and no text) says so (the app: "He has your message").
 
 The budget (agent.policy.Budget): reaching a turn or minute cap asks "Keep going?" through the same seam; tool calls
 then return "end your turn" until the answer. Yes: as much again. No, or no answer: the model is told to report and
@@ -62,6 +70,7 @@ and, for the length of the run, the MCP config (D11).
 
 from __future__ import annotations
 
+import collections
 import itertools
 import logging
 import re
@@ -86,8 +95,10 @@ from ..desktop.backend import real_backend_blocked
 from ..gcal import local_timezone
 from . import policy
 from .endpoint import TOOL_TIMEOUT_S, TOO_LONG_CODE, TOO_LONG_TEXT, Call, Endpoint
-from .tools import (OUTCOME_DONE, OUTCOME_FAILED, OUTCOME_PARTIAL, TOO_LONG_ADDRESS, TOO_LONG_ADDRESS_TEXT, PlanStep,
-                    Registry, RunContext, ToolResult, address_too_long, doing_words, error)
+from . import drive
+from .tools import (OUTCOME_DONE, OUTCOME_FAILED, OUTCOME_PARTIAL, TIER_DRIVE, TIER_WEB, TOO_LONG_ADDRESS,
+                    TOO_LONG_ADDRESS_TEXT, PlanStep, Registry, RunContext, ToolResult, address_too_long, doing_words,
+                    error, submit_message)
 from .workspace import TaskFolder
 
 logger = logging.getLogger(__name__)
@@ -102,6 +113,7 @@ E_STARTED, E_PLAN, E_SAY, E_TOOL_START, E_TOOL_END, E_QUESTION, E_QUESTION_GONE,
 E_LIMIT_GONE = "limit_gone"            # the plan's limit let go (it came as an E_NOTICE with the code LIMIT)
 # Whose question it is (OwnerQuestion.kind).
 Q_TASK, Q_KEEP_GOING, Q_RESUME, Q_WEB, Q_CARD = "task", "keep_going", "resume", "web", "card"
+Q_SUBMIT = "submit"                    # a Send card (agent.drive.SendPlan): only a click on Send sends
 # Why it ended (AgentEnd.code: fixed words, safe to log).
 C_FINISHED, C_STOPPED, C_NO_FINISH, C_NO_ANSWER, C_OWNER_NO, C_MAX_TURNS, C_OVERAGE = (
     "finished", "stopped", "no_finish", "no_answer", "owner_no", "max_turns", "overage")
@@ -111,6 +123,11 @@ C_SERVER_BUSY = SERVER_BUSY            # Claude's server was limiting requests: 
 C_BATCH_QUIET = "batch_quiet"          # E_NOTICE's code: a batch at work has gone quiet
 HELD = "held"                          # a tool result's code: the call was not made, the model is told to end its turn
 WEB_ALLOW_WORD = "Allow"               # the one word on the firewall's card that allows anything
+SUBMIT_SEND_WORD, SUBMIT_DONT_WORD = "Send", "Don't"     # the Send card's; only the first, clicked, sends anything
+SUBMIT_CHOICES = (SUBMIT_SEND_WORD, SUBMIT_DONT_WORD)
+C_OWNER_PAUSED, C_OWNER_RESUMED = "owner_paused", "owner_resumed"      # E_NOTICE's codes: the owner's Pause, Resume
+C_DELIVERED = "delivered"              # E_NOTICE's code (no text): the owner's words reached the model (its replay)
+SENT_OWNER, SENT_JARVIS = "owner", "jarvis"   # whose message went in (the FIFO the replays are matched against)
 STOPPED_CODE = "stopped"
 
 OWNER_LABEL = "The owner says: "
@@ -146,6 +163,20 @@ WEB_UNANSWERED_TEXT = ("Jarvis: the owner did not answer, so that call was not m
 WEB_NO_CLICK_TEXT = ("Jarvis: the owner's words came in, but only a click allows a call and none came, so that call "
                      "was not made. Do not try it again: carry on without it, find another way, or say so in your "
                      "report.")
+SUBMIT_DECLINED_TEXT = ("Jarvis: the owner said no, so nothing was sent. Jarvis closes that page, with what was typed into "
+                        "it, as soon as the window is free; the tabs left show in your next page call. Do not try that "
+                        "send again: carry on without it, or say so in your report.")
+SUBMIT_UNANSWERED_TEXT = ("Jarvis: the owner did not answer the Send card, so nothing was sent. Jarvis closes that page, "
+                          "with what was typed into it, as soon as the window is free; the tabs left show in your next "
+                          "page call. Do not try that send again: carry on without it, or say so in your report.")
+SUBMIT_NO_CLICK_TEXT = ("Jarvis: the owner's words came in, but only a click sends and none came, so nothing was sent. "
+                        "Jarvis closes that page, with what was typed into it, as soon as the window is free; the tabs "
+                        "left show in your next page call. Do not try that send again: carry on without it, or say so "
+                        "in your report.")
+SUBMIT_UNSETTLED_TEXT = ("Jarvis: the owner clicked Send, but the press did not finish in time, so whether it went is not "
+                         "known. Do not press it again: say so in your report.")
+OWNER_PAUSED_TEXT = "The owner paused the task, so that call was not made. End your turn now with one short sentence."
+OWNER_RESUMED_TEXT = "Jarvis: the owner resumed the task. Carry on from where you were."
 CARD_UNANSWERED_TEXT = ("Jarvis: nobody clicked the card in time, so nothing was changed. Do not propose it again: "
                         "carry on without it, or say so in your report.")
 CARD_WAITS_TEXT = ("A card waits for the owner, so the task is not finished yet. End your turn now; what they decide "
@@ -195,6 +226,10 @@ HOW_ALLOWED, HOW_DECLINED, HOW_NO_ANSWER = "You allowed it", "You said no, so it
 HOW_NO_CLICK = "You typed, but no click came"
 HOW_KEEP_GOING, HOW_STOP_HERE, HOW_CARRY_ON = "You said keep going", "You said stop here", "You said carry on"
 HOW_ANSWERED = "You answered"
+HOW_SENT, HOW_NOT_SENT = "You clicked Send", "You said don't, so nothing was sent"
+PAUSED_WORDS = "Paused, {sir}. Nothing more happens in the window until you resume."
+RESUMED_WORDS = "Carrying on, {sir}."
+OWNER_PAUSED_NOTE = "not made: you paused the task"
 HOW_ENDED = "The task ended first"
 HOW_BATCH_QUIET = "It is still at work, and its card has the truth"
 LIMIT_ACTIVITY = "Waiting for your plan's limit to reset"    # the panel's activity line while the limit holds
@@ -220,6 +255,8 @@ class OwnerQuestion:
     text: str = field(repr=False)
     choices: tuple[str, ...] = field(default=(), repr=False)
     typed: bool = False                 # E_QUESTION_GONE with C_NO_ANSWER: words came meanwhile, but only a click counts
+    lines: tuple[Any, ...] = field(default=(), repr=False)   # a Send card's lines (agent.drive.CardLine)
+    kicker: str = field(default="", repr=False)
 
 
 @dataclass(frozen=True)
@@ -271,6 +308,8 @@ class Timing:
     question_s: float = 30 * 60.0       # the owner's answer to a question
     keep_going_s: float = 10 * 60.0     # ... to "Keep going?"
     web_card_s: float = 10 * 60.0       # ... to the firewall's card: then that one call is refused and the task goes on
+    submit_card_s: float = 10 * 60.0    # ... to a Send card: then nothing is sent and its page goes
+    send_s: float = drive.SEND_S + 5.0  # the owner clicked Send: Jarvis's press and what follows, at most this long
     card_s: float = 16 * 60.0           # ... to a file card: its own 15 minutes end first; this only if they did not
     at_work_s: float = BATCH_QUIET_MINUTES * 60.0     # its batch at work: this long with no row ended
     sleep_gap_s: float = 60.0           # this long between two looks at real_clock: the PC slept (_note_sleep)
@@ -318,8 +357,11 @@ class AgentEngine:
 
     def argv(self, ready: Any, allowed: str, mcp_file: Path) -> list[str]:
         assert ready.exe is not None
+        # FILLING IN PAGES reaches only a task offered the drive tools; any other gets the prompt as it always was.
+        drives = (cli.AGENT_TOOL_PREFIX + "list_controls") in allowed.split(",")
         return cli.build_agent_argv(ready.exe.path, model=self.agent.model, effort=self.agent.effort,
-                                    allowed_tools=allowed, mcp_config_file=mcp_file)
+                                    allowed_tools=allowed, mcp_config_file=mcp_file,
+                                    prompt_file=cli.AGENT_DRIVE_PROMPT_FILE if drives else cli.AGENT_PROMPT_FILE)
 
     def env(self) -> dict[str, str]:
         return cli.agent_env(self.base._env_source())
@@ -461,6 +503,9 @@ class AgentRun:
         self._question_ids = itertools.count(1)
         self._idle = False                  # the last result came and nothing has gone in since
         self._unreplayed = 0                # messages sent that have not shown as delivered
+        # Each message sent, in order: (SENT_OWNER / SENT_JARVIS, its text); a replay is matched to it by its text.
+        self._sent_kinds: collections.deque[tuple[str, str]] = collections.deque()
+        self._owner_texts: collections.Counter[str] = collections.Counter()   # the owner's messages not yet sent
         self._replay_since: float | None = None   # a result came while one was on its way
         self._outbox: list[str] = []        # goes in at the next result (or, before the goal has gone in, after it)
         self._goal_sent = False             # the first message has gone in: nothing may go before it
@@ -477,6 +522,10 @@ class AgentRun:
         self._owner_word = False            # since this pause began the owner has clicked, answered or typed (_let_go)
         self._garbage = 0
         self._card_id = ""                  # the file card a Q_CARD wait hangs on
+        self._submit_plan: Any = None       # the Send card's plan a Q_SUBMIT wait hangs on (agent.drive.SendPlan)
+        self._owner_paused = False          # the owner's Pause: web and drive calls are held (pause_drive)
+        caps = getattr(web, "caps", None)
+        self._caps = caps if isinstance(caps, drive.DriveCaps) else None
         self._line_asked = False            # a line of the model's has asked the owner something (_typed)
         self._asked_since = False           # ... since the owner last typed: their next words answer it (owner_says)
         self._model_words: set[str] = set()     # the words of the model's lines since the owner last typed (C3)
@@ -485,7 +534,8 @@ class AgentRun:
                                    on_say=self._tool_say, on_question=self._tool_question, on_finish=self._tool_finish,
                                    web=web, tool_s=timing.tool_s, fetch=fetch, owner=owner, on_card=self._tool_card,
                                    card_gone=self._tool_card_gone, read_words=getattr(firewall, "read_words", None),
-                                   on_shown=self._noted_asking)
+                                   on_shown=self._noted_asking, on_submit=self._tool_submit,
+                                   taint_hits=self._taint_hits_of(firewall))
         attach = getattr(firewall, "attach", None)
         if callable(attach):
             attach(self.ask_web)
@@ -566,7 +616,8 @@ class AgentRun:
         self._finish_run(OUTCOME_STOPPED, C_STOPPED, STOPPED_WORDS)
 
     def owner_says(self, text: str) -> str:
-        """The owner's words while the task runs: "answered" (the question that waits), "sent", "held" (the plan's limit
+        """The owner's words while the task runs: "answered" (the question that waits), "sent" (gone in now), "queued"
+        (behind what waits for the next result, or the goal: they go in with it), "held" (the plan's limit
         holds, or a card waits while it is paused: they go in with the resume, or, with no time given, as that card ends)
         or "refused" (it has ended). Never past what is on its way already, the goal among it: they go in the order they
         were said. They answer the model's question when ask_owner's waits, or when a line of the model's (say, its own
@@ -594,17 +645,19 @@ class AgentRun:
                 wait.typed = True                        # its end says so: never "no answer came"
             if self._paused:
                 if self._limit_holds() or wait is not None:
-                    self._held_owner.append(owner_message(text))     # the resume lets them go; with no time given,
+                    self._held_owner.append(self._owner_message(text))   # the resume lets them go; no time given:
                     self._owner_word = True              # so does the end of the wait that is up (_let_go)
                     if wait is None or wait.at_work:     # (a click awaited: the app says so: agent_ui.take_request)
                         later = HELD_AT_WORK_WORDS if wait is not None and self._paused_until is None else HELD_WORDS
                         self._emit(AgentEvent(E_NOTICE, text=later, code="held"))
                     return "held"
-                self._resume("", [owner_message(text)])  # what waited goes first: the order they were said in
+                self._resume("", [self._owner_message(text)])  # what waited goes first: the order they were said in
             elif self._outbox or not self._goal_sent:
-                self._outbox.append(owner_message(text))  # after what waits for the next result, or the goal: never past it
+                self._outbox.append(self._owner_message(text))  # after what waits for the next result, or the goal
+                logger.info("Agent %s: a message from the owner waits for the next result", self.run_id)
+                return "queued"
             else:
-                self._send(owner_message(text))
+                self._send(self._owner_message(text))
             logger.info("Agent %s: a message from the owner went in", self.run_id)
             return "sent"
 
@@ -614,7 +667,7 @@ class AgentRun:
         with self._lock:
             wait = self._wait
             if wait is None or wait.question.id != question_id or self._end is not None \
-                    or wait.question.kind == Q_CARD:
+                    or wait.question.kind == Q_CARD or wait.at_work:
                 return False
             self._wait = None
             self._owner_word = self._owner_word or self._paused     # a click, or words: the owner's word (_let_go)
@@ -626,6 +679,9 @@ class AgentRun:
                 _tell(wait, allowed)
                 self._deliver(WEB_ALLOWED_TEXT if allowed else WEB_DECLINED_TEXT)
                 self._let_go()
+                return True
+            if question.kind == Q_SUBMIT:
+                self._submit_answered(wait, text == SUBMIT_SEND_WORD)
                 return True
             if text not in question.choices:    # a choice clicked is the model's words: never the owner's own
                 self._typed(text, question.kind)
@@ -643,6 +699,8 @@ class AgentRun:
                 self._resume(RESUME_YES, extra)
             else:
                 self.budget.extend()
+                if self._caps is not None:
+                    self._caps.extend()
                 self._deliver("\n".join([KEEP_GOING_YES, *extra]))
                 self._let_go()
             return True
@@ -706,6 +764,7 @@ class AgentRun:
                 return False
             self._process.send(cli.stream_message(message))
             self._unreplayed += 1
+            self._sent_kinds.append((SENT_JARVIS, message))   # the goal: its replay makes no note
             self._started_at = self._clock()
             self._goal_sent = True
             for waiting in self._take_outbox():          # typed in the first seconds: after the goal, in order
@@ -778,6 +837,8 @@ class AgentRun:
             wait, self._wait = self._wait, None
             if wait is not None:
                 self._emit(AgentEvent(E_QUESTION_GONE, question=wait.question, text=HOW_ENDED))
+                if wait.question.kind == Q_SUBMIT and not wait.at_work:
+                    self._decide_plan(False)           # a Stop: nothing is sent, and the page goes
         if process is not None:
             try:
                 process.kill()
@@ -838,7 +899,13 @@ class AgentRun:
                 return
             wait = self._wait
             if wait is not None:
-                if now >= wait.deadline and wait.at_work:
+                if now >= wait.deadline and wait.at_work and wait.question.kind == Q_SUBMIT:
+                    self._wait = None
+                    self._submit_plan = None
+                    logger.info("Agent %s: an approved send did not finish in time", self.run_id)
+                    self._deliver(SUBMIT_UNSETTLED_TEXT)
+                    self._let_go()
+                elif now >= wait.deadline and wait.at_work:
                     self._batch_went_quiet(wait)
                 elif now >= wait.deadline:
                     self._wait = None
@@ -852,6 +919,9 @@ class AgentRun:
                         self._deliver(WEB_NO_CLICK_TEXT if typed else WEB_UNANSWERED_TEXT)
                     elif wait.question.kind == Q_CARD:
                         self._deliver(CARD_UNANSWERED_TEXT)    # (nobody clicked: true however many words came)
+                    elif wait.question.kind == Q_SUBMIT:
+                        self._decide_plan(False)
+                        self._deliver(SUBMIT_NO_CLICK_TEXT if typed else SUBMIT_UNANSWERED_TEXT)
                     elif typed:
                         self._start_wrap_up(C_NO_CLICK, WRAP_UP_NO_CLICK)
                     else:
@@ -873,7 +943,7 @@ class AgentRun:
                 return
             if self._idle:
                 return
-            reached = self.budget.reached()
+            reached = self._reached()
             if reached:
                 self._ask_keep_going(reached)
 
@@ -885,16 +955,23 @@ class AgentRun:
         if now - self._finished_at >= self.timing.after_finish_s:
             self._end_finished()
 
+    def _reached(self) -> str:
+        """Which of the task's budgets is used up: turns, minutes, or the drive caps' pages, actions or sends."""
+        return self.budget.reached() or (self._caps.reached() if self._caps is not None else "")
+
     def _ask_keep_going(self, reached: str) -> None:
         count, noun = ((self.budget.turns - 1, "turn") if reached == policy.BUDGET_TURNS
                        else (round(self.budget.worked_s / 60), "minute"))
         what = f"{count} {noun}" + ("" if count == 1 else "s")
+        if reached in drive.CAP_WORDS:
+            what = drive.keep_going_words(reached, self._caps)
         logger.info("Agent %s: budget reached (%s)", self.run_id, reached)
         self._ask(Q_KEEP_GOING, KEEP_GOING_WORDS.replace("{what}", what), KEEP_GOING_CHOICES, self.timing.keep_going_s)
 
     def _ask(self, kind: str, text: str, choices: tuple[str, ...], wait_s: float,
-             on_answer: Callable[[bool], None] | None = None) -> None:
-        question = OwnerQuestion(f"{self.run_id}-{next(self._question_ids)}", kind, text, choices)
+             on_answer: Callable[[bool], None] | None = None, lines: tuple[Any, ...] = (), kicker: str = "") -> None:
+        question = OwnerQuestion(f"{self.run_id}-{next(self._question_ids)}", kind, text, choices, lines=lines,
+                                 kicker=kicker)
         self._wait = _Wait(question, self._clock() + wait_s, on_answer)
         logger.info("Agent %s: question %s for the owner", self.run_id, kind)
         self._emit(AgentEvent(E_QUESTION, question=question))
@@ -997,9 +1074,34 @@ class AgentRun:
                               cache_read_tokens=self._cache_read_tokens, cache_write_tokens=self._cache_write_tokens))
 
     def _on_user(self, event: Mapping[str, Any]) -> None:
-        if event.get("isReplay") is True and self._unreplayed > 0:
+        if event.get("isReplay") is not True:
+            return
+        if self._unreplayed > 0:
             self._unreplayed -= 1
             self._replay_since = None
+        if self._replayed(event) == SENT_OWNER:
+            logger.info("Agent %s: a message from the owner was delivered", self.run_id)
+            self._emit(AgentEvent(E_NOTICE, code=C_DELIVERED))
+
+    def _replayed(self, event: Mapping[str, Any]) -> str:
+        """Whose message this replay is (SENT_OWNER / SENT_JARVIS), or "" when it is none still on its way. Matched by
+        its text: those sent before it whose replays never came are passed over (a late replay after the replay wait
+        gave up never stands for a later message). A replay with no text it can read takes the oldest."""
+        if not self._sent_kinds:
+            return ""
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, Mapping) else None
+        if isinstance(content, list):
+            content = "\n".join(block.get("text", "") for block in content
+                                if isinstance(block, Mapping) and block.get("type") == "text")
+        if not isinstance(content, str):
+            return self._sent_kinds.popleft()[0]
+        for index, (_kind, text) in enumerate(self._sent_kinds):
+            if text == content:
+                for _ in range(index):
+                    self._sent_kinds.popleft()
+                return self._sent_kinds.popleft()[0]
+        return ""
 
     def _on_result(self, event: Mapping[str, Any]) -> None:
         usage = event.get("usage") if isinstance(event.get("usage"), Mapping) else {}
@@ -1057,7 +1159,7 @@ class AgentRun:
         if self._wrap_up_code:
             self._end_unreported(self._wrap_up_code)    # told to finish, and it ended its turn without
             return
-        if self._wait is not None or self._paused:
+        if self._wait is not None or self._paused or self._owner_paused:   # (the owner's Resume says carry on)
             self.budget.rest()
             return
         if not self._nudged:
@@ -1072,11 +1174,22 @@ class AgentRun:
         messages, self._outbox = self._outbox, []
         return messages
 
+    def _owner_message(self, text: str) -> str:
+        """The owner's words as they go in, remembered as theirs until sent (whichever queue they wait in)."""
+        message = owner_message(text)
+        self._owner_texts[message] += 1
+        return message
+
     def _send(self, message: str) -> None:
         process = self._process
         if process is None or not process.send(cli.stream_message(message)):
             return
         self._unreplayed += 1
+        if self._owner_texts[message] > 0:
+            self._owner_texts[message] -= 1
+            self._sent_kinds.append((SENT_OWNER, message))
+        else:
+            self._sent_kinds.append((SENT_JARVIS, message))
         self._replay_since = None
         self._idle = False
         self.budget.work()
@@ -1214,13 +1327,16 @@ class AgentRun:
         ends = tool is not None and tool.name == "finish"
         if self._wrap_up_code and not ends:
             return ToolResult(WRAP_UP_TOOL_TEXT, code=HELD, note="the task is stopping")
-        if ends and not self._wrap_up_code and self._wait is not None and self._wait.question.kind == Q_CARD:
+        if ends and not self._wrap_up_code and self._wait is not None and self._wait.question.kind in (Q_CARD,
+                                                                                                    Q_SUBMIT):
             return ToolResult(CARD_WAITS_TEXT, code=HELD, note="a card waits")
         if not ends:
             wait = self._wait
-            if wait is not None and wait.question.kind not in (Q_TASK, Q_WEB, Q_CARD):
+            if wait is not None and wait.question.kind not in (Q_TASK, Q_WEB, Q_CARD, Q_SUBMIT):
                 return ToolResult(PAUSED_TEXT, code=HELD, note=HELD_NOTE)
-            reached = self.budget.reached() if not self._paused else ""
+            if self._owner_paused and tool is not None and tool.tier in (TIER_WEB, TIER_DRIVE):
+                return ToolResult(OWNER_PAUSED_TEXT, code=HELD, note=OWNER_PAUSED_NOTE)
+            reached = self._reached() if not self._paused else ""
             if reached and wait is not None:
                 logger.info("Agent %s: budget reached (%s) while a wait is on; held", self.run_id, reached)
                 return ToolResult(BUDGET_AT_A_WAIT_TEXT, code=HELD, note=BUDGET_HELD_NOTE)
@@ -1269,6 +1385,93 @@ class AgentRun:
                 return False
             self._ask(Q_WEB, text, choices, self.timing.web_card_s, on_answer)
             return True
+
+    @staticmethod
+    def _taint_hits_of(firewall: Any) -> Callable[[str], tuple[str, ...]]:
+        hits = getattr(getattr(firewall, "taint", None), "hits", None)
+        return hits if callable(hits) else (lambda _text: ())
+
+    def _tool_submit(self, plan: Any) -> bool:
+        """A Send card is about to show (any thread): the run waits on it. False when another wait is on, or the task is
+        ending: then no card shows."""
+        with self._lock:
+            if self._wait is not None or self._stop.is_set() or self._finished is not None or self._wrap_up_code:
+                return False
+            self._submit_plan = plan
+            self._ask(Q_SUBMIT, plan.question(), SUBMIT_CHOICES, self.timing.submit_card_s,
+                      lines=tuple(plan.card_lines()), kicker=plan.kicker())
+            return True
+
+    def _decide_plan(self, allowed: bool, report: Callable[[Any], None] | None = None) -> None:
+        """The Send card's plan hears the owner's word (it never blocks: agent.drive carries it out on its own thread)."""
+        plan, self._submit_plan = self._submit_plan, (self._submit_plan if allowed else None)
+        decide = getattr(plan, "decide", None)
+        if callable(decide):
+            try:
+                decide(allowed, report, self._stop.is_set)
+            except Exception as exc:  # noqa: BLE001 - nothing is pressed on an answer that was not heard
+                logger.warning("Agent %s: a Send card's answer was not heard (%s)", self.run_id, type(exc).__name__)
+
+    def _submit_answered(self, wait: _Wait, send: bool) -> None:
+        """Under the lock, the card gone from the screen: Send waits on, at work, for Jarvis's press; Don't tells the
+        model and the page goes."""
+        if not send:
+            self._decide_plan(False)
+            self._deliver(SUBMIT_DECLINED_TEXT)
+            self._let_go()
+            return
+        wait.at_work = True
+        wait.deadline = self._clock() + self.timing.send_s
+        self._wait = wait
+        question_id = wait.question.id
+        self._decide_plan(True, lambda outcome: self.submit_ended(question_id, outcome))
+
+    def submit_ended(self, question_id: str, outcome: Any) -> bool:
+        """What came of the press the owner's Send allowed (agent.drive.SendOutcome, any thread): it goes in as the
+        model's next message. False when nothing waits on it: nothing happens."""
+        with self._lock:
+            wait = self._wait
+            if (wait is None or wait.question.id != question_id or wait.question.kind != Q_SUBMIT or not wait.at_work
+                    or self._end is not None):
+                return False
+            self._wait = None
+            self._submit_plan = None
+            code = getattr(outcome, "code", "")
+            logger.info("Agent %s: an approved send ended (%s)", self.run_id, _plain(code) or "other")
+            message = submit_message(outcome) if isinstance(outcome, drive.SendOutcome) else submit_message(
+                drive.SendOutcome(drive.S_UNKNOWN))
+            read = getattr(self._firewall, "read_words", None)
+            if read is not None and isinstance(outcome, drive.SendOutcome) and outcome.text:
+                read.feed(outcome.text)
+            self._deliver(message)
+            self._let_go()
+            return True
+
+    def pause_drive(self) -> bool:
+        """The owner's Pause on the panel: from now every web and drive call is held, the seal with it. False when the
+        task has ended or is paused already."""
+        with self._lock:
+            if self._end is not None or self._owner_paused:
+                return False
+            self._owner_paused = True
+            logger.info("Agent %s: paused by the owner", self.run_id)
+            self._emit(AgentEvent(E_NOTICE, text=PAUSED_WORDS, code=C_OWNER_PAUSED))
+            return True
+
+    def resume_drive(self) -> bool:
+        """The owner's Resume: the calls go again, and the model is told."""
+        with self._lock:
+            if self._end is not None or not self._owner_paused:
+                return False
+            self._owner_paused = False
+            logger.info("Agent %s: resumed by the owner", self.run_id)
+            self._emit(AgentEvent(E_NOTICE, text=RESUMED_WORDS, code=C_OWNER_RESUMED))
+            self._deliver(OWNER_RESUMED_TEXT)
+            return True
+
+    @property
+    def owner_paused(self) -> bool:
+        return self._owner_paused
 
     def _tool_card(self, card_id: str) -> bool:
         """A file card is about to show (any thread): the run waits on it (D5). False when another wait is on, or the
@@ -1355,12 +1558,16 @@ class AgentRun:
             wait, self._wait = self._wait, None
             if wait is not None:
                 self._emit(AgentEvent(E_QUESTION_GONE, question=wait.question, text=HOW_ENDED))
+                if wait.question.kind == Q_SUBMIT and not wait.at_work:
+                    self._decide_plan(False)
 
 
 def _how_answered(question: OwnerQuestion, text: str) -> str:
     """Live's words for how a question went: its click, or that words answered it; never the words themselves."""
     if question.kind == Q_WEB:
         return HOW_ALLOWED if text == WEB_ALLOW_WORD else HOW_DECLINED
+    if question.kind == Q_SUBMIT:
+        return HOW_SENT if text == SUBMIT_SEND_WORD else HOW_NOT_SENT
     if question.kind == Q_TASK:
         return HOW_ANSWERED
     if policy.yes_or_no(text) is False:

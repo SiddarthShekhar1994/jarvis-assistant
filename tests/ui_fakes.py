@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import gc
 import json
 import tempfile
 import threading
@@ -24,7 +25,7 @@ from PySide6.QtCore import QCoreApplication, QEvent, QObject, Signal
 from PySide6.QtWidgets import QApplication
 
 from briefing_reader import config as config_module
-from briefing_reader import hud, ui
+from briefing_reader import holo, hud, ui
 from briefing_reader.actions import ActionStore
 from briefing_reader.ask import planner as ask_planner
 from briefing_reader.ask.planner import AskPlanner, ClaudeEngine, GoogleSources
@@ -64,6 +65,19 @@ features = ["calendar", "gmail_send", "gmail_read"]
 def settle(rounds: int = 3) -> None:
     for _ in range(rounds):
         QApplication.processEvents()
+
+
+def delete_now(obj: Any) -> None:
+    """Delete ``obj`` (a QObject, e.g. an AppController) now, on this - the GUI - thread. Left to Python's garbage
+    collector (a controller and its parts refer to each other), it could be deleted by a collection that happens to
+    run on a worker thread of a later test: an access violation or heap corruption there (AppHarness.close does the
+    same)."""
+    import shiboken6
+
+    if obj is None or not shiboken6.isValid(obj):
+        return
+    obj.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 def wait_for(predicate, timeout: float = 5.0) -> bool:
@@ -597,6 +611,8 @@ class AppHarness:
     desktop tests test what comes after it - today's card, desktop_ui.CONSENT_VERSION; 1: Phase 1's card;
     the consent tests pass False). close() shuts the desktop controller down (its thread ends).
     ``agent_factory``: what makes the agent's controller while [agent] is on (a test's short waits; None: the app's).
+    ``board_factory``: what makes the new look's board (tests.board_fakes: a stand-in page, or the real fallback; None:
+    no board on the test platform, Home as it was).
     ``launch`` (models.LAUNCH_*; None: derived as the app derives it) and ``desktop_launch`` (--hud)
     reach the controller for a test that calls its start()."""
 
@@ -608,7 +624,7 @@ class AppHarness:
                  prod_inline: bool = True, desktop_factory: Any = None, launch: str | None = None,
                  desktop_launch: bool = False, prepare: Any = None, desktop_backend: Any = None,
                  desktop_window_api: Any = None, desktop_consent: bool | int = True,
-                 agent_factory: Any = None) -> None:
+                 agent_factory: Any = None, board_factory: Any = None) -> None:
         tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         test.addCleanup(tmp.cleanup)
         self.root = root = Path(tmp.name)
@@ -651,7 +667,7 @@ class AppHarness:
                                       snapshot_factory=snapshot_factory or (lambda _controller: self.snapshots),
                                       desktop_factory=desktop_factory, launch=launch, desktop_launch=desktop_launch,
                                       desktop_backend=desktop_backend, desktop_window_api=desktop_window_api,
-                                      agent_factory=agent_factory)
+                                      agent_factory=agent_factory, board_factory=board_factory)
         self.c._start_fetch = lambda *args, **kwargs: None   # never Notion: the page is handed over below
         test.addCleanup(self.close)
 
@@ -695,6 +711,7 @@ class AppHarness:
             c._closing.set()
             c._calendar_worker.stop()
         c.state = ui.STATE_QUITTING
+        holo.set_canvas_look(False)   # (canvas part 4: the look is the app's; the next test's app starts without it)
         for window in (c._live_window, c.window):
             if window is not None:
                 window.hide()
@@ -705,6 +722,10 @@ class AppHarness:
         # could be deleted by a collection that happens to run on a worker thread of a later test.
         c.deleteLater()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        # ... and whatever of it only a cycle still holds goes now too, here: a collection that runs later runs wherever
+        # it happens to (a worker thread of the next app, inside its event processing: an access violation in the
+        # desktop harness, where one app follows another in the same process).
+        gc.collect()
 
 
 class _StepClock:

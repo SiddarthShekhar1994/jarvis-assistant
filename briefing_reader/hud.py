@@ -280,12 +280,13 @@ import dataclasses
 import html
 import logging
 import math
+import os
 import re
 import time
 import weakref
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -332,6 +333,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractButton,
     QApplication,
+    QBoxLayout,
     QCheckBox,
     QDialog,
     QFrame,
@@ -531,8 +533,39 @@ QScrollArea#hudScroll { background: transparent; border: none; }
 """
 
 
+# The canvas look (PLAN-canvas part 4; holo.set_canvas_look): the native widgets keep being native, in the canvas's
+# black with its square bright edges and its glow's cyan (tooltips, menus, scroll bars, plain push buttons, fields).
+_CANVAS_STYLESHEET = """
+QToolTip {
+    color: #CFE6EB; background-color: #000000; border: 1px solid rgba(175, 240, 255, 204); border-radius: 1px;
+}
+QScrollBar:vertical { width: 6px; margin: 2px 1px 2px 0px; }
+QScrollBar::handle:vertical { background: rgba(143, 235, 255, 90); min-height: 28px; border-radius: 0px; }
+QScrollBar::handle:vertical:hover { background: rgba(175, 240, 255, 200); }
+QScrollBar:horizontal { height: 6px; }
+QScrollBar::handle:horizontal { background: rgba(143, 235, 255, 90); min-width: 28px; border-radius: 0px; }
+QScrollBar::handle:horizontal:hover { background: rgba(175, 240, 255, 200); }
+QMenu { background-color: #000000; border: 1px solid rgba(175, 240, 255, 204); border-radius: 1px; }
+QMenu::item:selected { background-color: rgba(53, 211, 240, 40); color: #FFFFFF; }
+QMenu::separator { background: rgba(143, 235, 255, 77); }
+QPushButton {
+    color: #D8F3F8; background-color: rgba(53, 211, 240, 10); border: 1px solid rgba(143, 235, 255, 178);
+    border-radius: 1px; padding: 6px 14px; font-family: "JetBrains Mono"; font-size: 11px; font-weight: 600;
+}
+QPushButton:hover { color: #FFFFFF; border-color: #FFFFFF; background-color: rgba(53, 211, 240, 31); }
+QPushButton:pressed { background-color: rgba(53, 211, 240, 51); }
+QPushButton:focus { border-color: #8FEBFF; }
+QPushButton:disabled { color: rgba(207, 230, 235, 110); border-color: rgba(143, 235, 255, 70); }
+QPushButton:checked { color: #FFFFFF; border-color: #FFFFFF; background-color: rgba(53, 211, 240, 46); }
+QComboBox, QLineEdit, QPlainTextEdit, QSpinBox {
+    selection-background-color: rgba(53, 211, 240, 82); selection-color: #FFFFFF;
+}
+"""
+
+
 def stylesheet() -> str:
-    """The application stylesheet (tooltips, scroll bars, menus, text browsers)."""
+    """The application stylesheet (tooltips, scroll bars, menus, text browsers; the canvas look's rules after them
+    while it is on)."""
     tokens = {
         "TEXT_BODY": TEXT_BODY, "TEXT_BRIGHT": TEXT_BRIGHT,
         "TIP_BORDER": _qss_color(rgba(ACCENT, 0.35)), "HANDLE": _qss_color(rgba(ACCENT, 0.22)),
@@ -542,6 +575,8 @@ def stylesheet() -> str:
     text = _STYLESHEET
     for name in sorted(tokens, key=len, reverse=True):
         text = text.replace("@" + name, tokens[name])
+    if _holo().canvas_look():
+        text += _CANVAS_STYLESHEET
     return text
 
 
@@ -2595,6 +2630,13 @@ class HeaderBar(QWidget):
 
     def clock_running(self) -> bool:
         return self._clock_timer.isActive()
+
+    def refresh_clock(self) -> Any:
+        """The clock read again now, whether the header shows or not (canvas part 5B: the canvas's corner reads it on
+        its own minute while this header is hidden); returns the time read."""
+        now = self._now()
+        self._clock.set_now(now)
+        return now
 
     def _tick(self) -> None:
         now = self._now()
@@ -6274,6 +6316,28 @@ DUPLICATE_ERROR = "{address} is already a recipient"
 NOT_AN_ADDRESS_ERROR = "\"{text}\" is not an email address"
 TOO_MANY_ERROR = "At most {count} recipients in To and Cc together"
 REPLY_SUBJECT_NOTE = "A reply keeps the subject of its thread"
+# Mail extras (part 2): the Edit dialog's revise row (a Reply / Email, while Ask is on).
+REVISE_MAX = 300
+REVISE_CAPTION = "Change it in your words"
+REVISE_HINT = "e.g. warmer, and say I'll send it Friday"
+REVISE_TEXT = "Rewrite"
+REVISE_STOP_TEXT = "Stop"
+REVISE_PUT_BACK_TEXT = "Put back"
+REVISE_IDLE_NOTE = "Jarvis rewrites only the message, from it and your words; nothing is kept until Save."
+REVISE_RUNNING_NOTE = "Jarvis is rewriting the message..."
+REVISE_OFFERED_NOTE = "Rewritten by Jarvis: read it before you Save. Rewrite again, or Put back."
+REVISE_PUT_BACK_NOTE = "Put back as it was."
+
+
+class _ReviseLine(QLineEdit):
+    """The revise row's words: Enter asks for the Rewrite and goes no further (it never saves the dialog)."""
+
+    def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.returnPressed.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 MESSAGE_CAPTION = "Message (sent exactly as written)"
 NOT_ADDED_ERROR = "\"{text}\" in {name} was not added - click Add (or press Enter in that field), or clear it"
 OWN_ROW_ERROR = "{address} is the sending account itself - Remove it: Jarvis never sends to it"
@@ -6617,6 +6681,8 @@ class EditDialog(QDialog):
     """
 
     saved = Signal(str, object)
+    reviseRequested = Signal(str, str, str)    # action id, the owner's words, the message as it is now
+    reviseStopped = Signal(str)
     WIDTH = 420
     MAIL_WIDTH = 480
     _MESSAGE_HEIGHT = 150   # the message editor: at least this tall, and as tall as the whole message
@@ -6631,7 +6697,8 @@ class EditDialog(QDialog):
                  classify: Callable[[str], str] | None = None,
                  normalize: Callable[[str], str] | None = None,
                  find_links: Callable[[str], Sequence[tuple[int, int]]] | None = None,
-                 banner: str = "", max_recipients: int = 5, parent: QWidget | None = None) -> None:
+                 banner: str = "", max_recipients: int = 5, revise: bool = False,
+                 parent: QWidget | None = None) -> None:
         flags = Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint
         super().__init__(parent, flags)
         if kind not in EDIT_KINDS:
@@ -6639,6 +6706,14 @@ class EditDialog(QDialog):
         self.action_id = action_id
         self.kind = kind
         self.mail = kind in EDIT_MAIL_KINDS
+        self.revise = bool(revise) and self.mail     # the revise row: a Reply / Email while Ask is on
+        self._revising = False
+        self._before_rewrite: str | None = None      # the message as it was before the last Rewrite (Put back)
+        self._offered = ""                           # the text the last Rewrite offered
+        self.revise_edit: QLineEdit | None = None
+        self.revise_button: HudButton | None = None
+        self.put_back_button: HudButton | None = None
+        self.revise_note: QLabel | None = None
         self._notify = notify
         self._answer = answer if answer in dict(_EDIT_ANSWERS) else "yes"
         self._classify = classify or (lambda _address: RECIPIENT_KNOWN)
@@ -6835,6 +6910,118 @@ class EditDialog(QDialog):
         body.addWidget(self.links_label)
         self.body_edit.textChanged.connect(self._update_links)
         self._update_links()
+        if self.revise:
+            self._build_revise(body)
+
+    def _build_revise(self, body: QVBoxLayout) -> None:
+        """The revise row under the message: the owner's words (one line, REVISE_MAX characters), Rewrite (Stop while
+        it runs), Put back (after a Rewrite) and a status line. It changes only the message, never the recipients or
+        the subject; nothing is kept until Save."""
+        body.addWidget(self._caption(REVISE_CAPTION))
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self.revise_edit = _ReviseLine(self)
+        self.revise_edit.setMaxLength(REVISE_MAX)
+        self.revise_edit.setPlaceholderText(REVISE_HINT)
+        self.revise_edit.setFont(body_font(13))
+        self.revise_edit.setAccessibleName(REVISE_CAPTION)
+        self.revise_button = HudButton(REVISE_TEXT, SECONDARY, compact=True)
+        self.revise_button.setAutoDefault(False)
+        self.revise_button.setAccessibleDescription("Jarvis rewrites the message from it and your words; nothing is sent")
+        self.put_back_button = HudButton(REVISE_PUT_BACK_TEXT, SECONDARY, compact=True)
+        self.put_back_button.setAutoDefault(False)
+        self.put_back_button.setAccessibleDescription("The message as it was before the rewrite")
+        self.put_back_button.hide()
+        row.addWidget(self.revise_edit, 1)
+        row.addWidget(self.revise_button)
+        row.addWidget(self.put_back_button)
+        body.addLayout(row)
+        self.revise_note = make_label(REVISE_IDLE_NOTE, mono_font(10), TEXT_DIM, wrap=True)
+        body.addWidget(self.revise_note)
+        self.revise_edit.textChanged.connect(self._sync_revise)
+        self.revise_edit.returnPressed.connect(self._on_revise)
+        self.revise_button.clicked.connect(self._on_revise)
+        self.put_back_button.clicked.connect(self._on_put_back)
+        self._sync_revise()
+
+    def revise_words(self) -> str:
+        return " ".join(self.revise_edit.text().split()) if self.revise_edit is not None else ""
+
+    def _sync_revise(self) -> None:
+        if self.revise_button is None:
+            return
+        if self._revising:
+            self.revise_button.setText(REVISE_STOP_TEXT)
+            self.revise_button.setEnabled(True)
+        else:
+            self.revise_button.setText(REVISE_TEXT)
+            self.revise_button.setEnabled(bool(self.revise_words()))
+
+    def _on_revise(self) -> None:
+        if self.revise_edit is None:
+            return
+        if self._revising:
+            self.reviseStopped.emit(self.action_id)
+            return
+        words = self.revise_words()
+        if not words:
+            return
+        self.reviseRequested.emit(self.action_id, words, self.body_edit.toPlainText())
+
+    def is_revising(self) -> bool:
+        return self._revising
+
+    def set_revising(self, on: bool) -> None:
+        """While a Rewrite runs: the words and the message are read only and Rewrite reads Stop."""
+        if self.revise_edit is None:
+            return
+        self._revising = bool(on)
+        self.revise_edit.setReadOnly(self._revising)
+        self.body_edit.setReadOnly(self._revising)
+        if self._revising:
+            self.show_revise_note(REVISE_RUNNING_NOTE)
+        self._sync_revise()
+
+    def offer_rewrite(self, text: str) -> None:
+        """Jarvis's rewrite replaces the message (the old one is kept for Put back) and must be read again (whole_seen
+        starts over). Nothing is kept until Save."""
+        if self.revise_edit is None:
+            return
+        self.set_revising(False)
+        if self._before_rewrite is None:
+            self._before_rewrite = self.body_edit.toPlainText()
+        self._offered = str(text)
+        self.body_edit.setPlainText(self._offered)
+        self._seen_all = False
+        self.put_back_button.show()
+        self.show_revise_note(REVISE_OFFERED_NOTE, warn=True)
+        self._relayout()
+
+    def _on_put_back(self) -> None:
+        if self._before_rewrite is None or self._revising:
+            return
+        self.body_edit.setPlainText(self._before_rewrite)
+        self._before_rewrite = None
+        self._offered = ""
+        self._seen_all = False
+        self.put_back_button.hide()
+        self.show_revise_note(REVISE_PUT_BACK_NOTE)
+        self._relayout()
+
+    def rewrite_kept(self) -> bool:
+        """The message is a rewrite Jarvis offered (not put back), as offered or changed by hand since."""
+        return self._before_rewrite is not None and bool(self._offered)
+
+    def show_revise_note(self, text: str, *, warn: bool = False) -> None:
+        """The revise row's status line (plain text; amber when it needs the owner)."""
+        if self.revise_note is None:
+            return
+        self.revise_note.setText(text or REVISE_IDLE_NOTE)
+        set_label_color(self.revise_note, AMBER if warn else TEXT_DIM)
+        self._relayout()
+
+    def revise_note_text(self) -> str:
+        return self.revise_note.text() if self.revise_note is not None else ""
 
     def _check_address(self, text: str) -> tuple[str, str]:
         """(address, RECIPIENT_*) for an address typed into To or Cc, or ValueError with why not."""
@@ -6964,8 +7151,10 @@ class EditDialog(QDialog):
         subject, the message, Cancel, Save."""
         if not self.mail or self.to_list is None or self.cc_list is None:
             return
+        revise = ([self.revise_edit, self.revise_button, self.put_back_button]
+                  if self.revise_edit is not None else [])
         chain = (self.to_list.focus_chain() + self.cc_list.focus_chain()
-                 + [self.subject_edit, self.body_edit, self.cancel_button, self.save_button])
+                 + [self.subject_edit, self.body_edit, *revise, self.cancel_button, self.save_button])
         for first, second in zip(chain, chain[1:]):
             QWidget.setTabOrder(first, second)
 
@@ -7380,6 +7569,187 @@ class NudgeWordsDialog(QDialog):
         self.input.setFocus(Qt.FocusReason.OtherFocusReason)
 
 
+BATCH_TITLE = "Add these {count} to your calendar?"
+BATCH_FOOTER = ("Nobody is invited or told. Each one can be undone on its card for 10 minutes. Replies, emails, "
+                "invitations, moves, cancels, unsubscribes and plan blocks never go in Add all: each waits for its "
+                "own click.")
+BATCH_EXCLUDED = "{count} other card{s} wait{v} for {their} own click."
+BATCH_CANCEL_TEXT = "Cancel"
+BATCH_ADD_TEXT = "Add {count}"
+
+
+class BatchConfirmDialog(QDialog):
+    """Add all's one more confirm (mail extras, part 1): "Add these N to your calendar?", one row per card with exactly
+    what it adds (its title, then when / where / which calendar, as the card says it), how many other cards wait for
+    their own click, the footer, then Cancel and "Add N".
+
+    Window-modal, opened with ``open()``, in the Edit dialog's style (the canvas look's buttons while it is on). No
+    button has the focus and none is a default: Enter does nothing. "Add N" emits ``confirmed(digest)`` (the digest of
+    the rows shown: the app checks the list again) and closes; Cancel or Esc emits ``cancelled`` and closes. Nothing
+    here adds anything. Every text is plain text."""
+
+    confirmed = Signal(str)
+    cancelled = Signal()
+    WIDTH = 480
+    _MIN_WIDTH = 320
+    _SCREEN_MARGIN = 16
+    _ROWS_MAX = 360
+
+    def __init__(self, rows: Sequence[Any], excluded_count: int = 0, parent: QWidget | None = None) -> None:
+        flags = Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint
+        super().__init__(parent, flags)
+        from . import batch
+
+        holo = _holo()
+        self.rows = tuple(rows)
+        self.digest = batch.digest(self.rows)
+        self._answered = False
+        count = len(self.rows)
+        title = BATCH_TITLE.format(count=count)
+        self.setWindowModality(Qt.WindowModality.WindowModal)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setWindowTitle(title)
+        self.setAccessibleName(title)
+        self.panel = ChamferPanel("Add all", "PERSONAL CALENDAR", variant=PANEL_AMBER, border_alpha=0.5,
+                                  padding=(18, 14, 18, 16), spacing=8)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)   # _fit sets the size
+        outer.addWidget(self.panel)
+        layout = self.panel.body_layout
+        self.title_label = _BreakableLabel(title, body_font(15, 600), AMBER_TEXT, min_word=0)
+        layout.addWidget(self.title_label)
+        # The rows scroll on a short screen (or a long list), so the buttons stay on screen.
+        self.rows_scroll = QScrollArea(self)
+        content = _transparent_scroll(self.rows_scroll)
+        listed = QVBoxLayout(content)
+        listed.setContentsMargins(0, 2, 0, 2)
+        listed.setSpacing(10)
+        self.row_labels: list[tuple[QLabel, QLabel]] = []
+        for row in self.rows:
+            item = QVBoxLayout()
+            item.setSpacing(2)
+            head = _PlainWrapLabel(f"{row.kind}: {row.title}", body_font(13, 600), TEXT_BRIGHT)
+            detail = _PlainWrapLabel(row.detail, mono_font(10), TEXT_SOFT)
+            item.addWidget(head)
+            item.addWidget(detail)
+            listed.addLayout(item)
+            self.row_labels.append((head, detail))
+        listed.addStretch(1)
+        self.rows_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        layout.addWidget(self.rows_scroll)
+        others = max(0, int(excluded_count))
+        self.excluded_label = make_label(
+            BATCH_EXCLUDED.format(count=others, s="" if others == 1 else "s", v="s" if others == 1 else "",
+                                  their="its" if others == 1 else "their"),
+            mono_font(10), TEXT_MUTED, wrap=True)
+        self.excluded_label.setVisible(others > 0)
+        layout.addWidget(self.excluded_label)
+        self.footer_label = make_label(BATCH_FOOTER, mono_font(10), TEXT_DIM, wrap=True)
+        layout.addWidget(self.footer_label)
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 6, 0, 0)
+        buttons.setSpacing(8)
+        buttons.addStretch(1)
+        self.cancel_button = holo.HoloButton(BATCH_CANCEL_TEXT, holo.GHOST, size=holo.SIZE_SM)
+        self.add_button = holo.HoloButton(BATCH_ADD_TEXT.format(count=count), holo.AMBER_COMMIT, size=holo.SIZE_SM)
+        self.add_button.setAccessibleDescription("Adds each one to your personal calendar, one at a time")
+        buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.add_button)
+        layout.addLayout(buttons)
+        self.cancel_button.clicked.connect(self.reject)
+        self.add_button.clicked.connect(self._on_add)
+        self.rejected.connect(self._on_rejected)
+        self.setFixedWidth(self.WIDTH)
+
+    def _on_add(self) -> None:
+        if self._answered:
+            return
+        self._answered = True
+        self.confirmed.emit(self.digest)
+        self.accept()
+
+    def _on_rejected(self) -> None:
+        if not self._answered:
+            self._answered = True
+            self.cancelled.emit()
+
+    def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            event.accept()   # Enter adds nothing (no default button)
+            return
+        super().keyPressEvent(event)
+
+    def _area(self) -> QRect | None:
+        parent = self.parentWidget()
+        screen = (parent.window().screen() if parent is not None else self.screen()) or QApplication.primaryScreen()
+        return screen.availableGeometry() if screen is not None else None
+
+    def _layout_height(self, width: int) -> int:
+        if self.panel.layout() is not None:
+            self.panel.layout().invalidate()
+        self.panel.updateGeometry()
+        layout = self.layout()
+        layout.invalidate()
+        layout.activate()
+        return max(layout.totalHeightForWidth(width) if layout.hasHeightForWidth()
+                   else layout.totalSizeHint().height(), layout.totalMinimumSize().height())
+
+    def _rows_height(self, width: int) -> int:
+        """The rows' natural height at the panel's inner width (each label wrapped as it will show)."""
+        inner = max(1, width - 36 - 12)   # the panel's side padding, and room for a scroll bar
+        content = self.rows_scroll.widget()
+        content.resize(inner, max(1, content.height()))
+        listed = content.layout()
+        listed.invalidate()
+        listed.activate()
+        total = 0
+        for head, detail in self.row_labels:
+            total += head.heightForWidth(inner) + 2 + detail.heightForWidth(inner) + listed.spacing()
+        margins = listed.contentsMargins()
+        return total + margins.top() + margins.bottom()
+
+    def _fit(self) -> None:
+        """Its width (narrower on a narrow screen); the rows as tall as they are, up to _ROWS_MAX and what the screen
+        leaves, so the buttons are always on screen."""
+        self.ensurePolished()
+        area = self._area()
+        margin = self._SCREEN_MARGIN
+        width = self.WIDTH
+        if area is not None:
+            width = max(self._MIN_WIDTH, min(self.WIDTH, area.width() - 2 * margin))
+        if self.minimumWidth() != width or self.maximumWidth() != width:
+            self.setFixedWidth(width)
+        self.rows_scroll.setFixedHeight(0)
+        chrome = self._layout_height(width)
+        room = area.height() - 2 * margin if area is not None else 1 << 20
+        wanted = min(self._rows_height(width), self._ROWS_MAX)
+        self.rows_scroll.setFixedHeight(max(48, min(wanted, room - chrome)))
+        self.resize(width, self._layout_height(width))
+
+    def showEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+        super().showEvent(event)
+        self._fit()
+
+    def open(self) -> None:  # noqa: D102 - QDialog.open, centred over the parent window
+        self._fit()
+        area = self._area()
+        parent = self.parentWidget()
+        if parent is not None:
+            window = parent.window()
+            center = window.mapToGlobal(QPoint(window.width() // 2, window.height() // 2))
+            x, y = center.x() - self.width() // 2, center.y() - self.height() // 2
+        else:
+            x, y = self.x(), self.y()
+        if area is not None:
+            margin = self._SCREEN_MARGIN
+            x = max(area.left(), min(x, area.right() + 1 - margin - self.width()))
+            y = max(area.top(), min(y, area.bottom() + 1 - margin - self.height()))
+        self.move(x, y)
+        super().open()
+        self.setFocus(Qt.FocusReason.OtherFocusReason)   # no button has the focus: Enter adds nothing
+
+
 def _short_text(text: str, limit: int) -> str:
     """``text`` cut in the middle to ``limit`` characters ("abc...xyz")."""
     if len(text) <= limit:
@@ -7410,11 +7780,33 @@ CANCEL_BUTTON_TEXT = "Cancel"
 _PROMPT_GLYPH = "\u203a"    # single right-pointing angle quotation mark
 
 
+@dataclass(frozen=True)
+class PastedCapture:
+    """What a paste hands Capture (build plan item 3): a picture (``image``, a QImage), copied files (``paths``) or
+    text (``text``, Ctrl+Shift+V). Never logged; repr names the kind only."""
+
+    kind: str                        # "picture" | "files" | "text"
+    image: Any = field(default=None, repr=False, compare=False)
+    paths: tuple[str, ...] = field(default=(), repr=False)
+    text: str = field(default="", repr=False)
+
+
+def _real_clipboard() -> Any:
+    """The system clipboard's contents (QMimeData); None while the tests run (they hand their own)."""
+    if os.environ.get("JARVIS_DESKTOP_TEST_GUARD", "") == "1":
+        return None
+    clipboard = QApplication.clipboard()
+    return clipboard.mimeData() if clipboard is not None else None
+
+
 class _CommandInput(QLineEdit):
     """The bar's text field: frameless (the field around it is painted), plain text. Esc is the
-    bar's (``escapePressed``); Enter submits (``returnPressed``)."""
+    bar's (``escapePressed``); Enter submits (``returnPressed``). Capture (build plan item 3): Ctrl+V of a
+    picture or of copied files, and Ctrl+Shift+V of text, emit ``capturePasted(PastedCapture)`` instead of
+    pasting (nothing is read yet: the tray waits for Read it); a plain text Ctrl+V pastes as ever."""
 
     escapePressed = Signal()
+    capturePasted = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -7433,13 +7825,48 @@ class _CommandInput(QLineEdit):
         self.setPalette(palette)
         self.setStyleSheet("QLineEdit { background: transparent; border: none; padding: 0px; }")
         self.setAccessibleName("Ask Jarvis")
+        self.clipboard_mime: Any = _real_clipboard     # () -> QMimeData | None (the tests hand their own)
+        self.capture_on = False      # a capture controller listens (capture_ui): only then does a paste become one
 
     def keyPressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         if event.key() == Qt.Key.Key_Escape and event.modifiers() == Qt.KeyboardModifier.NoModifier:
             event.accept()
             self.escapePressed.emit()
             return
+        shifted = (event.key() == Qt.Key.Key_V and event.modifiers()
+                   == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier))
+        if self.capture_on and (shifted or event.matches(QKeySequence.StandardKey.Paste)):
+            pasted = self._capture_paste(shifted)
+            if pasted is not None:
+                event.accept()
+                self.capturePasted.emit(pasted)
+                return
         super().keyPressEvent(event)
+
+    def _capture_paste(self, shifted: bool) -> PastedCapture | None:
+        """The clipboard as a capture: Ctrl+Shift+V its text; Ctrl+V copied local files, or a picture when the clipboard
+        holds no text. None for a Ctrl+V with text (it pastes as ever - also when a spreadsheet or slide put a picture
+        beside the text) or an empty clipboard."""
+        try:
+            mime = self.clipboard_mime()
+        except Exception:  # noqa: BLE001 - an unreadable clipboard pastes nothing new
+            return None
+        if mime is None:
+            return None
+        if shifted:
+            text = mime.text() if mime.hasText() else ""
+            return PastedCapture("text", text=text) if text.strip() else None
+        if mime.hasUrls():
+            paths = tuple(url.toLocalFile() for url in mime.urls() if url.isLocalFile() and url.toLocalFile())
+            if paths:
+                return PastedCapture("files", paths=paths)
+        if mime.hasText() and mime.text().strip():
+            return None                                  # text pastes as ever, whatever else came with it
+        if mime.hasImage():
+            image = QImage(mime.imageData())
+            if not image.isNull():
+                return PastedCapture("picture", image=image)
+        return None
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
@@ -7449,8 +7876,10 @@ class _CommandInput(QLineEdit):
         """The longest COMMAND_PLACEHOLDERS text the field shows whole (the hologram bar: "Ask Jarvis",
         HOLOGRAM_SPEC 11.3)."""
         if getattr(self, "_holo", False):
-            if self.placeholderText() != COMMAND_PLACEHOLDERS[-1]:
-                self.setPlaceholderText(COMMAND_PLACEHOLDERS[-1])
+            # The canvas's ask line says how to ask ("Type, or hold the key and talk"); the hologram pill "Ask Jarvis".
+            text = getattr(self, "_canvas_placeholder", "") or COMMAND_PLACEHOLDERS[-1]
+            if self.placeholderText() != text:
+                self.setPlaceholderText(text)
             return
         room = self.width() - 8   # QLineEdit's own text margins
         metrics = QFontMetricsF(self.font())
@@ -7470,6 +7899,12 @@ class _CommandField(QWidget):
     HUD_HEIGHT = 44               # the desktop HUD's input row (Switch.dc.html .qrow)
     HUD_GLYPH = 16
     HUD_SEND = 28                 # ... its send arrow, smaller than the hologram pill's (where DesktopB has the mic)
+    CANVAS_HEIGHT = 44            # the canvas's ask line (the approved mock: a thin outlined line, 40 px, in a 2 px halo)
+    CANVAS_LABEL = "Ask"          # its mono label at the left ...
+    CANVAS_HINT = "Ctrl K"        # ... and the Find key at the right while there is nothing to send
+    CANVAS_LINE = "#8FEBFF"       # the mock's line and label colour
+    CANVAS_INK = "#F2FDFF"
+    CANVAS_DIM = "#7FA3AD"
     _CUT = 8
 
     def __init__(self, line_edit: _CommandInput, parent: QWidget | None = None) -> None:
@@ -7481,6 +7916,8 @@ class _CommandField(QWidget):
         self._glyph = make_label(_PROMPT_GLYPH, mono_font(15, 600), ACCENT)
         self._holo = False
         self._hud = False
+        self._canvas = False
+        self._canvas_send: QWidget | None = None
         self._listening = False
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 0, 10, 0)
@@ -7532,6 +7969,64 @@ class _CommandField(QWidget):
         self.line_edit.setFont(holo.font("body"))
         self.update()
 
+    def set_canvas(self, on: bool, send_button: QWidget | None = None) -> None:
+        """The canvas's ask line (after ``set_holo``; the approved mock): a thin outlined line, square, with a soft
+        glow - "ASK" in the mono face at the left, the input in the body face, and at the right "CTRL K" while there
+        is nothing to send, else the send arrow (the stop square while a request runs) as an outline glyph. Off: the
+        hologram pill again, exactly as it was."""
+        from . import holo
+
+        on = bool(on) and self._holo and not self._hud
+        if on == self._canvas:
+            return
+        self._canvas = on
+        if send_button is not None:
+            self._canvas_send = send_button
+        send = self._canvas_send
+        layout = self.layout()
+        palette = self.line_edit.palette()
+        if on:
+            self.setFixedHeight(self.CANVAS_HEIGHT)
+            label_w = math.ceil(QFontMetricsF(self._canvas_font()).horizontalAdvance(self.CANVAS_LABEL.upper()))
+            layout.setContentsMargins(2 + 14 + label_w + 12, 2, 2 + 8, 2)
+            layout.setSpacing(8)
+            self.line_edit.setFont(body_font(13))
+            palette.setColor(QPalette.ColorRole.Text, QColor(self.CANVAS_INK))
+            palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(self.CANVAS_DIM))
+            palette.setColor(QPalette.ColorRole.Highlight, rgba("#35D3F0", 0.35))
+            if send is not None:
+                send.setFixedSize(self.HUD_SEND, self.HUD_SEND)
+                if isinstance(send, _SendButton):
+                    send.set_hud(True)
+        else:
+            self.setFixedHeight(self.HOLO_HEIGHT)
+            layout.setContentsMargins(4 + 6 + self.HOLO_GLYPH + 10, 10, 4 + 6, 10)
+            layout.setSpacing(10)
+            self.line_edit.setFont(holo.font("input"))
+            palette.setColor(QPalette.ColorRole.Text, QColor(holo.INK_1))
+            palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(holo.INK_4))
+            palette.setColor(QPalette.ColorRole.Highlight, holo.alpha(holo.HOLO, 0.35))
+            if send is not None:
+                send.setFixedSize(_SendButton.SIZE, _SendButton.SIZE)
+                if isinstance(send, _SendButton):
+                    send.set_hud(False)
+                send.show()
+        self.line_edit.setPalette(palette)
+        self.line_edit._fit_placeholder()
+        self.update()
+
+    def is_canvas(self) -> bool:
+        return self._canvas
+
+    @staticmethod
+    def _canvas_font() -> QFont:
+        return mono_font(10, 600, 0.18)
+
+    def canvas_hint_shown(self) -> bool:
+        """The canvas line shows "CTRL K" (its send arrow is hidden: nothing to send, nothing running)."""
+        send = self._canvas_send
+        return self._canvas and (send is None or send.isHidden())
+
     def set_listening(self, listening: bool) -> None:
         if bool(listening) != self._listening:
             self._listening = bool(listening)
@@ -7545,6 +8040,34 @@ class _CommandField(QWidget):
                                                            QEvent.Type.ReadOnlyChange):
             self.update()
         return super().eventFilter(watched, event)
+
+    def _paint_canvas(self, painter: QPainter) -> None:
+        """The mock's ask line: 1 px of #8FEBFF at 60 % (brighter with the focus), a 1 px corner, a soft cyan halo."""
+        rect = QRectF(self.rect()).adjusted(2.5, 2.5, -2.5, -2.5)
+        lit = self.line_edit.hasFocus() or self._listening
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for grow, alpha in ((2.0, 0.05), (1.0, 0.10)):          # the glow: two faint lines outside the outline
+            painter.setPen(QPen(rgba("#35D3F0", alpha * (1.6 if lit else 1.0)), 1.0))
+            painter.drawRoundedRect(rect.adjusted(-grow, -grow, grow, grow), 1 + grow, 1 + grow)
+        painter.setPen(QPen(rgba(self.CANVAS_LINE, 0.95 if lit else 0.6), 1.0))
+        painter.setBrush(rgba("#000000", 0.55))
+        painter.drawRoundedRect(rect, 1, 1)
+        font = self._canvas_font()
+        painter.setFont(font)
+        painter.setPen(QColor(self.CANVAS_LINE))
+        painter.drawText(QRectF(rect.left() + 14, rect.top(), 80, rect.height()),
+                         int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), self.CANVAS_LABEL.upper())
+        if self.canvas_hint_shown():
+            # canvas part 5B (the walk's 5): CTRL K is the focus key's own cue - a keycap of its own, visibly apart from
+            # the line's words (which name the talk key)
+            hint = self.CANVAS_HINT.upper()
+            width = math.ceil(QFontMetricsF(font).horizontalAdvance(hint)) + 12
+            cap = QRectF(rect.right() - 12 - width, rect.center().y() - 9, width, 18)
+            painter.setPen(QPen(rgba(self.CANVAS_LINE, 0.32), 1.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(cap.adjusted(0.5, 0.5, -0.5, -0.5), 2, 2)
+            painter.setPen(QColor(self.CANVAS_DIM))
+            painter.drawText(cap, int(Qt.AlignmentFlag.AlignCenter), hint)
 
     def mousePressEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         self.line_edit.setFocus(Qt.FocusReason.MouseFocusReason)   # a click beside the text
@@ -7581,6 +8104,9 @@ class _CommandField(QWidget):
 
                 box = QRectF(0, (self.height() - self.HUD_GLYPH) / 2, self.HUD_GLYPH, self.HUD_GLYPH)
                 holo.paint_icon(painter, box, "chevron", QColor(holo.HOLO), stroke=2.0)
+                return
+            if self._canvas:
+                self._paint_canvas(painter)
                 return
             if self._holo:
                 self._paint_holo(painter)
@@ -7721,6 +8247,10 @@ def quiet_readouts(text: str) -> str:
     return " ".join(_READOUT_GROUP.sub(drop, text or "").split())
 
 
+TRAY_READ_TEXT = "Read it"
+TRAY_REMOVE_TEXT = "Remove"
+
+
 class CommandBar(QWidget):
     """Ask Jarvis's typed command bar: the field and its Ask button, then a status line (the
     planner's answer, what Jarvis is doing, or why nothing was proposed) and a meta line with an
@@ -7756,6 +8286,9 @@ class CommandBar(QWidget):
     statusDismissed = Signal()   # Esc in an empty field while nothing runs: put the last answer away
     statusChanged = Signal(str, str)   # the status line's text and tone (the hologram Home's thinking line)
     typingChanged = Signal(bool)       # the owner types in the field (focused, with text, nothing running)
+    capturePasted = Signal(object)     # build plan item 3: the field's capture paste (PastedCapture)
+    trayRead = Signal(str)             # the capture tray's Read it, or Enter while it shows: the words typed with it
+    trayRemoved = Signal()             # the capture tray's Remove: nothing was read
 
     _STATUS_LINES = 2
 
@@ -7770,8 +8303,10 @@ class CommandBar(QWidget):
         self._hint = False           # the status is only the idle hint: it may fold away
         self._holo = False           # the hologram pill (set_holo): no meta line, only what needs the owner
         self._hud = False            # the desktop HUD's row (set_hud): no status line either
+        self._canvas = False         # the canvas's ask line (set_canvas): the mock's thin outlined line
         self._typing = False
         self._escape_hook: Any = None   # asked at Esc in the empty field (a task's Stop on the HUD's bar)
+        self._said: Any = None       # the canvas: said(text) -> True when the caption carries those words already
         self._last_request = ""      # the last request accepted from here, as typed (Up brings it back)
         self.input = _CommandInput()
         self.field = _CommandField(self.input)
@@ -7796,8 +8331,33 @@ class CommandBar(QWidget):
         self.link_button = HudButton("", LINK, compact=True)
         self.link_button.set_link_color(ACCENT)
         self.link_button.hide()
+        # Build plan item 3: the capture tray, one line above the field ("syllabus.pdf · PDF · 3 pages", Read it,
+        # Remove), shown only while something dropped or pasted waits; nothing is read before Read it or Enter.
+        self.tray = QWidget(self)
+        self.tray.setObjectName("captureTray")
+        self.tray_label = _ClampedLabel(mono_font(11, 500, 0.04), TEXT_SOFT, max_lines=1)
+        self.tray_label.setObjectName("captureTrayLabel")
+        from . import holo   # (holo imports this module: on use)
+
+        # The app's own buttons: they wear the canvas look while it is on (holo.button_look), the hologram's else.
+        self.tray_read = holo.HoloButton(TRAY_READ_TEXT, holo.GO, size=holo.SIZE_SM)
+        self.tray_read.setAccessibleName(TRAY_READ_TEXT)
+        self.tray_read.setToolTip("Read what you dropped in (Enter); your words go along with it")
+        self.tray_remove = holo.HoloButton(TRAY_REMOVE_TEXT, holo.GHOST, size=holo.SIZE_SM)
+        self.tray_remove.setAccessibleName(TRAY_REMOVE_TEXT)
+        self.tray_remove.setToolTip("Put it away: nothing is read")
+        tray_row = QHBoxLayout(self.tray)
+        tray_row.setContentsMargins(2, 0, 0, 2)
+        tray_row.setSpacing(10)
+        tray_row.addWidget(self.tray_label, 1, Qt.AlignmentFlag.AlignVCenter)
+        tray_row.addWidget(self.tray_read, 0, Qt.AlignmentFlag.AlignVCenter)
+        tray_row.addWidget(self.tray_remove, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.tray.hide()
+        self.tray_read.clicked.connect(self._on_tray_read)
+        self.tray_remove.clicked.connect(self._on_tray_remove)
         self.input.returnPressed.connect(self._on_return)
         self.input.escapePressed.connect(self._on_escape)
+        self.input.capturePasted.connect(self.capturePasted)
         self.input.textChanged.connect(self._sync_typing)
         self.input.installEventFilter(self)
         self.button.clicked.connect(self._on_button)
@@ -7822,9 +8382,35 @@ class CommandBar(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
+        layout.addWidget(self.tray)
         layout.addLayout(row)
         layout.addLayout(self._status_row)
         layout.addLayout(self._meta_row)
+
+    # ---- the capture tray (build plan item 3) ----
+
+    def set_tray(self, text: str) -> None:
+        """Show the capture tray with ``text`` (what waits: its label, kind and pages; never read yet)."""
+        self.tray_label.set_full_text(" ".join(str(text or "").split()))
+        self.tray.show()
+
+    def clear_tray(self) -> None:
+        self.tray.hide()
+        self.tray_label.set_full_text("")
+
+    def tray_active(self) -> bool:
+        return not self.tray.isHidden()
+
+    def _on_tray_read(self) -> None:
+        if self._running or not self.tray_active():
+            return
+        self.trayRead.emit(self.text())
+
+    def _on_tray_remove(self) -> None:
+        if not self.tray_active():
+            return
+        self.clear_tray()
+        self.trayRemoved.emit()
 
     def set_holo(self, on: bool = True) -> None:
         """The hologram Home's bar (HOLOGRAM_SPEC 11.3): a pill with the Ask glyph, the input and the
@@ -7870,20 +8456,72 @@ class CommandBar(QWidget):
         self._hud = True
         self.field.set_hud(self.send_button, trailing)
         self.input.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        for widget in (self.send_button, self.link_button, self.button):
-            widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        for widget in (self.send_button, self.link_button, self.button, self.tray, self.tray_read, self.tray_remove):
+            widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)      # the capture tray too: the HUD takes no focus
         self._sync_send()
         self._show_link()
 
     def is_hud(self) -> bool:
         return self._hud
 
+    def set_canvas(self, on: bool = True) -> None:
+        """The canvas's ask line (PLAN-canvas part 1; only the hologram bar, never the HUD's): everything the bar does
+        stays - typing, Enter, Esc, Up for the last request, the running state with its stop, the status line for an
+        answer, a question or a problem - in the mock's look: a thin outlined line with ASK at its left and CTRL K at
+        its right, the send arrow there instead while there is text or a request runs, and the status line OVER the
+        line (the line itself stays at the canvas's bottom). ``False`` puts the hologram pill back as it was."""
+        on = bool(on) and self._holo and not self._hud
+        if on == self._canvas:
+            return
+        self._canvas = on
+        self.field.set_canvas(on, self.send_button)
+        layout = self.layout()
+        if isinstance(layout, QBoxLayout):
+            layout.setDirection(QBoxLayout.Direction.BottomToTop if on else QBoxLayout.Direction.TopToBottom)
+            # The capture tray stays right above the ask line: drawn bottom to top, it follows the line's row.
+            layout.removeWidget(self.tray)
+            layout.insertWidget(1 if on else 0, self.tray)
+        self._status_row.setContentsMargins(*((2, 0, 2, 0) if on else (16, 0, 16, 0)))
+        if not on:
+            self.input._canvas_placeholder = ""
+            self.input._fit_placeholder()
+        self._sync_send()
+        self._show_link()
+        self.updateGeometry()
+
+    def is_canvas(self) -> bool:
+        return self._canvas
+
+    def set_canvas_said(self, said: Any) -> None:
+        """The canvas (part 3): ``said(text)`` says whether the caption carries those words already; the status line
+        then stays away (an answer is never shown twice). None: no such check."""
+        # Held weakly: the reading view's own method here kept that view alive in a cycle (bar -> view -> bar), so a
+        # closed app's widgets were freed by Python's cycle collector at some later moment - inside the next app's
+        # event processing (an access violation in the desktop harness).
+        self._said = weakref.WeakMethod(said) if hasattr(said, "__self__") else (lambda: said) if said else None
+        self._fold()
+
+    def refresh_status(self) -> None:
+        """What the caption carries changed: the status line shows or goes again (the canvas's check)."""
+        self._fold()
+
+    def status_shown(self) -> bool:
+        return not self.status_label.isHidden()
+
+    def set_canvas_placeholder(self, text: str) -> None:
+        """What the canvas's ask line says while it is empty ("": the hologram bar's own "Ask Jarvis")."""
+        self.input._canvas_placeholder = str(text or "") if self._canvas else ""
+        self.input._fit_placeholder()
+
     def _sync_send(self) -> None:
         self.send_button.set_look(bool(self.text()), self._running)
         self.send_button.setToolTip("Stop planning; nothing is proposed (Esc)" if self._running
                                     else "Plan this request (Enter)")
-        if self._hud:
-            self.send_button.setVisible(bool(self.input.text()) or self._running)
+        if self._hud or self._canvas:
+            shown = bool(self.input.text()) or self._running
+            if shown != (not self.send_button.isHidden()):
+                self.send_button.setVisible(shown)
+                self.field.update()            # the canvas line: CTRL K gives way to the arrow, and back
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
         if watched is self.input and event.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
@@ -7963,6 +8601,9 @@ class CommandBar(QWidget):
             return
         if self._holo:
             needs = self._tone in (TONE_DONE, TONE_WARN, TONE_ERROR) and not self._hint and bool(self._status_text)
+            said = self._said() if self._said is not None else None
+            if needs and self._canvas and said is not None and said(self._status_text):
+                needs = False    # the canvas: the caption says it already (it never shows twice)
             self.status_label.setVisible(needs or not self.link_button.isHidden())
             self.meta_label.setVisible(False)
             self.updateGeometry()
@@ -8046,6 +8687,9 @@ class CommandBar(QWidget):
         """What Enter in the field does (the Find list's "Ask Jarvis: ..." too): ``submitted(text)``, unless the
         field is empty or a request runs."""
         text = self.text()
+        if not self._running and self.tray_active():
+            self.trayRead.emit(text)       # Enter with the capture tray up is its Read it (the words go along)
+            return
         if self._running or not text:
             return
         self.submitted.emit(text)
@@ -9046,7 +9690,8 @@ MEMORY_DELETED_TEXT = "Deleted."
 MEMORY_NOT_SENT_TEXT = "SENT WHEN RELEVANT"
 MEMORY_NOT_SENT_TIP = ("Past the 8 KB of notes your Claude gets with each request: sent only with a request that "
                        "shares its words, names or places")
-MEMORY_EMPTY_TEXT = 'No notes yet. Add one above, or type "remember that ..." in the bar.'
+# (canvas part 5B, the walk's 10: the box this screen has - the header's "Find or ask anything" - by its own words)
+MEMORY_EMPTY_TEXT = 'No notes yet. Add one above, or type "remember that ..." in Find or ask anything, at the top.'
 MEMORY_FILTER_TEXT = 'Showing notes with "{words}"'
 MEMORY_READ_ONLY_TEXT = ("memory.json can't be read, so Jarvis won't change it. Fix or delete the file, then "
                          "restart Jarvis.")
@@ -9136,6 +9781,9 @@ LIVE_TAG_COLORS = {
     live_events.TASK_NUDGE: AMBER_HOVER, live_events.TASK_MEETING: PEACH,
     live_events.TASK_DESKTOP: ACCENT,           # cyan: Jarvis pointing at something on the desktop - never amber
     live_events.TASK_AGENT: ACCENT,             # cyan: Jarvis at work on a task
+    live_events.TASK_CAPTURE: ACCENT,           # cyan: Jarvis reading what the owner dropped in
+    live_events.TASK_REVISE: ACCENT,            # cyan: a draft rewritten in the owner's words (the Edit dialog)
+    live_events.TASK_DOC: ACCENT,               # cyan: Jarvis writing in a document or a sheet (his changes wait)
 }
 LIVE_TEXT_MAX_PX = 320          # an open text block grows to this height, then scrolls
 LIVE_FIELD_LABEL_PX = 104       # the field labels' column ...
@@ -12759,7 +13407,7 @@ class HudWindowFrame(QWidget):
         dpr = self.devicePixelRatioF()
         center = self._glow_center()
         anchor_key = None if center is None else (round(center.x()), round(center.y()))
-        key = (self.width(), self.height(), dpr, anchor_key)
+        key = (self.width(), self.height(), dpr, anchor_key, _holo().canvas_look())
         if self._cache is None or key != self._cache_key:
             self._cache = self._render_ground(dpr, center)
             self._cache_key = key

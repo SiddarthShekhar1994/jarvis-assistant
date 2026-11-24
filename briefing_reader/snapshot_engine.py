@@ -4,6 +4,13 @@ checked source its answer cites, and takes a picture of its first screen, for th
 
     webengine_available()             PySide6 has QtWebEngine 6.8+ (checked without importing it)
     prepare_application()             Qt's attributes the web engine needs, set before QApplication
+    ensure_engine() -> str            the web engine ready for a page of Jarvis's own (the board): the same
+                                      flags as a shot ("" or a reason), and never a usable network gate (below);
+                                      engine_classes() then gives its classes, private_profile(parent) a fresh
+                                      off-the-record profile (the first starts Chromium), apply_web_settings(settings)
+                                      the fixed settings
+    set_network_use(possible)         the app says whether a page picture or an agent page can be asked for in
+                                      this run (network_possible())
     PageCamera(parent, ...)           one page at a time on the GUI thread: shoot(url) -> finished(ShotResult)
     PageSnapshotter(parent, ...)      the LIVE side: request(step, url, task_id=) from any thread (a
                                       PENDING picture at once), the shots one at a time on the GUI
@@ -45,6 +52,16 @@ the renderer process exits (at once when no event loop runs any more: Jarvis clo
 offscreen platform (tests, harnesses) no network page is ever opened: only local HTML, every
 network request of it is blocked, and Chromium runs with a proxy that is not there
 (snapshots.OFFLINE_FLAGS, instead of the gate) as a last net.
+
+The gate and a page of Jarvis's own (the canvas: its page starts with the window; the final review's "ship-gate 0"):
+starting the engine for the board (ensure_engine, warm_up) never opens a usable gate. When no page picture and no
+agent page can be asked for in this run (set_network_use: [live] page pictures off and [agent] off), Chromium starts
+with the dead proxy, as on a test platform, and no gate is made at all. Otherwise the gate binds SEALED
+(ConnectGate.seal(True), before it listens: reason "start") and is unsealed only by the code that takes the first page
+picture or agent page (PageCamera.shoot -> _start_engine(page=True)); the agent's own seals (seal_gate: a page it wrote
+is open; seal_drive: a page holds what Jarvis typed, with cut_gate ending every connection open then) are other
+reasons, and the gate is usable only with none. When the gate cannot bind, the board still starts,
+with the dead proxy (a page picture in that run says R_ENGINE_FAILED, as it did before).
 
 Logging: counts, kinds and times only ("Page snapshot: taken in 2.3 s (1 of 2 for this research,
 3 requests blocked)"); never a URL, a host, a title or anything of the page.
@@ -97,13 +114,25 @@ _SETTINGS_ON = ("JavascriptEnabled", "WebRTCPublicInterfacesOnly", "PlaybackRequ
 # elsewhere (its own origin; this private profile's storage and cookies); "allow-popups" lets the
 # seed open the window at all (the page itself still gets none: no window is made for it).
 SANDBOX = "allow-scripts allow-same-origin allow-popups"
+# The one other sandbox there is: a page Jarvis fills in for the owner (agent.browser, drive tabs only; never a page
+# picture, a research page or a task's own file) may send a form, which "allow-forms" lets it do. Nothing typed goes:
+# the window is sealed from the first value until the owner's click on its Send card (agent.drive).
+DRIVE_SANDBOX = SANDBOX + " allow-forms"
+_SANDBOXES = frozenset({SANDBOX, DRIVE_SANDBOX})
 _SEED_PAGES = frozenset({"blank", "srcdoc"})   # all the seed page ever loads: about:blank, about:srcdoc
-# Run in the seed's about:blank (Jarvis's script world): the sandboxed inline frame whose script opens
-# the one pop-up (noopener: the page gets no handle on the seed).
-_SEED_SCRIPT = ("(function () { var frame = document.createElement('iframe');"
-                " frame.setAttribute('sandbox', '" + SANDBOX + "');"
-                " frame.srcdoc = '<script>window.open(\"about:blank\", \"_blank\", \"noopener\")<\\/script>';"
-                " document.documentElement.appendChild(frame); })();")
+
+
+def _seed_script(sandbox: str) -> str:
+    """Run in the seed's about:blank (Jarvis's script world): the sandboxed inline frame whose script opens the one
+    pop-up (noopener: the page gets no handle on the seed). Only the two sandboxes above; anything else is SANDBOX."""
+    sandbox = sandbox if sandbox in _SANDBOXES else SANDBOX
+    return ("(function () { var frame = document.createElement('iframe');"
+            " frame.setAttribute('sandbox', '" + sandbox + "');"
+            " frame.srcdoc = '<script>window.open(\"about:blank\", \"_blank\", \"noopener\")<\\/script>';"
+            " document.documentElement.appendChild(frame); })();")
+
+
+_SEED_SCRIPT = _seed_script(SANDBOX)
 # Run in the pop-up before the page is loaded: a sandboxed document may not set document.domain
 # ("... forbidden for sandboxed iframes"); any other answer and no page is opened.
 _SANDBOX_CHECK = ("(function () { try { document.domain = document.domain; return ''; }"
@@ -124,6 +153,15 @@ class _EngineState:
         self.import_at = 0.0
         self.classes: Any = None
         self.gate: Any = None         # the network gate Chromium's proxy points at (not on a test platform)
+        self.no_gate = False          # Chromium started with the dead proxy though this is no test platform (nothing
+                                      # could ask for a page, or the gate could not bind): no page picture in this run
+        self.seals: set[str] = set()  # why the gate is sealed now: "start" (the board started the engine; the first
+                                      # page shot lifts it), "agent" (a page the agent wrote is open), "drive" (a
+                                      # page holds what Jarvis typed into it)
+        self.gate_told = False        # what the gate was last told (sealed or not; a new gate is not sealed)
+        self.drive_hosts: frozenset[str] = frozenset()   # while the owner's Send presses: the hosts the drive seal
+                                      # lets through (only while it is the one reason: seal_drive_only)
+        self.hosts_told: frozenset[str] = frozenset()
         self.inherited_flags = ""     # QTWEBENGINE_CHROMIUM_FLAGS as inherited, before Jarvis merged his in
         self.written_flags: str | None = None   # what Jarvis wrote there (None: nothing yet)
 
@@ -131,6 +169,35 @@ class _EngineState:
 _ENGINE = _EngineState()
 # Makes the network gate (a seam for the engine probe: its gate never reaches the network).
 _gate_factory: Callable[[], Any] = snapshot_gate.ConnectGate
+# Whether a page picture or an agent page can be asked for in this run (the app says so at its start; None: not said -
+# it can, as before the canvas).
+_network_use: Callable[[], bool] | None = None
+SEAL_START = "start"             # the gate bound for a page of Jarvis's own: sealed until the first page shot
+SEAL_AGENT = "agent"             # a page the agent wrote is open (agent.browser)
+SEAL_DRIVE = "drive"             # a page holds what Jarvis typed into it, until the owner's Send (agent.browser)
+
+
+def set_network_use(possible: Callable[[], bool] | bool | None) -> None:
+    """The app's word on whether a page picture or an agent page can be asked for in this run: a callable asked when
+    the engine starts, a plain bool, or None (not said: it can). With False the board's engine starts with the dead
+    proxy and no gate is ever made for it."""
+    global _network_use
+    if possible is None or callable(possible):
+        _network_use = possible
+    else:
+        answer = bool(possible)
+        _network_use = lambda: answer  # noqa: E731
+
+
+def network_possible() -> bool:
+    """A page picture or an agent page can be asked for in this run (unsure: it can - the gate then binds sealed)."""
+    use = _network_use
+    if use is None:
+        return True
+    try:
+        return bool(use())
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def webengine_available() -> bool:
@@ -182,6 +249,12 @@ def prepare_application() -> None:
         QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_DisableShaderDiskCache, True)
     except Exception as exc:  # noqa: BLE001
         logger.debug("Page snapshots: application attributes not set (%s)", type(exc).__name__)
+
+
+def on_test_platform() -> bool:
+    """Qt runs on a test platform (offscreen, minimal: TEST_PLATFORMS): no network page is ever opened there, and the
+    app makes no board of its own there (desk_ui.default_factory) - the web engine never starts in a test process."""
+    return _test_platform()
 
 
 def _test_platform() -> bool:
@@ -272,11 +345,77 @@ def _classes() -> Any:
     return _ENGINE.classes
 
 
-def _start_gate() -> int:
-    """The network gate's port, starting it once (0: it could not start)."""
+def _start_gate(*, sealed: bool = False) -> int:
+    """The network gate's port, starting it once (0: it could not start). ``sealed``: it is made for a page of
+    Jarvis's own - sealed BEFORE it listens (SEAL_START), so it is never usable until a page shot lifts that."""
     if _ENGINE.gate is None:
         _ENGINE.gate = _gate_factory()
+    if sealed:
+        _ENGINE.seals.add(SEAL_START)
+    _apply_seals()
     return int(_ENGINE.gate.start() or 0)
+
+
+def _apply_seals() -> None:
+    """The gate is sealed while a reason holds it; it is told only when that changes (a gate that was never sealed is
+    never asked to unseal)."""
+    gate = _ENGINE.gate
+    want = bool(_ENGINE.seals)
+    hosts = _ENGINE.drive_hosts if _ENGINE.seals == {SEAL_DRIVE} else frozenset()
+    allow = getattr(gate, "allow", None)
+    if gate is not None and callable(allow) and hosts != _ENGINE.hosts_told and not hosts:
+        allow(())                     # narrower first: a host let through goes before anything else changes
+        _ENGINE.hosts_told = frozenset()
+    if gate is not None and want != _ENGINE.gate_told:
+        gate.seal(want)
+        _ENGINE.gate_told = want
+    if gate is not None and callable(allow) and hosts != _ENGINE.hosts_told:
+        allow(tuple(sorted(hosts)))
+        _ENGINE.hosts_told = hosts
+
+
+def gate_sealed() -> bool:
+    """The gate refuses every new connection now (a reason holds it; True too while there is no gate)."""
+    return _ENGINE.gate is None or bool(_ENGINE.seals)
+
+
+def _gate_plan(*, page: bool, test_platform: bool) -> tuple[bool, int, str]:
+    """How the engine's first start reaches the network: (offline, the gate's port, a reason not to start).
+
+    A test platform: the dead proxy. A page shot (``page``): the gate, usable, or R_ENGINE_FAILED when it cannot
+    bind (Chromium never starts for a page without it). A page of Jarvis's own (the board, the agent's warm-up): the
+    dead proxy when nothing can ask for a page in this run or when the gate cannot bind - the board starts all the
+    same - else the gate, sealed."""
+    if test_platform:
+        return True, 0, ""
+    if not page and not network_possible():
+        _ENGINE.no_gate = True
+        logger.info("Web engine: no network gate in this run (no page picture and no agent page can be asked for)")
+        return True, 0, ""
+    port = _start_gate(sealed=not page)
+    if port:
+        return False, port, ""
+    if page:
+        logger.warning("Page snapshots: the network gate could not be started")
+        return False, 0, snapshots.R_ENGINE_FAILED
+    _ENGINE.no_gate = True
+    logger.warning("Web engine: the network gate could not be started; Jarvis's own page starts without it")
+    return True, 0, ""
+
+
+def _page_gate(*, test_platform: bool) -> str:
+    """A page of the web is about to open on an engine that runs already: "" when the gate may be used now - the
+    board's start seal is lifted here, by the first page shot, and nowhere else - else R_ENGINE_FAILED (Chromium
+    runs with no gate in this run)."""
+    if test_platform:
+        return ""
+    if _ENGINE.no_gate or _ENGINE.gate is None:
+        return snapshots.R_ENGINE_FAILED
+    if SEAL_START in _ENGINE.seals:
+        _ENGINE.seals.discard(SEAL_START)
+        _apply_seals()
+        logger.info("Page snapshots: the network gate is open for the first page")
+    return ""
 
 
 def gate_counts() -> dict[str, int]:
@@ -289,10 +428,43 @@ def gate_counts() -> dict[str, int]:
 
 def seal_gate(sealed: bool) -> None:
     """The network gate refuses every new connection while sealed (snapshot_gate.ConnectGate.seal): agent.browser, while
-    a page the agent wrote is open. Before the gate started, and on a test platform, there is nothing to seal."""
-    gate = _ENGINE.gate
-    if gate is not None:
-        gate.seal(sealed)
+    a page the agent wrote is open (SEAL_AGENT; the board's start seal is another reason, and the gate is usable only
+    with none). Before the gate started, and on a test platform, there is nothing to seal yet."""
+    if sealed:
+        _ENGINE.seals.add(SEAL_AGENT)
+    else:
+        _ENGINE.seals.discard(SEAL_AGENT)
+    _apply_seals()
+
+
+def seal_drive(sealed: bool) -> None:
+    """The gate refuses every new connection while a page holds what Jarvis typed into it (agent.browser, SEAL_DRIVE):
+    a reason of its own, so a page the agent wrote going away (seal_gate) never lifts it, nor this one that."""
+    if sealed:
+        _ENGINE.seals.add(SEAL_DRIVE)
+    else:
+        _ENGINE.seals.discard(SEAL_DRIVE)
+    _apply_seals()
+
+
+def seal_drive_only(hosts: Any) -> None:
+    """The owner's Send (agent.browser.press_approved): while the drive seal is the gate's one reason, a CONNECT to
+    one of ``hosts`` goes through it and every other is refused as before (snapshot_gate.ConnectGate.allow). Empty:
+    none goes through again."""
+    _ENGINE.drive_hosts = frozenset(str(host).casefold().rstrip(".") for host in hosts or () if host)
+    _apply_seals()
+
+
+def cut_gate() -> int:
+    """Every connection open through the gate ends now (snapshot_gate.ConnectGate.cut); it keeps listening. How many
+    ended (0 too with no gate yet, or a gate that has no connections to cut: nothing is open then)."""
+    cut = getattr(_ENGINE.gate, "cut", None)
+    if not callable(cut):
+        return 0
+    try:
+        return int(cut() or 0)
+    except Exception:  # noqa: BLE001 - the seal holds either way
+        return 0
 
 
 def _judged_environ() -> Mapping[str, str]:
@@ -308,12 +480,14 @@ def _judged_environ() -> Mapping[str, str]:
     return environ
 
 
-def _start_engine() -> str:
+def _start_engine(*, page: bool = True) -> str:
     """Import QtWebEngine once (the network gate, Chromium flags and the Software Qt Quick API
     first): "" when ready, else a reason (R_NO_ENGINE / R_ENGINE_FAILED). Chromium never starts
-    without the gate (or, on a test platform, the dead proxy)."""
+    without the gate or the dead proxy. ``page``: a page of the web is about to open (a page picture, an agent
+    page) - the gate must be usable; False: a page of Jarvis's own (the board, the agent's warm-up) - never a
+    usable gate (see the module doc)."""
     if _ENGINE.imported:
-        return ""
+        return _page_gate(test_platform=_test_platform()) if page else ""
     if _ENGINE.failed:
         return _ENGINE.failed
     if not webengine_available():
@@ -321,11 +495,9 @@ def _start_engine() -> str:
         return _ENGINE.failed
     try:
         _ENGINE.import_at = time.monotonic()
-        offline = _test_platform()
-        gate_port = 0 if offline else _start_gate()
-        if not offline and not gate_port:
-            logger.warning("Page snapshots: the network gate could not be started")
-            return snapshots.R_ENGINE_FAILED
+        offline, gate_port, problem = _gate_plan(page=page, test_platform=_test_platform())
+        if problem:
+            return problem
         if _ENGINE.written_flags is None or os.environ.get(_FLAGS_ENV) != _ENGINE.written_flags:
             _ENGINE.inherited_flags = os.environ.get(_FLAGS_ENV, "")
         merged = snapshots.chromium_flags(_ENGINE.inherited_flags, offline=offline, gate_port=gate_port)
@@ -356,7 +528,8 @@ def warm_up(*, test_platform: bool = False) -> float:
     began = time.monotonic()
     try:
         environ = _judged_environ()
-        if snapshots.sandbox_problem(environ) or snapshots.engine_flags_problem(environ) or _start_engine():
+        if snapshots.sandbox_problem(environ) or snapshots.engine_flags_problem(environ) \
+                or _start_engine(page=False):     # (its first page shot lifts the gate's start seal)
             return 0.0
         profile = _classes().QWebEngineProfile()
         if profile.isOffTheRecord():
@@ -368,6 +541,77 @@ def warm_up(*, test_platform: bool = False) -> float:
     seconds = time.monotonic() - began
     logger.info("Page snapshots: web engine started ahead in %.1f s", seconds)
     return seconds
+
+
+def ensure_engine() -> str:
+    """The web engine ready for a page of Jarvis's own (the board's), GUI thread only: "" when it may be used, else a
+    reason (snapshots.R_*). The same gate as a page's picture: the inherited settings are judged first (a sandbox turned
+    off or unsafe flags refuse it, before Chromium could start), then QtWebEngine is imported once with Chromium's flags,
+    the network gate (on a test platform the dead proxy) and the Software Qt Quick API set before anything of it runs.
+    The gate is never usable because of this: none at all when nothing can ask for a page in this run or when it
+    cannot bind (the dead proxy), else sealed until the first page shot. Makes no profile, so Chromium itself starts
+    only at private_profile(). Never raises."""
+    try:
+        if QCoreApplication.instance() is None:
+            return snapshots.R_ENGINE_FAILED
+        environ = _judged_environ()   # as inherited: never Jarvis's own merged flags
+        problem = snapshots.sandbox_problem(environ) or snapshots.engine_flags_problem(environ)
+        if problem:
+            return problem
+        return _start_engine(page=False)
+    except Exception as exc:  # noqa: BLE001 - "not ready" is the safe answer
+        logger.debug("Web engine: not ready (%s)", type(exc).__name__)
+        return snapshots.R_ENGINE_FAILED
+
+
+def engine_classes() -> Any:
+    """QtWebEngine's classes and Jarvis's subclasses of them (Interceptor, Page): only once ensure_engine() said ""."""
+    return _classes()
+
+
+def private_profile(parent: QObject | None = None) -> Any:
+    """A fresh off-the-record profile for a page of Jarvis's own, GUI thread only, once ensure_engine() said "": nothing
+    of it on disk (no HTTP cache at all, no cookie kept), every permission asked each time (and refused by the page's
+    owner), no spell check, no push service. The first profile of the process is what starts Chromium (a second or
+    more). None when the engine gave one that is not off the record (it is deleted)."""
+    classes = _classes()
+    first = not _ENGINE.started
+    began = time.monotonic()
+    profile = classes.QWebEngineProfile(parent)   # no storage name: off the record
+    if not profile.isOffTheRecord():
+        profile.deleteLater()
+        return None
+    if first:
+        _ENGINE.started = True
+        logger.info("Web engine: started in %.1f s", time.monotonic() - began)
+    kinds = classes.QWebEngineProfile
+    profile.setHttpCacheType(kinds.HttpCacheType.NoCache)
+    profile.setPersistentCookiesPolicy(kinds.PersistentCookiesPolicy.NoPersistentCookies)
+    if hasattr(profile, "setPersistentPermissionsPolicy"):
+        profile.setPersistentPermissionsPolicy(kinds.PersistentPermissionsPolicy.AskEveryTime)
+    profile.setSpellCheckEnabled(False)
+    if hasattr(profile, "setPushServiceEnabled"):
+        profile.setPushServiceEnabled(False)
+    return profile
+
+
+def apply_web_settings(settings: Any, *, local_storage: bool = True) -> None:
+    """The web settings every page Jarvis opens runs with (GUI thread, once ensure_engine() said ""): _SETTINGS_OFF off
+    and _SETTINGS_ON on (JavaScript among them), but local storage as ``local_storage``; addresses of a scheme the engine
+    does not know refused; a picture animates once at most."""
+    classes = _classes()
+    attribute = classes.QWebEngineSettings.WebAttribute
+    for names, value in ((_SETTINGS_OFF, False), (_SETTINGS_ON, True)):
+        for name in names:
+            item = getattr(attribute, name, None)
+            if item is not None:
+                settings.setAttribute(item, value)
+    item = getattr(attribute, "LocalStorageEnabled", None)
+    if item is not None:
+        settings.setAttribute(item, bool(local_storage))
+    policy = classes.QWebEngineSettings
+    settings.setUnknownUrlSchemePolicy(policy.UnknownUrlSchemePolicy.DisallowUnknownUrlSchemes)
+    settings.setImageAnimationPolicy(policy.ImageAnimationPolicy.AnimateOnce)
 
 
 def _quietly(step: Callable[[], Any]) -> None:
@@ -655,10 +899,14 @@ class PageCamera(QObject):
             return
         shot.seeded = True
         try:
-            shot.seed.runJavaScript(_SEED_SCRIPT, _ENGINE.classes.app_world)
+            shot.seed.runJavaScript(_seed_script(self._sandbox(shot)), _ENGINE.classes.app_world)
         except Exception as exc:  # noqa: BLE001
             logger.debug("Page snapshots: the private window was not opened (%s)", type(exc).__name__)
             self._end(shot, snapshots.R_ENGINE_FAILED)
+
+    def _sandbox(self, _shot: _Shot) -> str:
+        """The sandbox of this shot's window: SANDBOX (agent.browser's drive tabs get DRIVE_SANDBOX)."""
+        return SANDBOX
 
     def _adopt(self, shot: _Shot) -> Any:
         """The seed's sandboxed frame opened its pop-up: the shot's page takes it, once; anything
@@ -732,16 +980,7 @@ class PageCamera(QObject):
         # A last net: the window's sandbox keeps every download from starting (see download_folder).
         profile.setDownloadPath(download_folder())
         profile.downloadRequested.connect(lambda download: self._refuse("downloads", download, "cancel"))
-        settings = profile.settings()
-        attribute = classes.QWebEngineSettings.WebAttribute
-        for names, value in ((_SETTINGS_OFF, False), (_SETTINGS_ON, True)):
-            for name in names:
-                item = getattr(attribute, name, None)
-                if item is not None:
-                    settings.setAttribute(item, value)
-        policy = classes.QWebEngineSettings
-        settings.setUnknownUrlSchemePolicy(policy.UnknownUrlSchemePolicy.DisallowUnknownUrlSchemes)
-        settings.setImageAnimationPolicy(policy.ImageAnimationPolicy.AnimateOnce)
+        apply_web_settings(profile.settings())
 
     def _connect(self, page: Any, shot: _Shot) -> None:
         page.loadStarted.connect(lambda: self._on_started(shot))

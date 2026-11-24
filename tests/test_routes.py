@@ -214,5 +214,22 @@ class FollowupsRouteTests(unittest.TestCase):
         self.assertEqual(route("any follow-ups?", ALL_ON).kind, ROUTE_NONE)    # the flag off: a normal Ask
 
 
+
+class CaptureRouteTests(unittest.TestCase):
+    """Build plan item 3: "capture: <text>" is a capture of that text (always on); anything else stays as it was."""
+
+    def test_capture_prefix(self) -> None:
+        from briefing_reader.ask.routes import ROUTE_CAPTURE
+
+        found = route("Capture:  Lab report due Friday 5 PM", RouteFlags())
+        self.assertEqual((found.kind, found.payload), (ROUTE_CAPTURE, "Lab report due Friday 5 PM"))
+        self.assertEqual(route("capture : remember that the exam is Monday", RouteFlags(memory=True)).kind,
+                         ROUTE_CAPTURE)
+        for text in ("capture", "capture:", "capture the flag", "what can you capture?", "please capture: x"):
+            with self.subTest(text=text):
+                self.assertNotEqual(route(text, RouteFlags()).kind, ROUTE_CAPTURE)
+        self.assertNotIn("Lab", repr(found))
+
+
 if __name__ == "__main__":
     unittest.main()

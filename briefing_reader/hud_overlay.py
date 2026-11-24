@@ -11,7 +11,7 @@ the chips and the cards (``Glow``) as well as the brackets and tethers.
 
 ``HudWindow``
     The orb (``OrbWidget(ORB_PX)``: the compact level of detail in a 104 px widget, no ground, never resized per
-    frame) over the left end of the command bar, a 760 px bar centred in the work area 16 px from its top
+    frame; while Home is the canvas, the canvas orb's flat JARVIS badge in the same box - orb.set_badge_form) over the left end of the command bar, a 760 px bar centred in the work area 16 px from its top
     (Switch.dc.html ``.hud``): the 44 px input row (a second ``hud.CommandBar`` in its HUD look: the chevron, "Ask
     Jarvis", the HUD key's keycaps - none while no key can work), Jarvis's caption line with the orb's state word, a
     hairline and "Bring Jarvis back"; under the bar the chips: "Briefing ready" (cyan), "N need your OK" (amber;
@@ -22,7 +22,9 @@ the chips and the cards (``Glow``) as well as the brackets and tethers.
     (``WA_AlwaysShowToolTips``: the HUD is never the active window). ``place_on(screen)`` /
     ``place_in(area)``, ``area()``; ``set_caption(text)``; ``set_look(base, muted=, offline=, word=)`` (the orb and the
     state word); ``set_briefing_ready(bool)``, ``set_pending(count)``, ``set_recording(elapsed, warning="")``,
-    ``set_timer(text)`` (a chip whose words did not change is not repainted); ``chip_texts()``. P2.5: under the chips
+    ``set_timer(text)`` (a chip whose words did not change is not repainted); ``chip_texts()``. The new look (part
+    5a): the amber chips lead with the drawn diamond instead of a dot, and ``set_board(count)`` shows "9 on the board"
+    (``CHIP_BOARD``, after the amber chip, the board's glyph) while the board holds frames. P2.5: under the chips
     the instant row (``set_instant(items, dnd=, undo_all=)``, ``instant_texts()``; ``instant``, ``dnd_chip``,
     ``undo_all``): one cyan ``InstantChip`` per kind of change done at once - what it did and its NoFocus Undo link
     (``instantUndo(key)``) -, "Do Not Disturb - Turn on" while focus mode runs (``dndClicked``: Windows' own switch)
@@ -183,10 +185,69 @@ _ORB_DISC = 62.2                            # the dark disc's gradient radius (C
 _BAR_LINE = holo.alpha(holo.HOLO, 0.38)
 _BAR_HAIRLINE = holo.alpha(holo.HOLO, 0.16)
 _BAR_SHINE = holo.alpha(holo.HOLO_HI, 0.12)
+# The canvas look (canvas part 4): the bar, the chips and the buttons in the canvas frame style - square, opaque (a
+# window that takes clicks never paints alpha), the frames' bright edge with the inner glow, corner ticks; amber only
+# for what waits on the owner. Their outer glows (the DecorLayer's) go square with them.
+_CANVAS_FILL = QColor(3, 10, 13)            # board.css --tile, opaque
+_CANVAS_FILL_AMBER = QColor(14, 9, 3)       # --tile-amber
+_CANVAS_FILL_ALERT = QColor(17, 6, 5)       # --tile-alert
+_CANVAS_CHIP_EDGE = QColor(175, 240, 255, 178)
+_CANVAS_HAIRLINE = QColor(143, 235, 255, 46)
+
+
+def shape_radius(radius: float) -> float:
+    """A HUD shape's corner: as designed, or the canvas's square corner while Home is the canvas."""
+    return holo.CANVAS_RADIUS if holo.canvas_look() else radius
+
+
+def paint_card_frame(painter: QPainter, rect: QRectF, fill: Any, border: Any, ink: Any, tone: str, *,
+                     scan: bool = True, brackets: bool = True) -> None:
+    """A result card's frame (canvas part 5A): the hologram's rounded tile - its fill, scan lines, outline and brackets
+    - or, while Home is the canvas, a square canvas frame in the page's frame style: opaque (a window that takes clicks
+    never paints alpha), the frames' edge with the inner glow and corner ticks; amber only for what waits, coral for
+    what failed (their two ticks), the done green as a quiet edge."""
+    if holo.canvas_look():
+        amber, coral, done = tone == TONE_AMBER, tone == TONE_CORAL, tone == TONE_DONE
+        base = _CANVAS_FILL_AMBER if amber else _CANVAS_FILL_ALERT if coral else _CANVAS_FILL
+        glow = holo.CANVAS_GLOW_AMBER if amber else (255, 107, 94) if coral else holo.CANVAS_GLOW
+        edge = (QColor(holo.CANVAS_AMBER) if amber else holo.alpha(holo.ALERT, 0.75) if coral
+                else holo.alpha(holo.OK, 0.5) if done else holo.CANVAS_EDGE)
+        painter.save()
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            painter.fillRect(rect, base)
+            holo.paint_canvas_glow(painter, rect.adjusted(1, 1, -1, -1), glow, 0.4 if done else 1.0)
+            painter.setPen(QPen(edge, 1.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(rect.adjusted(0.5, 0.5, -0.5, -0.5))
+            if brackets and not done:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                if amber or coral:
+                    holo.paint_canvas_ticks(painter, rect, QColor(holo.CANVAS_AMBER_HI if amber else holo.ALERT_HI),
+                                            holo.BRACKETS_DIAGONAL)
+                else:
+                    holo.paint_canvas_ticks(painter, rect, QColor(255, 255, 255, 150))
+        finally:
+            painter.restore()
+        return
+    path = QPainterPath()
+    path.addRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), CARD_RADIUS, CARD_RADIUS)
+    painter.fillPath(path, QColor(fill))
+    if scan:
+        painter.save()
+        painter.setClipPath(path)
+        painter.fillRect(rect, holo.scan_brush(holo.SCAN_AMBER if tone == TONE_AMBER else holo.SCAN))
+        painter.restore()
+    painter.setPen(QPen(border, 1.0))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawPath(path)
+    if brackets:
+        holo.paint_brackets(painter, rect, ink, leg=CARD_BRACKET, radius=CARD_RADIUS, width=2.0)
 
 # The chips (under the bar) and the button beside it.
 CHIP_BRIEFING = "briefing"
 CHIP_APPROVALS = "approvals"
+CHIP_BOARD = "board"                        # the new look: "9 on the board" while the board holds frames
 CHIP_REC = "rec"
 CHIP_KEYS = (CHIP_BRIEFING, CHIP_APPROVALS, CHIP_REC)
 CHIP_TIMER = "timer"                        # P2.4: while a Jarvis timer runs (after the others; P2.5's row follows)
@@ -245,6 +306,11 @@ _SWP_NOSIZE = 0x0001
 _SWP_NOMOVE = 0x0002
 _SWP_NOACTIVATE = 0x0010
 _SWP_NOOWNERZORDER = 0x0200
+
+
+def board_text(count: int) -> str:
+    """The board's chip: "9 on the board" (DESIGN-SPEC 3.6)."""
+    return f"{max(0, int(count))} on the board"
 
 
 def needs_ok_text(count: int) -> str:
@@ -512,13 +578,21 @@ class _KeyCaps(QWidget):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             painter.setFont(self._font)
             x = 0.0
+            canvas = holo.canvas_look()      # canvas part 5A: square caps in the frames' quiet edge
+            line = holo.CANVAS_LINE if canvas else holo.alpha(holo.HOLO, 0.28)
             for key in self._keys:
                 cap = QRectF(x, 0, self._cap_width(key), self.HEIGHT)
-                painter.setPen(QPen(holo.alpha(holo.HOLO, 0.28), 1.0))
+                painter.setPen(QPen(line, 1.0))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
-                painter.drawRoundedRect(cap.adjusted(0.5, 0.5, -0.5, -1.5), 5, 5)
-                painter.fillRect(QRectF(cap.left() + 3, cap.bottom() - 2, cap.width() - 6, 1.5),
-                                 holo.alpha(holo.HOLO, 0.28))         # the keycap's 2 px bottom edge
+                if canvas:
+                    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+                    painter.drawRect(cap.adjusted(0.5, 0.5, -0.5, -1.5))
+                    painter.fillRect(QRectF(cap.left() + 1, cap.bottom() - 2, cap.width() - 2, 1.0), line)
+                    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                else:
+                    painter.drawRoundedRect(cap.adjusted(0.5, 0.5, -0.5, -1.5), 5, 5)
+                    painter.fillRect(QRectF(cap.left() + 3, cap.bottom() - 2, cap.width() - 6, 1.5),
+                                     line)                    # the keycap's 2 px bottom edge
                 painter.setPen(QColor(holo.INK_3))
                 painter.drawText(cap.adjusted(0, 0, 0, -1), int(Qt.AlignmentFlag.AlignCenter), key)
                 x += cap.width() + self.GAP
@@ -639,6 +713,8 @@ class _CaptionLine(QWidget):
 
 _CHIP_LOOKS = {   # fill, border, hover border, text, dot, chevron
     CHIP_BRIEFING: (holo.TILE, holo.alpha(holo.HOLO, 0.42), QColor(holo.HOLO), holo.INK_1, holo.HOLO, holo.INK_4),
+    CHIP_BOARD: (holo.TILE, holo.alpha(holo.HOLO, 0.42), QColor(holo.HOLO), holo.INK_1, holo.HOLO_LO, holo.INK_4),
+    # (the amber looks lead with the drawn diamond: _DIAMOND_LOOKS)
     CHIP_APPROVALS: (holo.TILE_AMBER, holo.alpha(holo.AMBER, 0.60), QColor(holo.AMBER), holo.AMBER_TX, holo.AMBER,
                      _AMBER_CHEVRON),
     CHIP_REC: (holo.RAISED, holo.alpha(holo.ALERT, 0.55), QColor(holo.ALERT), holo.INK_1, holo.ALERT, holo.INK_4),
@@ -650,6 +726,21 @@ _CHIP_LOOKS = {   # fill, border, hover border, text, dot, chevron
     CHIP_WAKE_PROBLEM: (holo.TILE_AMBER, holo.alpha(holo.AMBER, 0.60), QColor(holo.AMBER), holo.AMBER_TX, holo.AMBER,
                         _AMBER_CHEVRON),
 }
+
+
+_DIAMOND_LOOKS = frozenset({CHIP_APPROVALS, CHIP_WAKE_PROBLEM})     # amber: the diamond leads (the new look)
+
+
+def _canvas_chip_colors(look: str) -> tuple[QColor, QColor, QColor, QColor | None]:
+    """(fill, edge, hover edge, corner ticks) of a chip in the canvas look."""
+    if look in _DIAMOND_LOOKS:
+        return (_CANVAS_FILL_AMBER, holo.alpha(holo.CANVAS_AMBER, 0.8), QColor(holo.CANVAS_AMBER_HI),
+                QColor(holo.CANVAS_AMBER_HI))
+    if look == CHIP_REC:
+        return _CANVAS_FILL_ALERT, holo.alpha(holo.ALERT, 0.7), QColor(holo.ALERT_HI), None
+    if look == CHIP_WAKE_PAUSED:
+        return _CANVAS_FILL, holo.alpha(holo.STEEL, 0.55), QColor(holo.STEEL), None
+    return _CANVAS_FILL, QColor(_CANVAS_CHIP_EDGE), QColor(holo.CANVAS_EDGE_HI), None
 
 
 class HudChip(QAbstractButton):
@@ -739,20 +830,30 @@ class HudChip(QAbstractButton):
 
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         fill, border, hover, ink, dot, chevron = _CHIP_LOOKS[self._look]
+        ticks = None
+        if holo.canvas_look():
+            fill, border, hover, ticks = _canvas_chip_colors(self._look)
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-            radius = rect.height() / 2
+            radius = shape_radius(rect.height() / 2)
             painter.setPen(QPen(hover if self._hover else border, 1.0))
             painter.setBrush(QColor(fill))
             painter.drawRoundedRect(rect, radius, radius)
+            if ticks is not None:                    # what waits: the canvas's two corner ticks
+                holo.paint_canvas_ticks(painter, QRectF(self.rect()), ticks, holo.BRACKETS_DIAGONAL, leg=7.0)
             center = QPointF(self.PAD + 3.5, rect.center().y())
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(holo.alpha(dot, 0.25))
-            painter.drawEllipse(center, 6.0, 6.0)
-            painter.setBrush(QColor(dot))
-            painter.drawEllipse(center, 3.5, 3.5)
+            if self._look in _DIAMOND_LOOKS:         # waits on the owner: the drawn diamond (the new look)
+                holo.paint_icon(painter, QRectF(center.x() - 5.5, center.y() - 5.5, 11, 11), "diamond", dot)
+            elif self._key == CHIP_BOARD:            # the board's glyph
+                holo.paint_icon(painter, QRectF(center.x() - 6.5, center.y() - 6.5, 13, 13), "board", dot)
+            else:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(holo.alpha(dot, 0.25))
+                painter.drawEllipse(center, 6.0, 6.0)
+                painter.setBrush(QColor(dot))
+                painter.drawEllipse(center, 3.5, 3.5)
             x = self.PAD + 7 + 8
             text = self.shown_text()
             painter.setFont(self._font)
@@ -888,9 +989,10 @@ class InstantChip(QWidget):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-            radius = rect.height() / 2
-            painter.setPen(QPen(holo.alpha(holo.HOLO, 0.42), 1.0))
-            painter.setBrush(QColor(holo.TILE))
+            radius = shape_radius(rect.height() / 2)
+            canvas = holo.canvas_look()
+            painter.setPen(QPen(QColor(_CANVAS_CHIP_EDGE) if canvas else holo.alpha(holo.HOLO, 0.42), 1.0))
+            painter.setBrush(_CANVAS_FILL if canvas else QColor(holo.TILE))
             painter.drawRoundedRect(rect, radius, radius)
             center = QPointF(self.PAD + 3.5, rect.center().y())
             painter.setPen(Qt.PenStyle.NoPen)
@@ -956,9 +1058,13 @@ class _UndoAllChip(QAbstractButton):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-            radius = rect.height() / 2
-            painter.setPen(QPen(QColor(holo.HOLO) if lit else holo.alpha(holo.HOLO, 0.42), 1.0))
-            painter.setBrush(QColor(holo.TILE))
+            radius = shape_radius(rect.height() / 2)
+            if holo.canvas_look():
+                painter.setPen(QPen(QColor(holo.CANVAS_EDGE_HI) if lit else QColor(_CANVAS_CHIP_EDGE), 1.0))
+                painter.setBrush(_CANVAS_FILL)
+            else:
+                painter.setPen(QPen(QColor(holo.HOLO) if lit else holo.alpha(holo.HOLO, 0.42), 1.0))
+                painter.setBrush(QColor(holo.TILE))
             painter.drawRoundedRect(rect, radius, radius)
             painter.setFont(self._font)
             painter.setPen(QColor(holo.HOLO_HI if lit else holo.HOLO))
@@ -1017,7 +1123,8 @@ class _BackButton(QAbstractButton):
             rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
             painter.setPen(QPen(border, 1.0))
             painter.setBrush(fill)
-            painter.drawRoundedRect(rect, self.RADIUS, self.RADIUS)
+            radius = shape_radius(self.RADIUS)
+            painter.drawRoundedRect(rect, radius, radius)
             ink = QColor(holo.INK_1)
             box = QRectF(self.PAD, (self.height() - self.ICON) / 2, self.ICON, self.ICON)
             holo.paint_icon(painter, box, "window", ink, stroke=1.7)
@@ -1066,6 +1173,7 @@ class HudWindow(_OverlayWindow):
         self._remembered = 0                                # the window that had the keyboard before (0: none known)
         self._lent = False                                  # p2r-10: lent to a card for the owner's Tab (kept held)
         self.orb = orb_mod.OrbWidget(ORB_PX, self)          # no ground: the window is translucent
+        self.orb.set_badge_form(True)                       # the canvas's flat JARVIS badge while Home is the canvas
         self.keycaps = _KeyCaps(hud_key, self)
         self.bar = hud.CommandBar(self)
         # The keycaps say the HUD key only while one can work (settings_view.effective_hud_key); none, none shown.
@@ -1075,7 +1183,7 @@ class HudWindow(_OverlayWindow):
         self.back_button = _BackButton(BRING_BACK_TEXT, self)
         self.back_button.clicked.connect(self.bringBackClicked)
         self.chips: dict[str, HudChip] = {}
-        for key in (*CHIP_KEYS, CHIP_TIMER):
+        for key in (CHIP_BRIEFING, CHIP_APPROVALS, CHIP_BOARD, CHIP_REC, CHIP_TIMER):    # left to right
             chip = HudChip(key, self, read_only=key == CHIP_TIMER)     # p2r-8: the timer's chip only says when
             chip.hide()
             if not chip.read_only():
@@ -1171,14 +1279,15 @@ class HudWindow(_OverlayWindow):
         them (Switch.dc.html .bar and .hchip box-shadows) - this window never does (its margins stay clear). The
         instant row's (P2.5) come after the chips', cyan."""
         origin = self.geometry().topLeft()
-        glows = [Glow(self.bar_rect_local().translated(origin), BAR_RADIUS, GLOW_BAR)]
+        glows = [Glow(self.bar_rect_local().translated(origin), shape_radius(BAR_RADIUS), GLOW_BAR)]
         for key, chip in self.chips.items():
             if not chip.isHidden():
                 amber = key == CHIP_APPROVALS or chip.look() == CHIP_WAKE_PROBLEM
-                glows.append(Glow(chip.geometry().translated(origin), CHIP_HEIGHT / 2, GLOW_CHIP,
+                glows.append(Glow(chip.geometry().translated(origin), shape_radius(CHIP_HEIGHT / 2), GLOW_CHIP,
                                   TONE_AMBER if amber else TONE_CYAN))
         for item in self._instant_shown():
-            glows.append(Glow(item.geometry().translated(origin), CHIP_HEIGHT / 2, GLOW_CHIP, TONE_CYAN))
+            glows.append(Glow(item.geometry().translated(origin), shape_radius(CHIP_HEIGHT / 2), GLOW_CHIP,
+                              TONE_CYAN))
         return glows
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
@@ -1354,6 +1463,13 @@ class HudWindow(_OverlayWindow):
 
     def set_briefing_ready(self, ready: bool) -> None:
         self._show_chip(CHIP_BRIEFING, bool(ready))
+
+    def set_board(self, count: int) -> None:
+        """"9 on the board" while the board holds frames (its click brings Jarvis back with the board); none at 0."""
+        count = max(0, int(count or 0))
+        if count:
+            self.chips[CHIP_BOARD].setText(board_text(count))
+        self._show_chip(CHIP_BOARD, count > 0)
 
     def set_pending(self, count: int) -> None:
         """"N need your OK" (amber) while ``count`` approvals wait; none at 0."""
@@ -1560,7 +1676,8 @@ class HudWindow(_OverlayWindow):
         """The window's static paint (the panel, its hairlines and brackets, the orb's dark disc), cached per size
         and device pixel ratio."""
         dpr = float(dpr or self.devicePixelRatioF() or 1.0)
-        key = (self.width(), self.height(), self._bar_width, self._hairline_x, self._holding, dpr)
+        key = (self.width(), self.height(), self._bar_width, self._hairline_x, self._holding, dpr,
+               holo.canvas_look())
         if self._background is None or self._background_key != key:
             pixmap = QPixmap(max(1, round(self.width() * dpr)), max(1, round(self.height() * dpr)))
             pixmap.setDevicePixelRatio(dpr)
@@ -1583,6 +1700,14 @@ class HudWindow(_OverlayWindow):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         bar = QRectF(self.bar_rect_local())
         edge = bar.adjusted(0.5, 0.5, -0.5, -0.5)
+        if holo.canvas_look():                       # a canvas frame: square, opaque, the bright edge, its glow, ticks
+            painter.fillRect(bar, _CANVAS_FILL)
+            holo.paint_canvas_glow(painter, bar.adjusted(1, 1, -1, -1), holo.CANVAS_GLOW, 1.0)
+            painter.setPen(QPen(holo.CANVAS_EDGE_HI if self._holding else holo.CANVAS_EDGE, 1.0))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(edge)
+            holo.paint_canvas_ticks(painter, bar, QColor(255, 255, 255, 150), holo.BRACKETS_RIGHT)   # (the orb: left)
+            return
         path = QPainterPath()
         path.addRoundedRect(edge, BAR_RADIUS, BAR_RADIUS)
         painter.fillPath(path, QColor(holo.FIELD))
@@ -1600,7 +1725,7 @@ class HudWindow(_OverlayWindow):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         bar = QRectF(self.bar_rect_local())
         divider = bar.top() + 1 + ROW_HEIGHT + 0.5
-        painter.setPen(QPen(_BAR_HAIRLINE, 1.0))
+        painter.setPen(QPen(_CANVAS_HAIRLINE if holo.canvas_look() else _BAR_HAIRLINE, 1.0))
         painter.drawLine(QPointF(bar.left() + 1, divider), QPointF(self._hairline_x, divider))
         painter.drawLine(QPointF(self._hairline_x + 0.5, bar.top() + 12), QPointF(self._hairline_x + 0.5,
                                                                                  bar.bottom() - 12))
@@ -1883,7 +2008,7 @@ class ResultCard(_OverlayWindow):
         """Its outer shadow and glow (global; Switch.dc.html .glass, amber for a decision): the DecorLayer under it
         paints them, this window never does."""
         tone = TONE_AMBER if self._content.tone == TONE_AMBER else TONE_CYAN
-        return Glow(self.geometry(), CARD_RADIUS, GLOW_CARD, tone)
+        return Glow(self.geometry(), shape_radius(CARD_RADIUS), GLOW_CARD, tone)
 
     def moveEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().moveEvent(event)
@@ -2051,18 +2176,7 @@ class ResultCard(_OverlayWindow):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect())
-            edge = rect.adjusted(0.5, 0.5, -0.5, -0.5)
-            path = QPainterPath()
-            path.addRoundedRect(edge, CARD_RADIUS, CARD_RADIUS)
-            painter.fillPath(path, QColor(fill))
-            painter.save()
-            painter.setClipPath(path)
-            painter.fillRect(rect, holo.scan_brush(holo.SCAN_AMBER if tone == TONE_AMBER else holo.SCAN))
-            painter.restore()
-            painter.setPen(QPen(border, 1.0))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawPath(path)
-            holo.paint_brackets(painter, rect, ink, leg=CARD_BRACKET, radius=CARD_RADIUS, width=2.0)
+            paint_card_frame(painter, rect, fill, border, ink, tone)
             align = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             kicker = self.row_rect("kicker")
             dot = QPointF(kicker.left() + 3, kicker.center().y())
@@ -2216,7 +2330,7 @@ class _TickBox(QAbstractButton):
                 painter.setOpacity(0.45)
             painter.setPen(QPen(QColor(holo.AMBER), 1.5))
             painter.setBrush(QColor(holo.AMBER) if self.isChecked() else Qt.BrushStyle.NoBrush)
-            painter.drawRoundedRect(box.adjusted(0.75, 0.75, -0.75, -0.75), 5, 5)
+            painter.drawRoundedRect(box.adjusted(0.75, 0.75, -0.75, -0.75), shape_radius(5), shape_radius(5))
             if self.isChecked():
                 holo.paint_icon(painter, box.adjusted(3, 3, -3, -3), "check", holo.AMBER_INK, stroke=2.4)
         finally:
@@ -2568,17 +2682,7 @@ class DesktopCard(ResultCard):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect())
-            path = QPainterPath()
-            path.addRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), CARD_RADIUS, CARD_RADIUS)
-            painter.fillPath(path, QColor(fill))
-            painter.save()
-            painter.setClipPath(path)
-            painter.fillRect(rect, holo.scan_brush(holo.SCAN_AMBER if tone == TONE_AMBER else holo.SCAN))
-            painter.restore()
-            painter.setPen(QPen(border, 1.0))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawPath(path)
-            holo.paint_brackets(painter, rect, ink, leg=CARD_BRACKET, radius=CARD_RADIUS, width=2.0)
+            paint_card_frame(painter, rect, fill, border, ink, tone)
             align = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             kicker = self.row_rect("kicker")
             dot = QPointF(kicker.left() + 3, kicker.top() + 7)
@@ -2702,6 +2806,7 @@ PANEL_COMPACT = PANEL_PAD[0] * 2 + PANEL_HEAD + 8 + PANEL_LINE + PANEL_ACTIVITY 
 MORE_TEXT = "+{count} more"
 STOP_TEXT = "Stop"
 SHOW_TEXT = "Show"
+PAUSE_TEXT, RESUME_TEXT = "Pause", "Resume"   # a task that fills in pages: its web and drive calls held, or let go
 PANEL_BUTTON_SIZE = 26         # their drawn height
 TASK_CARD_WIDTH = DESK_WIDTH
 TASK_CARD_MIN_WIDTH = 320
@@ -2709,6 +2814,10 @@ TASK_CARD_MIN_BODY = 64        # at least this much of its text shows, whatever 
 TASK_LINE = 21
 TASK_ROW = 40                  # an output: its name, its two links
 TASK_ROW_NOTE = 18             # ... and any plain words under it
+FIELD_GAP = 10                 # a Send card's value rows: between them
+FIELD_LABEL = 18               # ... a row's label line
+FIELD_TAG = 22                 # ... its tag, when it has one
+EMPTY_VALUE = "(empty)"
 _ROW_INK = {STEP_TODO: holo.INK_4, STEP_DOING: holo.HOLO, STEP_DONE: holo.INK_2, STEP_FAILED: holo.ALERT_TX}
 _SCROLL_STYLE = ("QScrollArea { background: transparent; border: 0; } "
                  "QScrollBar:vertical { background: transparent; width: 8px; margin: 0; } "
@@ -2820,7 +2929,7 @@ class PlanPanel(_OverlayWindow):
 
     def glow(self) -> Glow:
         tone = TONE_AMBER if self._content.tone == TONE_AMBER else TONE_CYAN
-        return Glow(self.geometry(), CARD_RADIUS, GLOW_CARD, tone)
+        return Glow(self.geometry(), shape_radius(CARD_RADIUS), GLOW_CARD, tone)
 
     def cut_texts(self) -> list[str]:
         """Words it cuts now: its header or its activity line (a row's third line goes on purpose, with an ellipsis)."""
@@ -2841,12 +2950,7 @@ class PlanPanel(_OverlayWindow):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect())
-            path = QPainterPath()
-            path.addRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), CARD_RADIUS, CARD_RADIUS)
-            painter.fillPath(path, QColor(fill))
-            painter.setPen(QPen(border, 1.0))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawPath(path)
+            paint_card_frame(painter, rect, fill, border, ink, tone, scan=False, brackets=False)
             pad_v, pad_h = PANEL_PAD
             align = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             painter.setFont(self._head_font)
@@ -2914,6 +3018,8 @@ class PanelButtons(_OverlayWindow):
 
     stopClicked = Signal()
     showClicked = Signal()
+    pauseClicked = Signal()
+    resumeClicked = Signal()
 
     def __init__(self, *, native: HudNative | None = None, hide_from_capture: bool = True) -> None:
         super().__init__(HUD_FLAGS, native, hide_from_capture)
@@ -2921,21 +3027,28 @@ class PanelButtons(_OverlayWindow):
         self.setWindowTitle("Jarvis")
         self._fill = holo.TILE
         self.show_button = holo.HoloButton(SHOW_TEXT, holo.GHOST, size=PANEL_BUTTON_SIZE, parent=self)
+        self.pause_button = holo.HoloButton(PAUSE_TEXT, holo.GHOST, size=PANEL_BUTTON_SIZE, parent=self)
+        self.resume_button = holo.HoloButton(RESUME_TEXT, holo.GHOST, size=PANEL_BUTTON_SIZE, parent=self)
         self.stop_button = holo.HoloButton(STOP_TEXT, holo.DANGER_GHOST, size=PANEL_BUTTON_SIZE, parent=self)
         for button, signal, words in ((self.show_button, self.showClicked, "Show the window Jarvis reads in"),
+                                      (self.pause_button, self.pauseClicked, "Pause the task's pages"),
+                                      (self.resume_button, self.resumeClicked, "Resume the task's pages"),
                                       (self.stop_button, self.stopClicked, "Stop the task")):
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             button.setAccessibleName(words)
             button.clicked.connect(signal)
         self.set_buttons(False, False)
 
-    def set_buttons(self, stop: bool, show: bool, tone: str = TONE_CYAN) -> None:
+    def set_buttons(self, stop: bool, show: bool, tone: str = TONE_CYAN, pause: str = "") -> None:
+        """``pause``: "pause" (Pause shows), "resume" (Resume shows) or "" (neither: a task that fills in no pages)."""
         self.stop_button.setVisible(bool(stop))
         self.show_button.setVisible(bool(show))
+        self.pause_button.setVisible(bool(stop) and pause == "pause")
+        self.resume_button.setVisible(bool(stop) and pause == "resume")
         self._fill = _DESK_LOOKS.get(tone, _DESK_LOOKS[TONE_CYAN])[0]
         x = 0
         high = 0
-        for button in (self.show_button, self.stop_button):
+        for button in (self.show_button, self.pause_button, self.resume_button, self.stop_button):
             if button.isHidden():
                 continue
             hint = button.sizeHint()
@@ -2946,7 +3059,8 @@ class PanelButtons(_OverlayWindow):
         self.update()
 
     def any_shown(self) -> bool:
-        return not self.stop_button.isHidden() or not self.show_button.isHidden()
+        return any(not button.isHidden() for button in (self.stop_button, self.show_button, self.pause_button,
+                                                         self.resume_button))
 
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
@@ -3023,6 +3137,18 @@ class TaskRow:
 
 
 @dataclass(frozen=True)
+class TaskField:
+    """One row of a Send card (agent_feed, from agent.drive.CardLine): a field's label and the value exactly as it goes,
+    or one plain line (``label`` ""): where it goes, what the page set itself. ``tag``: mono caps under it, and
+    ``amber``: it needs the owner's eye (a value from their mail, files or calendar; a form going elsewhere)."""
+
+    label: str
+    value: str = ""
+    tag: str = ""
+    amber: bool = False
+
+
+@dataclass(frozen=True)
 class TaskContent:
     kicker: str
     body: str = ""
@@ -3032,6 +3158,85 @@ class TaskContent:
     rows: tuple[TaskRow, ...] = ()
     show_text: str = SHOW_TEXT
     folder_text: str = "Folder"
+    fields: tuple[TaskField, ...] = ()     # a Send card's rows, under its words (they scroll with them)
+
+
+def _laid_lines(text: str, font: QFont, width: float, line: float) -> tuple[QTextLayout, float]:
+    """``text`` wrapped at word boundaries, or anywhere in a long word: every character on show."""
+    layout = QTextLayout(text, font)
+    option = QTextOption()
+    option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+    layout.setTextOption(option)
+    layout.beginLayout()
+    y = 0.0
+    while True:
+        made = layout.createLine()
+        if not made.isValid():
+            break
+        made.setLineWidth(max(1.0, float(width)))
+        made.setPosition(QPointF(0.0, y))
+        y += line
+    layout.endLayout()
+    return layout, y
+
+
+class _FieldRow(QWidget):
+    """One TaskField: its label (small), the value whole and wrapped, never cut, and its tag in amber caps."""
+
+    def __init__(self, item: TaskField, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.item = item
+        self._label_font = hud.body_font(12)
+        self._value_font = hud.body_font(14)
+        self._tag_font = hud.mono_font(10, 500, 0.12)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAccessibleName(item.label or item.value)
+        self.setAccessibleDescription(f"{item.value} {item.tag}".strip() if item.label else item.tag)
+
+    def value_text(self) -> str:
+        return (self.item.value or EMPTY_VALUE) if self.item.label else self.item.value
+
+    def height_for(self, width: int) -> int:
+        height = FIELD_LABEL if self.item.label else 0
+        height += _laid_lines(self.value_text(), self._value_font, width, TASK_LINE)[1]
+        return math.ceil(height + (FIELD_TAG if self.item.tag else 0))
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        item = self.item
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            width = self.width()
+            y = 0.0
+            if item.label:
+                painter.setFont(self._label_font)
+                painter.setPen(QColor(holo.AMBER_TX2 if item.amber else holo.INK_3))
+                painter.drawText(QRectF(0, 0, width, FIELD_LABEL), int(Qt.AlignmentFlag.AlignLeft
+                                                                       | Qt.AlignmentFlag.AlignVCenter),
+                                 QFontMetricsF(self._label_font).elidedText(item.label, Qt.TextElideMode.ElideRight,
+                                                                            width))
+                y = FIELD_LABEL
+            layout, high = _laid_lines(self.value_text(), self._value_font, width, TASK_LINE)
+            empty = item.label and not item.value
+            painter.setPen(QColor(holo.INK_3 if empty else holo.AMBER_TX if item.amber else holo.INK_1))
+            layout.draw(painter, QPointF(0.0, y))
+            y += high
+            if item.tag:
+                metrics = QFontMetricsF(self._tag_font)
+                words = item.tag.upper()
+                wide = min(float(width), metrics.horizontalAdvance(words) + 16)
+                box = QRectF(0.5, y + 3.5, wide - 1, FIELD_TAG - 6)
+                painter.setPen(QPen(holo.alpha(holo.AMBER, 0.7), 1.0))
+                painter.setBrush(holo.alpha(holo.AMBER, 0.12))
+                painter.drawRoundedRect(box, box.height() / 2, box.height() / 2)
+                painter.setFont(self._tag_font)
+                painter.setPen(QColor(holo.AMBER_HI))
+                painter.drawText(box.adjusted(8, 0, -8, 0), int(Qt.AlignmentFlag.AlignLeft
+                                                               | Qt.AlignmentFlag.AlignVCenter),
+                                 metrics.elidedText(words, Qt.TextElideMode.ElideRight, max(0.0, wide - 16)))
+        finally:
+            painter.end()
 
 
 class _OutputName(QWidget):
@@ -3072,6 +3277,7 @@ class TaskCard(ResultCard):
         self.body = _PlainBody(self._column)
         self._names: list[QWidget] = []
         self._row_notes: dict[int, _OutputName] = {}     # a row's plain words, by its place
+        self._fields: list[_FieldRow] = []               # a Send card's rows
         self._column_rows: list[list[QAbstractButton]] = []    # choices in the scrolling column, when the room is short
         self.scroll = QScrollArea(self)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -3095,10 +3301,13 @@ class TaskCard(ResultCard):
         for button in [*self._buttons.values(), *self._row_buttons.values()]:
             button.hide()
             button.deleteLater()
-        for name in [*self._names, *self._row_notes.values()]:
+        for name in [*self._names, *self._row_notes.values(), *self._fields]:
             name.hide()
             name.deleteLater()
         self._buttons, self._row_buttons, self._names, self._row_notes = {}, {}, [], {}
+        self._fields = [_FieldRow(item, self._column) for item in content.fields]
+        for row in self._fields:
+            row.show()
         for spec in content.buttons:
             self._buttons[spec.key] = self._new_button(spec.key, spec.text, spec.variant, holo.SIZE_MD, spec.text)
         for index, row in enumerate(content.rows):
@@ -3227,13 +3436,21 @@ class TaskCard(ResultCard):
 
     def _column_height(self, width: int) -> int:
         height = self.body.height_for(width)
+        height += sum(FIELD_GAP + row.height_for(width) for row in self._fields)
         height += 10 + TASK_ROW * len(self._names) + TASK_ROW_NOTE * len(self._row_notes) if self._names else 0
         return height + (14 + self._rows_height(self._column_rows) if self._column_rows else 0)
 
     def _place_column(self, width: int, height: int) -> None:
         self._column.setFixedSize(width, height)
         self.body.setGeometry(0, 0, width, self.body.height_for(width))
-        y = self.body.height() + 10
+        y = self.body.height()
+        for row in self._fields:
+            y += FIELD_GAP
+            high = row.height_for(width)
+            row.setGeometry(0, y, width, high)
+            y += high
+        fields_end = y
+        y += 10
         for index, (row, name) in enumerate(zip(self._task.rows, self._names)):
             right = width + holo.HoloButton.MARGIN
             for key in (row.folder_key, row.show_key):
@@ -3251,7 +3468,7 @@ class TaskCard(ResultCard):
                 note.show()
                 y += TASK_ROW_NOTE
         if self._column_rows:                            # (only a question's choices: it has no outputs)
-            y = self.body.height() + 14
+            y = fields_end + 14
             margin = holo.HoloButton.MARGIN
             for row in self._column_rows:
                 x = -margin
@@ -3260,6 +3477,10 @@ class TaskCard(ResultCard):
                     button.setGeometry(x, y - margin, hint.width(), hint.height())
                     x += hint.width() - 2 * margin + holo.BUTTON_GAP
                 y += holo.SIZE_MD + 6
+
+    def field_rows(self) -> list[tuple[str, str, str, bool]]:
+        """A Send card's rows as they show: (label, value, tag, amber) (tests and the harness)."""
+        return [(row.item.label, row.value_text(), row.item.tag, row.item.amber) for row in self._fields]
 
     def row_notes(self) -> list[str]:
         """The plain words under its rows, as they show (tests and the harness)."""
@@ -3293,17 +3514,7 @@ class TaskCard(ResultCard):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect())
-            path = QPainterPath()
-            path.addRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), CARD_RADIUS, CARD_RADIUS)
-            painter.fillPath(path, QColor(fill))
-            painter.save()
-            painter.setClipPath(path)
-            painter.fillRect(rect, holo.scan_brush(holo.SCAN_AMBER if tone == TONE_AMBER else holo.SCAN))
-            painter.restore()
-            painter.setPen(QPen(border, 1.0))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawPath(path)
-            holo.paint_brackets(painter, rect, ink, leg=CARD_BRACKET, radius=CARD_RADIUS, width=2.0)
+            paint_card_frame(painter, rect, fill, border, ink, tone)
             align = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             kicker = self.row_rect("kicker")
             dot = QPointF(kicker.left() + 3, kicker.center().y())

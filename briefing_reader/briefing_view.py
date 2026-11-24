@@ -261,6 +261,7 @@ class BriefingStage(QWidget):
         self._word_timer = QTimer(self)
         self._word_timer.timeout.connect(self._next_word)
         self.orb = orb_mod.OrbWidget(orb_mod.COMPACT, self)
+        self.orb.set_badge_form(True)     # canvas part 5A: the canvas orb's flat badge while Home is the canvas
         self.speech = speech
         self.speech.setParent(self)
         self.play_button = play_button

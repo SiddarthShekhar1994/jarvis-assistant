@@ -66,8 +66,9 @@ class DockTests(unittest.TestCase):
     # ---- layout -------------------------------------------------------------
 
     def test_slots_and_layout(self) -> None:
-        # Desktop starts hidden ([desktop] shows it): the rail is the eight slots it always had.
-        screens = [key for key in dock.SLOTS if key != dock.DESKTOP]
+        # Desktop, Agents and Documents start hidden ([desktop], [standing] and [docs] show them): the rail is the
+        # eight slots it always had.
+        screens = [key for key in dock.SLOTS if key not in (dock.DESKTOP, dock.AGENTS, dock.DOCS)]
         self.assertEqual(self.dock.visible_slots(), screens)
         self.assertEqual(self.dock.width(), 64)
         rects = {key: self.dock.slot_rect(key) for key in screens}
@@ -102,7 +103,7 @@ class DockTests(unittest.TestCase):
         self.dock.set_hud_key("Ctrl+Alt+H")
         self.dock.set_slot_visible(dock.DESKTOP, True)
         settle()
-        self.assertEqual(self.dock.visible_slots(), list(dock.SLOTS))           # after Meetings, before Settings
+        self.assertEqual(self.dock.visible_slots(), [key for key in dock.SLOTS if key not in (dock.AGENTS, dock.DOCS)])
         self.assertEqual(self.dock.sizeHint().height(), 2 * dock.PAD_Y + 10 * dock.BUTTON)
         desktop, meetings = self.dock.slot_rect(dock.DESKTOP), self.dock.slot_rect(dock.MEETINGS)
         self.assertEqual((desktop.width(), desktop.height(), desktop.x()), (44, 44, 10))
@@ -134,6 +135,24 @@ class DockTests(unittest.TestCase):
         self.assertEqual({key: self.dock.slot_rect(key) for key in self.dock.visible_slots()}, before)
         shortcuts[dock.SLOTS.index(dock.DESKTOP)].activated.emit()
         self.assertEqual(self.activated, [dock.DESKTOP] * 3)
+
+    def test_agents_slot_shows_with_standing_on_ctrl_9_with_its_new_dot(self) -> None:
+        self.assertFalse(self.dock.is_slot_visible(dock.AGENTS))
+        self.dock.set_slot_visible(dock.AGENTS, True)
+        settle()
+        self.assertEqual(self.dock.visible_slots()[-2:], [dock.AGENTS, dock.SETTINGS])   # after Meetings
+        agents, meetings = self.dock.slot_rect(dock.AGENTS), self.dock.slot_rect(dock.MEETINGS)
+        self.assertEqual(agents.y() - meetings.bottom(), 6)                   # the Dock's gap
+        self.assertEqual((dock.LABELS[dock.AGENTS], dock.SHORTCUTS[dock.AGENTS]), ("Agents", "Ctrl+9"))
+        self.assertIn(dock.GLYPHS[dock.AGENTS], holo.ICONS)
+        self.dock.set_agents_new(True)
+        self.assertEqual(self.dock.accessible_name(dock.AGENTS), "Agents, new")
+        self.dock.set_agents_new(False)
+        self.assertEqual(self.dock.accessible_name(dock.AGENTS), "Agents")
+        shortcuts = self.dock.install_shortcuts(self.window)
+        shortcuts[dock.SLOTS.index(dock.AGENTS)].activated.emit()
+        self.assertEqual(self.activated, [dock.AGENTS])
+        self.assertEqual(self.dock.current(), dock.AGENTS)
 
     def test_settings_opens_without_becoming_current(self) -> None:
         QTest.mouseClick(self.dock.button(dock.SETTINGS), Qt.MouseButton.LeftButton)

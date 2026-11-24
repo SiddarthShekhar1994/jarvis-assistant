@@ -47,7 +47,7 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaDevices, QMediaPlayer
 from . import voice_fx
 from .persona import scrub_for_speech
 from .player import PAUSED, PLAYING, WAITING
-from .speech import KIND_ACK, KIND_REPLY, SpeechLane, Utterance
+from .speech import KIND_ACK, KIND_REPLY, SpeechLane, Utterance, wait_limit_s
 
 logger = logging.getLogger(__name__)
 
@@ -273,7 +273,7 @@ class AssistantVoice(QObject):
         self._forget(dropped)
         if utterance is None:
             return False
-        self._worker.submit(utterance.seq, utterance.text)
+        self._worker.submit(utterance.seq, utterance.text, within_s=wait_limit_s(utterance.kind))
         if not self._tick.isActive():
             self._tick.start()
         self.pump()
@@ -332,6 +332,7 @@ class AssistantVoice(QObject):
             if current.kind == KIND_ACK and waiting and waiting[0].kind == KIND_REPLY and waiting[0].ready:
                 self._end_current(current)      # the answer's audio is here: it never waits for an acknowledgement
             return
+        self._forget(self._lane.drop_stale())   # a stale one is never made: the say thread skips it
         utterance = self._lane.start_next(hold=self._hold())
         if utterance is None:
             if self._lane.idle:

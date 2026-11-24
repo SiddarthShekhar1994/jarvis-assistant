@@ -154,6 +154,8 @@ from ..live import (
     ASK_CHECKS,
     ASK_VALIDATE,
     CALENDAR_READ,
+    CAPTURE_INPUT,
+    CAPTURE_VALIDATE,
     DESKTOP_FIND,
     DESKTOP_PLAN,
     DESKTOP_STEP,
@@ -245,12 +247,13 @@ from .stream import (
     run_planner,
 )
 from .usage import KIND_RESEARCH, USAGE_FILE, CapCheck, UsageLog
-from .validate import LINE_CARD, LINE_OVER_CAP, LINE_REFUSED, LINE_REPEAT, Cards, keep_valid, to_cards
-from . import dayplan, desktop_mode, meeting_summary, modes, prep
+from .validate import (LINE_CARD, LINE_OVER_CAP, LINE_REFUSED, LINE_REPEAT, PLAIN_ASK_KINDS, Cards, keep_valid,
+                       to_cards)
+from . import capture_read, dayplan, desktop_mode, docs_mode, meeting_summary, modes, prep, revise
 from ..desktop import executor as desktop_executor
 from ..desktop import validate as desktop_validate
-from .modes import (MODE_DESKTOP, MODE_KINDS, MODE_MAX_LINES, MODE_MEETING, MODE_NUDGE, MODE_PLAN, MODE_PREP,
-                    MODE_USAGE, ModeInputs, ModeRequest)
+from .modes import (MODE_CAPTURE, MODE_DESKTOP, MODE_DOC, MODE_KINDS, MODE_MAX_LINES, MODE_MEETING, MODE_NUDGE,
+                    MODE_PLAN, MODE_PREP, MODE_REVISE, MODE_USAGE, ModeInputs, ModeRequest)
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +261,14 @@ STAGE_CONTEXT = "context"          # reading the calendar (and named briefing th
 STAGE_PLANNING = "planning"        # the first planner run
 STAGE_MAIL = "mail"                # running the search the planner asked for
 STAGE_PLANNING_AGAIN = "planning_again"   # the second run, with the mail
+# A revise's outcome kinds besides "ok" and the failures: a question back (never shown: Jarvis says it in his own
+# words), a rewrite Jarvis held back (its message is the reason word, revise.REVISE_*).
+REVISE_QUESTION = "revise_question"
+REVISE_HELD = "revise_held"
+# A document's or sheet's run (build plan item 5): a question back, or changes Jarvis held back (its brief holds the
+# reason word, docs_mode.DOC_*). Either way nothing waits in the item.
+DOC_QUESTION = "doc_question"
+DOC_HELD = "doc_held"
 STAGE_RESEARCH = "research"        # the web research run
 STAGE_DAY = "day"                  # a day plan: reading the day being planned
 STAGE_PREP_MAIL = "prep_mail"      # a meeting brief: Jarvis's own searches and reads of the guests' threads
@@ -281,6 +292,12 @@ AUTH_FRESH_S = 5.0        # run() trusts an auth status this recent; older, it a
 MEETING_TIMEOUT_S = 480.0
 NO_TRANSCRIPT = "no_transcript"   # a meeting summary with no transcript to read (AskOutcome.kind)
 NO_TRANSCRIPT_MESSAGE = "There is no transcript to summarise; nothing was proposed"
+# A capture with pictures needs a Claude Code that takes stream-json input (the pictures go in its message): without
+# one the capture is refused before anything starts (AskOutcome.kind).
+NO_PICTURE_INPUT = "no_picture_input"
+NO_PICTURE_INPUT_MESSAGE = "This Claude Code can't take pictures, so nothing was read; text and calendar files still work"
+NOTHING_TO_READ = "nothing_to_read"
+NOTHING_TO_READ_MESSAGE = "There was nothing Jarvis could read in it; nothing was sent"
 OVERAGE_PAUSE = timedelta(hours=5)   # the pause after an extra-usage signal that names no reset time
 
 DISABLED_MESSAGE = "Ask Jarvis is off ([ask] enabled = false in config.toml)"
@@ -398,12 +415,15 @@ class ClaudeEngine:
                          probe.agent_missing)
 
     def argv(self, ready: Readiness, *, allow_search: bool, allow_web: bool = False,
-             allow_remember: bool = False, allow_agent: bool = False) -> list[str]:
+             allow_remember: bool = False, allow_agent: bool = False, allow_standing: bool = False,
+             allow_doc: bool = False) -> list[str]:
         assert ready.exe is not None
         extra = {"prompt_file": cli.PROMPT_FILE_AGENT} if allow_agent else {}   # off: the prompt file as ever
+        doc = {"allow_doc": True} if allow_doc else {}                            # off: the schema as ever
         return cli.build_argv(ready.exe.path, model=self.ask.model, max_turns=self.ask.max_turns,
                               schema=cli.schema_text(allow_search=allow_search, allow_web=allow_web,
-                                                     allow_remember=allow_remember, allow_agent=allow_agent),
+                                                     allow_remember=allow_remember, allow_agent=allow_agent,
+                                                     allow_standing=allow_standing, **doc),
                               hardened=ready.hardened, streaming=ready.streaming, **extra)
 
     def preflight(self) -> tuple[Readiness, AskFailure | None]:
@@ -433,7 +453,7 @@ class ClaudeEngine:
             progress: Callable[[str, Any], None] | None = None, capture: bool = False,
             allow_web: bool = False, allow_remember: bool = False,
             on_words: Callable[[str, bool], None] | None = None, slot: str = "",
-            allow_agent: bool = False) -> RunResult:
+            allow_agent: bool = False, allow_standing: bool = False, allow_doc: bool = False) -> RunResult:
         """One planner run with ``prompt`` on stdin, after preflight(). ``progress`` / ``capture``:
         stream.run_planner's (the LIVE view; neither changes the run). ``allow_web``: the run may
         hand the request to web research (planner run 1 only); ``allow_remember``: it may suggest
@@ -450,7 +470,8 @@ class ClaudeEngine:
             return RunResult(failure=failure(CANCELLED, "cancel"))
         env = cli.clean_env(self._env_source())
         argv = self.argv(ready, allow_search=allow_search, allow_web=allow_web, allow_remember=allow_remember,
-                         allow_agent=allow_agent)
+                         allow_agent=allow_agent, allow_standing=allow_standing,
+                         **({"allow_doc": True} if allow_doc else {}))
 
         def go(process: Any, after: Callable[[], None] | None) -> RunResult:
             return run_planner(self.runner, argv, prompt, env=env, cwd=self.work_folder,
@@ -496,21 +517,23 @@ class ClaudeEngine:
         return replace(go(None, fill_again), start=START_FELL_BACK)
 
     def mode_argv(self, ready: Readiness, mode: str, *, allow_remember: bool = False,
-                  allow_agent: bool = False) -> list[str]:
+                  allow_agent: bool = False, pictures: bool = False) -> list[str]:
         """A planner mode's command line: Ask's exactly, but its own system prompt and schema (only a desktop request's
-        streams and can be started ahead: the others have no words to show early and keep plain stdin). ``allow_agent``:
-        a desktop run while the agent is on, which may hand the request to a task."""
+        streams and can be started ahead: the others have no words to show early and keep plain stdin; a capture with
+        ``pictures`` streams too, as its pictures go in the stream-json message). ``allow_agent``: a desktop run while
+        the agent is on, which may hand the request to a task."""
         assert ready.exe is not None
         allow_agent = allow_agent and mode == MODE_DESKTOP
         return cli.build_argv(ready.exe.path, model=self.ask.model, max_turns=self.ask.max_turns,
                               schema=cli.mode_schema_text(mode, allow_remember=allow_remember, allow_agent=allow_agent),
                               hardened=ready.hardened,
                               prompt_file=cli.DESKTOP_PROMPT_FILE_AGENT if allow_agent else cli.MODE_PROMPTS[mode],
-                              streaming=ready.streaming and mode == MODE_DESKTOP)
+                              streaming=ready.streaming and (mode == MODE_DESKTOP or mode == MODE_CAPTURE and pictures))
 
     def run_mode(self, prompt: str, mode: str, *, cancel: threading.Event | None = None,
                  progress: Callable[[str, Any], None] | None = None, capture: bool = False,
-                 allow_remember: bool = False, allow_agent: bool = False) -> RunResult:
+                 allow_remember: bool = False, allow_agent: bool = False,
+                 images: Sequence[tuple[str, bytes]] = ()) -> RunResult:
         """One run of a planner mode (ask.modes: "plan", "prep") after preflight(): the same Claude
         Code, clean environment, empty work folder, deny-all settings, flags and checks as run()
         (stream.check_init / check_event), with the mode's own prompt and schema (never gmail_search
@@ -526,16 +549,31 @@ class ClaudeEngine:
             return RunResult(failure=failure(CANCELLED, "cancel"))
         env = cli.clean_env(self._env_source())
         # Mail, the summary's own notes, or names other people wrote on the desktop: never "remember".
-        if mode in (MODE_PREP, MODE_NUDGE, MODE_MEETING, MODE_DESKTOP):
+        if mode in (MODE_PREP, MODE_NUDGE, MODE_MEETING, MODE_DESKTOP, MODE_CAPTURE, MODE_REVISE, MODE_DOC):
             allow_remember = False
         allow_agent = allow_agent and mode == MODE_DESKTOP
         extra = {"allow_agent": True} if allow_agent else {}
+        if mode == MODE_CAPTURE and images:
+            extra["pictures"] = True
         argv = self.mode_argv(ready, mode, allow_remember=allow_remember, **extra)
-        if mode == MODE_PREP:
+        if mode == MODE_CAPTURE:     # a capture: the meeting's timeout, its own strict reader, its pictures
+            result = run_cli(self.runner, argv, prompt, env=env, cwd=self.work_folder,
+                             timeout_s=max(float(self.ask.timeout_seconds), MEETING_TIMEOUT_S),
+                             read=capture_read.read_capture_result, cancel=cancel, clock=self._clock,
+                             progress=progress, capture=capture, images=tuple(images))
+        elif mode == MODE_PREP:
             result = run_cli(self.runner, argv, prompt, env=env, cwd=self.work_folder,
                              timeout_s=float(self.ask.timeout_seconds),
                              read=lambda event, init: prep.read_prep_result(event, init), cancel=cancel,
                              clock=self._clock, progress=progress, capture=capture)
+        elif mode == MODE_DOC:      # a document's or sheet's changes, read strictly (docs_mode.read_doc_result)
+            result = run_cli(self.runner, argv, prompt, env=env, cwd=self.work_folder,
+                             timeout_s=float(self.ask.timeout_seconds), read=docs_mode.read_doc_result,
+                             cancel=cancel, clock=self._clock, progress=progress, capture=capture)
+        elif mode == MODE_REVISE:   # a rewritten message, read strictly (revise.read_revise_result)
+            result = run_cli(self.runner, argv, prompt, env=env, cwd=self.work_folder,
+                             timeout_s=float(self.ask.timeout_seconds), read=revise.read_revise_result,
+                             cancel=cancel, clock=self._clock, progress=progress, capture=capture)
         elif mode == MODE_MEETING:   # a long transcript: a longer timeout, its own strict reader
             result = run_cli(self.runner, argv, prompt, env=env, cwd=self.work_folder,
                              timeout_s=max(float(self.ask.timeout_seconds), MEETING_TIMEOUT_S),
@@ -979,11 +1017,33 @@ class AskOutcome:
     # A task to work through (Jarvis, a true agent): the owner's own words, whatever the planner wrote as the goal; the
     # app starts it (agent_ui). Never logged.
     agent_task: str = field(default="", repr=False)
+    # A standing job to set up ([standing]): its kind ("agent" | "rule") and the owner's own words, whatever the planner
+    # wrote; the app starts the setup (standing_ui). The words are never logged.
+    standing_job: str = ""
+    standing_words: str = field(default="", repr=False)
+    # The new look, part 6: the answer's topic (the board group's header words; "" none) and its typed frames
+    # (board.ask_frames.AskFrame: table, chart, timeline, maths), checked strictly. Shown, never logged but as counts.
+    topic: str = field(default="", repr=False)
+    frames: tuple[Any, ...] = field(default=(), repr=False, compare=False)
+    # Mail extras (part 2): a revise run's rewritten message text, checked (revise.check_revision), offered in the Edit
+    # dialog that asked (``brief`` holds that request's digest). Never logged, never spoken, never kept before Save.
+    revised: str = field(default="", repr=False)
+    # Documents (build plan item 5): a first run's hand-off to a document or sheet (its kind, the name as the planner
+    # wrote it, the owner's own words: docs_ui finds or makes the item, then one document run), and a document run's
+    # checked changes (docs_mode.DocProposal: they wait in the item for Keep). Never logged but as kinds and counts.
+    doc_job: str = ""
+    doc_name: str = field(default="", repr=False)
+    doc_words: str = field(default="", repr=False)
+    doc_proposal: Any = field(default=None, repr=False, compare=False)
 
     def summary(self) -> str:
         """For the log: kinds and counts only."""
+        if self.doc_job:
+            return f"{self.kind}: handed to a {self.doc_job}, {self.runs} run(s)"
         if self.agent_task:
             return f"{self.kind}: handed to a task, {self.runs} run(s), {self.duration_ms / 1000:.1f} s"
+        if self.standing_job:
+            return f"{self.kind}: handed to the standing setup ({self.standing_job}), {self.runs} run(s)"
         kinds: dict[str, int] = {}
         for card in self.cards:
             name = "refused" if card.error else card.kind
@@ -1016,6 +1076,21 @@ class AskOutcome:
 
 def _seconds(value: float | None) -> str:
     return "-" if value is None else f"{value:.2f} s"
+
+
+def _typed_frames(found: Any, who: str = "Ask") -> tuple[str, tuple[Any, ...]]:
+    """(the topic, the typed frames) board.ask_frames kept of an answer (``found``: its AskFrames; None when the run
+    was read without them), and one log line when the answer gave a topic or frames: counts, kinds and reason words
+    only - never a title, a cell, a word or a number of the model's."""
+    if found is None or not getattr(found, "given", False):
+        return "", ()
+    frames = tuple(found.frames)
+    reasons = ", ".join(f"{reason} {count}" for reason, count in found.dropped)
+    topic = "given" if found.topic else "dropped" if found.topic_dropped else "none"
+    logger.info("%s: %d frame(s) to show (%s), %d dropped%s, topic %s", who, len(frames),
+                ", ".join(frame.kind for frame in frames) or "none", found.dropped_count(),
+                f" ({reasons})" if reasons else "", topic)
+    return found.topic, frames
 
 
 @dataclass
@@ -1219,7 +1294,8 @@ class AskPlanner:
              number: int = 1, search_words: str = "", allow_web: bool = False, web_words: str = "",
              allow_remember: bool = False, mode: str = "",
              on_words: Callable[[str, bool], None] | None = None, slot: str = "",
-             allow_agent: bool = False) -> RunResult:
+             allow_agent: bool = False, allow_standing: bool = False,
+             images: Sequence[tuple[str, bytes]] = (), allow_doc: bool = False) -> RunResult:
         """One planner run, counted when it starts (``mode``: a planner mode's run, ClaudeEngine.run_mode,
         counted as that mode's bundle kind): the send, never a process started ahead's start. ``on_words`` and
         ``slot``: ClaudeEngine.run's."""
@@ -1235,7 +1311,7 @@ class AskPlanner:
             step.done(STATUS_BLOCKED, status_text="SKIPPED", summary=f"Not started: {refused.message}")
             return RunResult(failure=refused, started=False)
         _run_ready(step, self.engine, ready, allow_search, allow_web, allow_remember, mode=mode,
-                   allow_agent=allow_agent)
+                   allow_agent=allow_agent, allow_standing=allow_standing, allow_doc=allow_doc)
         run = self.usage.start(kind=MODE_USAGE[mode]) if mode else self.usage.start()
         result: RunResult | None = None
         try:
@@ -1248,6 +1324,12 @@ class AskPlanner:
                 extra["allow_remember"] = True
             if allow_agent:           # the same
                 extra["allow_agent"] = True
+            if allow_standing:        # the same
+                extra["allow_standing"] = True
+            if allow_doc:             # the same
+                extra["allow_doc"] = True
+            if images:                # the same (a capture's pictures)
+                extra["images"] = tuple(images)
             if on_words is not None:  # the same
                 extra["on_words"] = on_words
             if slot and getattr(self.engine, "prestart", None) is not None:   # the same
@@ -1345,6 +1427,10 @@ class AskPlanner:
                 extra["allow_remember"] = True
             if self._agent_allowed():
                 extra["allow_agent"] = True
+            if self._standing_allowed():
+                extra["allow_standing"] = True
+            if self._docs_allowed():
+                extra["allow_doc"] = True
             argv = self.engine.argv(ready, allow_search=allow_search, **extra)
             pool.fill(prestart.SLOT_ASK, argv, cli.clean_env(self.engine._env_source()), self.engine.work_folder)
         except Exception as exc:  # noqa: BLE001 - only prepares the next request
@@ -1446,6 +1532,28 @@ class AskPlanner:
             return False, "no - the Ask limit leaves one run"
         return True, "yes"
 
+    def _docs_allowed(self) -> bool:
+        """May a first run hand the request to a document or a sheet? Only while [docs] is on and the app says so
+        (``docs_allowed``: its documents are there); never raises."""
+        check = getattr(self, "docs_allowed", None)
+        if check is None or not getattr(getattr(self.config, "docs", None), "enabled", True):
+            return False
+        try:
+            return check() is True
+        except Exception:  # noqa: BLE001 - unknown: no hand-off
+            return False
+
+    def _standing_allowed(self) -> bool:
+        """May a first run hand the request to the standing setup? Only while [standing] is on and the app says so
+        (``standing_allowed``); never raises."""
+        check = getattr(self, "standing_allowed", None)
+        if check is None or not getattr(getattr(self.config, "standing", None), "enabled", False):
+            return False
+        try:
+            return check() is True
+        except Exception:  # noqa: BLE001 - unknown: no hand-off
+            return False
+
     def _agent_allowed(self) -> bool:
         """May a first run hand the request to a task? False unless the app says so; never raises."""
         check = self.agent_allowed
@@ -1513,9 +1621,15 @@ class AskPlanner:
         allow_agent = self._agent_allowed()
         if allow_agent:
             logger.info("Ask: run 1 may hand the request to a task")
+        allow_standing = self._standing_allowed()
+        standing_extra = {"allow_standing": True} if allow_standing else {}   # off: the call exactly as before
+        allow_doc = self._docs_allowed()
+        if allow_doc:
+            standing_extra["allow_doc"] = True                                 # the same
         first = self._run(prompt, allow_search=allow_search, cancel=cancel, live=live, number=1, search_words=why_not,
                           allow_web=allow_web, web_words=web_words, allow_remember=allow_remember,
-                          on_words=words(1, bool(ctx.mail)), slot=prestart.SLOT_ASK, allow_agent=allow_agent)
+                          on_words=words(1, bool(ctx.mail)), slot=prestart.SLOT_ASK, allow_agent=allow_agent,
+                          **standing_extra)
         del prompt
         if first.failure is not None or first.plan is None:
             failure = first.failure
@@ -1532,6 +1646,20 @@ class AskPlanner:
             logger.info("Agent: handed over by the planner (%d line(s) left out)", len(plan.lines))
             return AskOutcome(True, "ok", "", say=plan.say or with_address(AGENT_TASK_WORDS, self._owner()), runs=1,
                               init=first.init, stats=(first.stats,), mail=report(ctx.mail), agent_task=command)
+        if (allow_standing and plan.standing and not plan.question
+                and not (plan.search is not None and allow_search)):
+            # The owner's own words go to the setup, whatever the planner wrote; none of the context does.
+            logger.info("Standing: handed over by the planner (%s; %d line(s) left out)", plan.standing,
+                        len(plan.lines))
+            return AskOutcome(True, "ok", "", say=plan.say or with_address(STANDING_SETUP_WORDS, self._owner()),
+                              runs=1, init=first.init, stats=(first.stats,), mail=report(ctx.mail),
+                              standing_job=plan.standing, standing_words=command)
+        if (allow_doc and plan.doc and not plan.question
+                and not (plan.search is not None and allow_search)):
+            # The owner's own words go to the document's run, whatever the planner wrote; the name only finds the item.
+            logger.info("Docs: handed over by the planner (%s; %d line(s) left out)", plan.doc[0], len(plan.lines))
+            return AskOutcome(True, "ok", "", say=plan.say, runs=1, init=first.init, stats=(first.stats,),
+                              mail=report(ctx.mail), doc_job=plan.doc[0], doc_name=plan.doc[1], doc_words=command)
         if plan.web is not None and allow_web:
             if plan.search is not None and allow_search:   # mail first, as asked; the web another time
                 live.step(ASK_CHECKS, "Web research", status=STATUS_WARN, status_text="SKIPPED", summary=BOTH_MESSAGE)
@@ -1648,6 +1776,12 @@ class AskPlanner:
                 outcome = self._meeting(request, inputs or ModeInputs(), page_ids, cancel, on_stage, task)
             elif request.mode == MODE_DESKTOP:
                 outcome = self._desktop(request, cancel, on_stage, task)
+            elif request.mode == MODE_CAPTURE:
+                outcome = self._capture(request, cancel, on_stage, task)
+            elif request.mode == MODE_REVISE:
+                outcome = self._revise(request, cancel, on_stage, task)
+            elif request.mode == MODE_DOC:
+                outcome = self._doc(request, cancel, on_stage, task)
             else:
                 outcome = AskOutcome(False, "error", "Jarvis can't do that kind of request yet; nothing was proposed")
         except Exception as exc:  # noqa: BLE001 - a mode run must never take the app down
@@ -1822,6 +1956,156 @@ class AskPlanner:
                   "free minutes": dayplan.free_minutes(slots), "to-dos": len(inputs.todos),
                   "deadlines": len(inputs.deadlines), "memory": index.memory_notes}
         return DryRun(prompt, argv, ready, counts, MailReport(), note=note)
+
+    # ---- a capture (build plan item 3) ----------------------------------------------------------
+
+    def _capture(self, request: ModeRequest, cancel: threading.Event | None, on_stage: Callable[[str], None],
+                 live: LiveTask = NO_TASK) -> AskOutcome:
+        """A capture's reading (ask.capture_read): the checks, pictures refused before anything starts when this
+        Claude Code can't take them, one run, its answer read strictly, then Jarvis's checks of each item. Nothing is
+        added here: the app builds the cards (capture.summarize) and the owner approves each one."""
+        job = request.payload
+        if not isinstance(job, capture_read.CaptureJob):
+            return AskOutcome(False, "error", "Jarvis can't do that kind of request yet; nothing was proposed")
+        refusal = self._refusal(live)
+        if refusal is not None:
+            logger.info("Capture %s: no run (%s)", job.capture_id, refusal.kind)
+            return replace(refusal, target=job.capture_id)
+        step = live.step(CAPTURE_INPUT, "What you dropped in")
+        if job.pictures and not getattr(self.engine.readiness(), "streaming", False):
+            step.done(STATUS_BLOCKED, summary=NO_PICTURE_INPUT_MESSAGE)
+            logger.info("Capture %s: no run (%s)", job.capture_id, NO_PICTURE_INPUT)
+            return AskOutcome(False, NO_PICTURE_INPUT, NO_PICTURE_INPUT_MESSAGE, target=job.capture_id)
+        if not job.pictures and not any(page.text.strip() for page in job.pages):
+            step.done(STATUS_BLOCKED, summary=NOTHING_TO_READ_MESSAGE)
+            logger.info("Capture %s: no run (%s)", job.capture_id, NOTHING_TO_READ)
+            return AskOutcome(False, NOTHING_TO_READ, NOTHING_TO_READ_MESSAGE, target=job.capture_id)
+        on_stage(STAGE_CONTEXT)
+        zone = self.sources.time_zone()
+        now = self.clock()
+        wall = dayplan.to_wall(now, zone) if zone else now
+        wall = wall.replace(tzinfo=None) if wall.tzinfo is not None else wall
+        prompt = capture_read.build_prompt(wall, zone, job)
+        _capture_input(step, job, prompt)
+        logger.info("Capture %s: reading a %s (%s, %d page(s), %d picture(s), %d characters)", job.capture_id,
+                    job.kind, capture_read.size_bucket(job.size), job.page_count, len(job.images()), len(prompt))
+        on_stage(STAGE_PLANNING)
+        result = self._run(prompt, allow_search=False, cancel=cancel, live=live, number=1, mode=MODE_CAPTURE,
+                           images=job.images())
+        del prompt
+        answer = result.answer
+        if result.failure is not None or not isinstance(answer, capture_read.CaptureAnswer):
+            failed = result.failure
+            kind = failed.kind if failed else "error"
+            logger.info("Capture %s: run %s", job.capture_id, kind)
+            return AskOutcome(False, kind, failed.message if failed else "", runs=1 if result.started else 0,
+                              init=result.init, stats=(result.stats,) if result.started else (),
+                              target=job.capture_id)
+        items, counts = capture_read.items_from(answer, job, wall)
+        _capture_validated(live, counts)
+        logger.info("Capture %s: %d item(s) listed, %d kept, %d past, %d refused, %d far away", job.capture_id,
+                    counts.items, counts.kept, counts.past, counts.refused, counts.far)
+        return AskOutcome(True, "ok", "", say=answer.say, question=answer.question, runs=1, init=result.init,
+                          stats=(result.stats,), brief=(tuple(items), counts), refused=counts.refused,
+                          mode=MODE_CAPTURE, target=job.capture_id)
+
+    # ---- a draft rewritten in the owner's words (mail extras, part 2) ----------------------------
+
+    def _revise(self, request: ModeRequest, cancel: threading.Event | None, on_stage: Callable[[str], None],
+                live: LiveTask = NO_TASK) -> AskOutcome:
+        """The Edit dialog's Rewrite: the checks (Ask on, the caps, Claude Code ready), one run that sees only the draft
+        and the owner's words (no thread, notes, search or web), its answer read strictly and then Jarvis's own check
+        (revise.check_revision). Nothing is kept or sent here: the dialog offers the text, the owner saves it."""
+        job = request.payload
+        if not isinstance(job, modes.RevisionJob):
+            return AskOutcome(False, "error", "Jarvis can't do that kind of request yet; nothing was proposed")
+        refusal = self._refusal(live)
+        if refusal is not None:
+            logger.info("Revise %s: no run (%s)", job.action_id, refusal.kind)
+            return replace(refusal, target=job.action_id, brief=(job.digest, ""))
+        words = request.typed
+        on_stage(STAGE_CONTEXT)
+        zone = self.sources.time_zone()
+        now = self.clock()
+        wall = dayplan.to_wall(now, zone) if zone else now
+        wall = wall.replace(tzinfo=None) if wall.tzinfo is not None else wall
+        prompt = modes.build_revise_prompt(wall, self._owner(), job, words, zone)
+        logger.info("Revise %s: a %s of %d character(s), %d word character(s)", job.action_id, job.kind,
+                    len(job.draft), len(words))
+        on_stage(STAGE_PLANNING)
+        result = self._run(prompt, allow_search=False, cancel=cancel, live=live, number=1, mode=MODE_REVISE)
+        del prompt
+        answer = result.answer
+        if result.failure is not None or not isinstance(answer, revise.ReviseAnswer):
+            failed = result.failure
+            kind = failed.kind if failed else "error"
+            logger.info("Revise %s: run %s", job.action_id, kind)
+            return AskOutcome(False, kind, failed.message if failed else "", runs=1 if result.started else 0,
+                              init=result.init, stats=(result.stats,) if result.started else (),
+                              target=job.action_id, brief=(job.digest, ""))
+        if answer.question or not answer.body.strip():
+            logger.info("Revise %s: a question back", job.action_id)
+            return AskOutcome(True, REVISE_QUESTION, "", question=answer.question, runs=1, init=result.init,
+                              stats=(result.stats,), target=job.action_id, brief=(job.digest, ""))
+        reason = revise.check_revision(answer.body, job.draft, words)
+        if reason:
+            logger.info("Revise %s: held back (%s)", job.action_id, reason)
+            return AskOutcome(True, REVISE_HELD, "", runs=1, init=result.init, stats=(result.stats,),
+                              target=job.action_id, brief=(job.digest, reason), refused=1)
+        logger.info("Revise %s: a rewrite of %d character(s)", job.action_id, len(answer.body))
+        return AskOutcome(True, "ok", "", say=answer.say, runs=1, init=result.init, stats=(result.stats,),
+                          target=job.action_id, brief=(job.digest, ""), revised=answer.body)
+
+    # ---- a document or a sheet (build plan item 5) ---------------------------------------------
+
+    def _doc(self, request: ModeRequest, cancel: threading.Event | None, on_stage: Callable[[str], None],
+             live: LiveTask = NO_TASK) -> AskOutcome:
+        """One run for a document or a sheet: the checks (Ask on, the caps, Claude Code ready), the run that sees only
+        that item (as data), the board's tables, the conversation, the notes chosen as for an Ask and the owner's words
+        (no mail, calendar, accounts or web), its answer read strictly, then Jarvis's own check (docs_mode). Nothing is
+        changed here: the changes wait in the item for the owner's Keep (docs_ui)."""
+        job = request.payload
+        if not isinstance(job, modes.DocJob):
+            return AskOutcome(False, "error", "Jarvis can't do that kind of request yet; nothing was proposed")
+        refusal = self._refusal(live)
+        if refusal is not None:
+            logger.info("Docs %s: no run (%s)", job.doc_id, refusal.kind)
+            return replace(refusal, target=job.doc_id, brief=(job.digest, ""))
+        words = request.typed
+        on_stage(STAGE_CONTEXT)
+        zone = self.sources.time_zone()
+        now = self.clock()
+        wall = dayplan.to_wall(now, zone) if zone else now
+        wall = wall.replace(tzinfo=None) if wall.tzinfo is not None else wall
+        notes = self._memory_notes()
+        prompt = modes.build_doc_prompt(wall, self._owner(), job, words, notes=notes, zone=zone)
+        logger.info("Docs %s: a %s run (%d stdin character(s), %d table(s), %d note(s))", job.doc_id, job.kind,
+                    len(prompt), len(job.tables), len(notes))
+        on_stage(STAGE_PLANNING)
+        result = self._run(prompt, allow_search=False, cancel=cancel, live=live, number=1, mode=MODE_DOC)
+        seen = prompt
+        del prompt
+        answer = result.answer
+        if result.failure is not None or not isinstance(answer, docs_mode.DocAnswer):
+            failed = result.failure
+            kind = failed.kind if failed else "error"
+            logger.info("Docs %s: run %s", job.doc_id, kind)
+            return AskOutcome(False, kind, failed.message if failed else "", runs=1 if result.started else 0,
+                              init=result.init, stats=(result.stats,) if result.started else (),
+                              target=job.doc_id, brief=(job.digest, ""))
+        if answer.question and answer.doc is None and answer.sheet is None:
+            logger.info("Docs %s: a question back", job.doc_id)
+            return AskOutcome(True, DOC_QUESTION, "", say=answer.say, question=answer.question, runs=1,
+                              init=result.init, stats=(result.stats,), target=job.doc_id, brief=(job.digest, ""))
+        made = now.isoformat(timespec="seconds")
+        proposal, reason = docs_mode.check_doc_answer(answer, job, words, seen, made)
+        if proposal is None:
+            logger.info("Docs %s: held back (%s)", job.doc_id, reason)
+            return AskOutcome(True, DOC_HELD, "", runs=1, init=result.init, stats=(result.stats,),
+                              target=job.doc_id, brief=(job.digest, reason), refused=1)
+        logger.info("Docs %s: %d change(s) wait for Keep", job.doc_id, len(proposal.items))
+        return AskOutcome(True, "ok", "", say=answer.say, question=answer.question, runs=1, init=result.init,
+                          stats=(result.stats,), target=job.doc_id, brief=(job.digest, ""), doc_proposal=proposal)
 
     # ---- a meeting's summary (meetings part 2) -------------------------------------------------
 
@@ -2488,9 +2772,10 @@ class AskPlanner:
             logger.info("Research: %d source(s) shown, %d left out, %d suggestion card(s), %d dropped",
                         len(found.sources), len(found.left_out), len(found.suggested), len(found.dropped))
             message = "; ".join([*notes, *research_notes(found)])
+            topic, frames = _typed_frames(answer.frames, "Research")
             return AskOutcome(True, "ok", message, say=found.answer, cards=cards,
                               refused=sum(1 for card in cards if card.error), runs=runs, init=init, stats=stats,
-                              mail=mail, research=found)
+                              mail=mail, research=found, topic=topic, frames=frames)
         finally:
             if web_steps is not None:
                 web_steps.finished()   # no more page pictures for this research
@@ -2608,17 +2893,18 @@ class AskPlanner:
                 runs: int, stats: tuple[RunStats, ...], init: InitSummary | None, mail: MailReport, search: str,
                 search_account: str, live: LiveTask = NO_TASK, suggested: tuple[str, str] = ("", "")) -> AskOutcome:
         cards: Cards = to_cards(plan.lines, index, now=now, link_hosts=self.config.actions.link_hosts,
-                                page_ids=page_ids, max_cards=self.config.ask.max_cards)
+                                page_ids=page_ids, max_cards=self.config.ask.max_cards, kinds=PLAIN_ASK_KINDS)
         _validated(live, cards, index, self.config.ask.max_cards, self._hour24(), suggested)
         message_parts = list(notes)
         if cards.dropped:
             message_parts.append(f"{cards.dropped} more proposal(s) were left out")
         if plan.via_fallback:
             message_parts.append("(read from the planner's plain text)")
+        topic, frames = _typed_frames(plan.frames)
         return AskOutcome(True, "ok", "; ".join(message_parts), say=plan.say, question=plan.question,
                           cards=cards.cards, dropped=cards.dropped, refused=cards.refused, runs=runs, init=init,
                           stats=stats, mail=mail, search=search, search_account=search_account,
-                          suggestion=suggested[0])
+                          suggestion=suggested[0], topic=topic, frames=frames)
 
     # ---- dry run ------------------------------------------------------------------------------
 
@@ -2637,11 +2923,14 @@ class AskPlanner:
             searchable = any(account.read_mail == "yes" for account in ctx.accounts)
             allow_web = self._web_allowed()[0] if ready.ok else False   # as planner run 1 would
             allow_agent = self._agent_allowed() if ready.ok else False  # the same
+            allow_standing = self._standing_allowed() if ready.ok else False   # the same
+            doc = {"allow_doc": True} if ready.ok and self._docs_allowed() else {}   # the same
             extra = {"prompt_file": cli.PROMPT_FILE_AGENT} if allow_agent else {}
             argv = tuple(cli.build_argv(ready.exe.path, model=self.config.ask.model,
                                         max_turns=self.config.ask.max_turns,
                                         schema=cli.schema_text(allow_search=searchable, allow_web=allow_web,
-                                                               allow_agent=allow_agent),
+                                                               allow_agent=allow_agent,
+                                                               allow_standing=allow_standing, **doc),
                                         hardened=ready.hardened, streaming=ready.streaming, **extra))
         return DryRun(prompt, argv, ready, index.counts(), report(ctx.mail))
 
@@ -2676,6 +2965,7 @@ HANDOVER_WORDS = "asked for web research"   # planner run 1's summary when it ha
 AGENT_HANDED_WORDS = "asked to work through it as a task"
 AGENT_MAY_WORDS = "yes - Jarvis then works through it with your own words only"
 AGENT_TASK_WORDS = "I'll work through that as a task, {sir}."   # Jarvis's own words as a request is handed over
+STANDING_SETUP_WORDS = "I'll set that up for you to check first, {sir}."   # ... and to the standing setup
 HANDOVER_WHY_CHARS = 80
 OVERAGE_WORDS = "Claude Code said this would use extra usage, so Ask stopped it"
 # The planner run's stdin block: named "sent" only once Claude Code has started with it.
@@ -2906,7 +3196,8 @@ def _run_step(live: LiveTask, model: str, prompt: str, number: int, search_words
 
 @_quiet()
 def _run_ready(step: LiveStep, engine: Any, ready: Readiness, allow_search: bool, allow_web: bool = False,
-               allow_remember: bool = False, mode: str = "", allow_agent: bool = False) -> None:
+               allow_remember: bool = False, mode: str = "", allow_agent: bool = False,
+               allow_standing: bool = False, allow_doc: bool = False) -> None:
     if step is NO_STEP:
         return
     hardened = "hardened (--safe-mode --restricted)" if ready.hardened else "not hardened"
@@ -2919,6 +3210,10 @@ def _run_ready(step: LiveStep, engine: Any, ready: Readiness, allow_search: bool
         extra["allow_remember"] = True
     if allow_agent:
         extra["allow_agent"] = True
+    if allow_standing:
+        extra["allow_standing"] = True
+    if allow_doc:
+        extra["allow_doc"] = True
     try:
         if mode:
             argv = engine.mode_argv(ready, mode, allow_remember=allow_remember,
@@ -3191,7 +3486,8 @@ def _validated(live: LiveTask, cards: Cards, index: ContextIndex, max_cards: int
 NO_MAIL_WORDS = "no - a day plan never reads mail"
 NO_WEB_WORDS = "no - a day plan never uses the web"
 MODE_RUN_WORDS = {MODE_PLAN: "day plan", MODE_PREP: "meeting brief", MODE_NUDGE: "follow-up draft",
-                  MODE_MEETING: "meeting summary", MODE_DESKTOP: "desktop plan"}
+                  MODE_MEETING: "meeting summary", MODE_DESKTOP: "desktop plan", MODE_CAPTURE: "capture",
+                  MODE_REVISE: "rewrite", MODE_DOC: "document"}
 FREE_TITLE = "Your free time"
 
 
@@ -3596,6 +3892,37 @@ def _meeting_input(step: LiveStep, turns: Sequence[Any], labels: Mapping[str, An
     step.done(STATUS_OK, summary=f"{_count_words(len(turns), 'turn')}, {_count_words(len(labels), 'guest')}")
 
 
+def _capture_input(step: LiveStep, job: Any, prompt: str) -> None:
+    """A capture's input: its kind, size and pages, how many pictures (never its name or a picture; its text only in
+    the run's own stdin block, marked as written by other people)."""
+    if step is NO_STEP:
+        return
+    step.field("Kind", job.kind)
+    step.field("Size", capture_read.size_bucket(job.size))
+    if job.page_count:
+        step.field("Pages", str(job.page_count))
+    step.field("Pictures", f"{len(job.images())}, sent inside the message (no file path)")
+    step.field("Given", "its name, and its text or pictures, marked as written by other people")
+    step.field("Not given", "mail, your notes, your calendar, the folder it is in on this PC")
+    step.field("Input", f"{len(prompt):,} characters")
+    step.done(STATUS_OK, summary=f"{job.kind}, {_count_words(len(job.images()), 'picture')}")
+
+
+@_quiet()
+def _capture_validated(live: LiveTask, counts: Any) -> None:
+    """"Checking what was found": counts only."""
+    step = live.step(CAPTURE_VALIDATE, "Checking what was found")
+    if step is NO_STEP:
+        return
+    step.field("Listed", str(counts.items))
+    step.field("Kept", str(counts.kept))
+    step.field("Past (left out)", str(counts.past))
+    step.field("Refused", str(counts.refused))
+    if counts.far:
+        step.field("Over a year away", str(counts.far))
+    step.done(STATUS_OK, summary=f"{counts.kept} kept")
+
+
 @_quiet()
 def _meeting_validated(live: LiveTask, answer: Any, summary: Any, cards: Cards, notes_dropped: int,
                        hour24: bool, job: Any = None) -> None:
@@ -3644,6 +3971,12 @@ def _mode_target(request: ModeRequest) -> Any:
     job = request.payload
     if request.mode == MODE_DESKTOP:
         return job.run_id if isinstance(job, desktop_mode.DesktopJob) else None
+    if request.mode == MODE_CAPTURE:
+        return job.capture_id if isinstance(job, capture_read.CaptureJob) else None
+    if request.mode == MODE_REVISE:
+        return job.action_id if isinstance(job, modes.RevisionJob) else None
+    if request.mode == MODE_DOC:
+        return job.doc_id if isinstance(job, modes.DocJob) else None
     if request.mode != MODE_MEETING:
         return None
     return job.meeting_id if isinstance(job, meeting_summary.MeetingJob) else None

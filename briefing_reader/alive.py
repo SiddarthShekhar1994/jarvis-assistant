@@ -67,15 +67,16 @@ from typing import Any, Callable
 import shiboken6
 from PySide6.QtCore import (QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, QVariantAnimation,
                             Signal)
-from PySide6.QtGui import (QBrush, QColor, QImage, QLinearGradient, QPainter, QPainterPath, QPixmap, QRadialGradient,
-                           QRegion)
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtGui import (QBrush, QColor, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
+                           QRadialGradient, QRegion)
+from PySide6.QtWidgets import QAbstractScrollArea, QApplication, QScrollArea, QWidget
 
 from . import holo
 
 REPLAY_AFTER_S = 30 * 60
 FLIGHT_MS = 600
 WIPE_BAND = 120.0
+BOOT_FADE_MS = 240              # the canvas look: a panel's traced outline fades into its own edge over this
 _ENDING_EVENTS = (QEvent.Type.KeyPress, QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick,
                   QEvent.Type.Wheel)
 _OUT = holo.bezier(holo.EASE_OUT)
@@ -104,6 +105,22 @@ def main_panels(page: QWidget, limit: int = 6) -> list[QWidget]:
         children.sort(key=lambda w: (w.mapTo(page, QPoint(0, 0)).y(), w.mapTo(page, QPoint(0, 0)).x()))
         return children[:limit]
     return [container]
+
+
+def boot_rect(panel: QWidget, page: QWidget) -> QRectF:
+    """What the canvas look's boot traces for ``panel`` (in ``page``): the box around what it shows, not the empty
+    room a layout gives it - a scroll area's content within its view, else its children's bounds, else itself."""
+    area = panel if isinstance(panel, QAbstractScrollArea) else None
+    if area is not None and isinstance(panel, QScrollArea) and panel.widget() is not None:
+        inner = panel.widget()
+        shown = inner.childrenRect() if not inner.childrenRect().isEmpty() else inner.rect()
+        box = QRect(inner.mapTo(page, shown.topLeft()), shown.size())
+        view = QRect(panel.viewport().mapTo(page, QPoint(0, 0)), panel.viewport().size())
+        return QRectF(box.intersected(view))
+    shown = panel.childrenRect()
+    if shown.isEmpty():
+        return QRectF(QRect(panel.mapTo(page, QPoint(0, 0)), panel.size()))
+    return QRectF(QRect(panel.mapTo(page, shown.topLeft()), shown.size()))
 
 
 class _Overlay(QWidget):
@@ -142,6 +159,7 @@ class ScreenTransition(_Overlay):
         self._origin = QPoint()                 # the page's top-left in this overlay
         self._page_rect = QRect()               # ... and its rect there
         self._panels: list[QRectF] = []
+        self._boots: list[QRectF] = []          # the canvas look: what each panel's boot traces (boot_rect)
         self._level = holo.MOTION_OFF
         self._elapsed = 0.0
         self._watching = False
@@ -167,9 +185,10 @@ class ScreenTransition(_Overlay):
         level = self._level if level is None else level
         if level == holo.MOTION_OFF:
             return 0
+        boot = BOOT_FADE_MS if holo.canvas_look() else 0     # the canvas look: the traced outlines fade after
         if level == holo.MOTION_CALM:
-            return holo.CALM_FADE_MS + 3 * holo.CALM_STAGGER_MS
-        return max(holo.WIPE_MS, holo.ASSEMBLE_MS + 3 * holo.ASSEMBLE_STAGGER_MS)
+            return holo.CALM_FADE_MS + 3 * holo.CALM_STAGGER_MS + boot
+        return max(holo.WIPE_MS, holo.ASSEMBLE_MS + 3 * holo.ASSEMBLE_STAGGER_MS + boot)
 
     # ---- play / finish -------------------------------------------------------------------------
 
@@ -206,6 +225,7 @@ class ScreenTransition(_Overlay):
         self._pixmap = None
         self._page = None
         self._panels = []
+        self._boots = []
         if self.isVisible():
             self.hide()
 
@@ -247,7 +267,9 @@ class ScreenTransition(_Overlay):
         self._origin = page.mapTo(stage, QPoint(0, 0))
         self._page_rect = QRect(self._origin, page.size())
         self._pixmap = pixmap
-        self._panels = [QRectF(QRect(w.mapTo(page, QPoint(0, 0)), w.size())) for w in main_panels(page)]
+        panels = main_panels(page)
+        self._panels = [QRectF(QRect(w.mapTo(page, QPoint(0, 0)), w.size())) for w in panels]
+        self._boots = [boot_rect(w, page) for w in panels]
         self.update()
 
     # ---- the owner's input ends it -----------------------------------------------------------------
@@ -286,8 +308,8 @@ class ScreenTransition(_Overlay):
 
     def wipe_y(self) -> float | None:
         """The wipe band's lower edge (lively, while it crosses), else None."""
-        if self._level != holo.MOTION_LIVELY or self._elapsed >= holo.WIPE_MS:
-            return None
+        if self._level != holo.MOTION_LIVELY or self._elapsed >= holo.WIPE_MS or holo.canvas_look():
+            return None                          # (the canvas look: each panel's own scan line instead)
         p = _WIPE_EASE(_clamp(self._elapsed / holo.WIPE_MS))
         return p * (self.height() + WIPE_BAND)       # from just above the stage to just below it
 
@@ -328,6 +350,61 @@ class ScreenTransition(_Overlay):
             painter.setOpacity(opacity)
             source = QRectF(rect.x() * dpr, rect.y() * dpr, rect.width() * dpr, rect.height() * dpr)
             painter.drawPixmap(target, pixmap, source)
+            painter.restore()
+        if holo.canvas_look():
+            for index, rect in enumerate(self._boots[:len(self._panels)]):
+                if not rect.isEmpty():
+                    self._paint_boot(painter, index, rect.translated(origin.x(), origin.y()))
+
+    # ---- the canvas look's boot (PLAN-canvas part 4): each panel boots as a canvas frame does in the page ----------
+
+    def boot_state(self, index: int) -> tuple[float, float, float]:
+        """(traced share of the outline, the scan line's place from the top (0..1; 1: done), the outline's light)
+        of panel ``index`` now, in the canvas look: the outline draws itself from the top-left corner, a scan line
+        wipes down, corner ticks stand for a moment, then the traced light fades into the panel's own edge."""
+        length, stagger, _fade, _lively = self._timing()
+        local = self._elapsed - min(index, 3) * stagger
+        trace = _OUT(_clamp(local / length))
+        scan = _clamp(local / length)
+        light = 1.0 - _clamp((local - length) / BOOT_FADE_MS)
+        return trace, scan, light if local > 0.0 else 0.0
+
+    def _paint_boot(self, painter: QPainter, index: int, rect: QRectF) -> None:
+        trace, scan, light = self.boot_state(index)
+        if light <= 0.0 or rect.width() < 8 or rect.height() < 8:
+            return
+        _length, _stagger, _fade, lively = self._timing()
+        r = rect.adjusted(0.5, 0.5, -0.5, -0.5)
+        w, h = r.width(), r.height()
+        reach = trace * (w + h)
+        arms = QPainterPath()                    # two arms from the top-left: along the top, then down the right ...
+        arms.moveTo(r.topLeft())
+        arms.lineTo(r.left() + min(reach, w), r.top())
+        if reach > w:
+            arms.lineTo(r.right(), r.top() + min(reach - w, h))
+        arms.moveTo(r.topLeft())                 # ... and down the left, then along the bottom
+        arms.lineTo(r.left(), r.top() + min(reach, h))
+        if reach > h:
+            arms.lineTo(r.left() + min(reach - h, w), r.bottom())
+        painter.save()
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            glow = QColor(*holo.CANVAS_GLOW, round(90 * light))
+            painter.setPen(QPen(glow, 4.0))
+            painter.drawPath(arms)
+            painter.setPen(QPen(QColor(255, 255, 255, round(235 * light)), 1.5))
+            painter.drawPath(arms)
+            if trace >= 0.999:                   # the corner ticks stand while the light fades
+                holo.paint_canvas_ticks(painter, rect.adjusted(-3, -3, 3, 3), QColor(255, 255, 255, round(255 * light)))
+            if lively and scan < 1.0:            # the scan line wipes down the panel
+                y = r.top() + scan * h
+                band = QLinearGradient(0.0, y - 26.0, 0.0, y)
+                band.setColorAt(0.0, QColor(*holo.CANVAS_GLOW, 0))
+                band.setColorAt(1.0, QColor(*holo.CANVAS_GLOW, 46))
+                painter.fillRect(QRectF(r.left(), max(r.top(), y - 26.0), w, min(26.0, y - r.top())), QBrush(band))
+                painter.fillRect(QRectF(r.left(), y - 1.0, w, 1.5), QColor(175, 240, 255, 200))
+        finally:
             painter.restore()
 
     def _paint_wipe(self, painter: QPainter) -> None:

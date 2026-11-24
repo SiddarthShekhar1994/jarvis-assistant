@@ -39,6 +39,21 @@ class FakeClient:
         self.closed = True
 
 
+class PeekClient(FakeClient):
+    """FakeClient that also gives live captions' partials (``partials`` in turn, the last kept) and says where the
+    speech process runs (``device``)."""
+
+    def __init__(self, heard: Heard, partials=("what's", "what's on my"), device: str = "cuda") -> None:
+        super().__init__(heard)
+        self.partials = list(partials)
+        self.peeks: list[int] = []
+        self.device = device
+
+    def peek(self, pcm: bytes, cancelled=None) -> str:
+        self.peeks.append(len(pcm))
+        return self.partials[min(len(self.peeks), len(self.partials)) - 1]
+
+
 class FakeStopKeys:
     """desktop.stopkeys' seam: the global Esc, held while listening."""
 
@@ -298,7 +313,7 @@ class TalkControllerTests(unittest.TestCase):
         from briefing_reader.meeting_audio import DeviceInfo
 
         devices = [DeviceInfo("1", "Microphone (Steam Streaming Microphone)", True),
-                   DeviceInfo("2", "Microphone (FIFINE K678 Microphone)")]
+                   DeviceInfo("2", "Microphone (USB Desk Microphone)")]
         controller = self.make(audio=bytes(16_000 * 2 * 9), devices=devices)
         with self.assertLogs("briefing_reader.talk_ui", logging.INFO) as logs:
             controller.toggle()
@@ -307,17 +322,17 @@ class TalkControllerTests(unittest.TestCase):
         self.assertIn("Steam Streaming Microphone", said)
         self.assertIn("virtual microphone", said)
         self.assertIn("the Windows default", said)
-        self.assertIn("Settings > Meetings > Microphone", said)
+        self.assertIn("Settings > Talk > Microphone", said)                # (part 5B: Settings > Talk has it)
         self.assertNotIn("Steam", "\n".join(logs.output))             # a device's name is never logged
         self.assertIn("(a virtual microphone)", "\n".join(logs.output))
-        row = dict(controller.settings_rows())["Microphone"]
+        row = dict(controller.settings_rows())["Last talk used"]             # (part 5B: the picker is "Microphone")
         self.assertTrue(row.startswith("Microphone (Steam Streaming Microphone) (the Windows default) - a virtual"))
-        self.assertEqual(talk_ui.muted_text("Microphone (FIFINE K678 Microphone)", False),
-                         "I heard nothing at all from \u201cMicrophone (FIFINE K678 Microphone)\u201d (picked in "
-                         "Settings > Meetings): is it muted?")
+        self.assertEqual(talk_ui.muted_text("Microphone (USB Desk Microphone)", False),
+                         "I heard nothing at all from \u201cMicrophone (USB Desk Microphone)\u201d (picked in "
+                         "Settings > Talk): is it muted?")
         self.assertEqual(talk_ui.muted_text(""), talk_ui.MUTED)
         for name, virtual in (("Headset Microphone (Oculus Virtual Audio Device)", True), ("CABLE Output (VB-Audio)", True),
-                              ("Stereo Mix (Realtek Audio)", True), ("Microphone (FIFINE K678 Microphone)", False),
+                              ("Stereo Mix (Realtek Audio)", True), ("Microphone (USB Desk Microphone)", False),
                               ("Desktop Microphone (3- Microsoft LifeCam HD-5000)", False)):
             with self.subTest(name=name):
                 self.assertEqual(talk.virtual_microphone(name), virtual)
@@ -402,7 +417,7 @@ class AppHookTests(unittest.TestCase):
 
     def test_the_orb_listens_then_understands_then_is_the_app_s_again(self) -> None:
         reading = SimpleNamespace(set_activity_state=mock.Mock(), set_talking=mock.Mock())
-        stub = SimpleNamespace(_update_reading_controls=mock.Mock(), _pump_voice=mock.Mock(),
+        stub = SimpleNamespace(_update_reading_controls=mock.Mock(), _pump_voice=mock.Mock(), _look_call=mock.Mock(),
                                window=SimpleNamespace(reading=reading))
         for state, look in ((talk_ui.LISTENING, (hud.ORB_LISTENING, "LISTENING")),
                             (talk_ui.UNDERSTANDING, (hud.ORB_WORKING, "UNDERSTANDING")), (talk_ui.IDLE, None)):
@@ -436,6 +451,175 @@ class AppHookTests(unittest.TestCase):
         stub = SimpleNamespace(window=SimpleNamespace(reading=SimpleNamespace(hero=hero)))
         ui.AppController._talk_level(stub, 0.4)
         hero.set_level.assert_called_once_with(0.4)
+
+
+
+class LiveCaptionTests(unittest.TestCase):
+    """Smaller items part 9: the words heard so far on the status line while the owner talks (fake client, fake
+    clock: no process, no model, no microphone)."""
+
+    TALK = noise(300, ROOM) + tone(3000, VOICE) + noise(2000, ROOM)
+
+    def make(self, *, captions: str = "on", device: str = "cuda", partials=("what's", "what's on my"),
+             caption_start=None):
+        self.clock = [100.0]
+        self.stream = FakeStream(self.TALK)
+        self.backend = FakeBackend(self.stream)
+        self.client = PeekClient(Heard(True, SAID, ms=300), partials, device)
+        self.calls = SimpleNamespace(statuses=[], submitted=[], looks=[], levels=[])
+        folder = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(folder, ignore_errors=True))
+        cfg = SimpleNamespace(talk=config.TalkConfig(enabled=True, live_captions=captions), data_dir=Path(folder))
+        calls = self.calls
+        controller = talk_ui.TalkController(
+            cfg, bring_forward=lambda: None, before_talk=lambda: None,
+            show_status=lambda text, tone, hud_text=None: calls.statuses.append((text, tone, hud_text)),
+            submit=calls.submitted.append, set_look=calls.looks.append, set_level=calls.levels.append,
+            models_root=Path(folder), picked_mic=lambda: "", backend_loader=lambda: (self.backend, ""),
+            client_factory=lambda _folder, _hints, _idle: self.client, audio_missing=lambda: "",
+            speech_missing=lambda: "", threaded=False, stopkeys=FakeStopKeys(), clock=lambda: self.clock[0],
+            caption_start=caption_start)
+        controller._model_ready = lambda: True
+        self.addCleanup(controller.shutdown)
+        return controller
+
+    def through(self, controller: talk_ui.TalkController, polls: int = 400) -> None:
+        for _ in range(polls):
+            if controller.state != talk_ui.LISTENING:
+                return
+            controller._poll()
+            self.clock[0] += 0.1                                    # FakeStream: 100 ms a read
+
+    def captions(self) -> list[tuple[str, str, str | None]]:
+        return [status for status in self.calls.statuses if status[0].startswith("\u201c")]
+
+    def test_partial_words_show_on_the_status_line_and_only_the_final_goes_in(self) -> None:
+        controller = self.make()
+        with self.assertLogs("briefing_reader", logging.INFO) as logs:
+            controller.toggle()
+            self.through(controller)
+        self.assertGreaterEqual(len(self.client.peeks), 2)
+        shown = self.captions()
+        self.assertEqual(shown[0], ("\u201cwhat's\u201d", hud.TONE_WORKING, "\u201cwhat's\u201d"))  # window and HUD
+        self.assertEqual(shown[-1][0], "\u201cwhat's on my\u201d")
+        self.assertEqual(self.calls.submitted, [SAID])                  # the final transcript, unchanged
+        self.assertEqual(len(self.client.clips), 1)
+        last_caption = max(i for i, status in enumerate(self.calls.statuses) if status in shown)
+        self.assertEqual(self.calls.statuses[last_caption + 1][0], talk_ui.UNDERSTANDING_TEXT)   # cleared at the end
+        self.assertEqual(self.calls.looks, [talk_ui.LISTENING, talk_ui.UNDERSTANDING, talk_ui.IDLE])
+        self.assertTrue(any("caption(s)" in line for line in logs.output))
+        self.assertFalse(any("what's" in line or "on my" in line for line in logs.output))   # never a word logged
+
+    def test_auto_is_on_with_the_gpu_off_on_the_cpu_and_off_is_off(self) -> None:
+        for captions, device, peeked in (("auto", "cuda", True), ("auto", "cpu", False), ("auto", "", False),
+                                         ("on", "cpu", True), ("off", "cuda", False)):
+            with self.subTest(captions=captions, device=device):
+                controller = self.make(captions=captions, device=device)
+                controller.toggle()
+                self.through(controller)
+                self.assertEqual(bool(self.client.peeks), peeked)
+                self.assertEqual(bool(self.captions()), peeked)
+                self.assertEqual(self.calls.submitted, [SAID])
+
+    def test_esc_cancels_drops_a_partial_in_flight_and_nothing_goes_in(self) -> None:
+        waiting: list = []
+        controller = self.make(caption_start=waiting.append)
+        controller.toggle()
+        for _ in range(30):
+            if waiting:
+                break
+            controller._poll()
+            self.clock[0] += 0.1
+        self.assertEqual(len(waiting), 1)
+        self.assertTrue(controller.cancel())
+        waiting.pop()()                                            # its answer comes back after the cancel
+        self.assertEqual(self.captions(), [])
+        self.assertEqual(self.calls.statuses[-1], (talk_ui.CANCELLED, hud.TONE_IDLE, None))
+        self.assertEqual((self.calls.submitted, self.client.clips), ([], []))
+
+    def test_a_partial_queued_to_the_screen_after_the_end_is_dropped(self) -> None:
+        controller = self.make()
+        controller.toggle()
+        for _ in range(12):
+            controller._poll()
+            self.clock[0] += 0.1
+        generation = controller._pump.generation
+        controller.toggle()                                        # a second tap: what was said goes in
+        before = list(self.calls.statuses)
+        controller._on_partial(generation, "late words")           # (threaded: a queued signal, after the end)
+        self.assertEqual(self.calls.statuses, before)
+        self.assertEqual(self.calls.submitted, [SAID])
+
+    def test_a_partial_of_one_talk_never_shows_in_the_next(self) -> None:
+        # Fix round LOW 2: talk A's partial, queued to the screen, arrives while talk B listens.
+        controller = self.make()
+        controller.toggle()
+        for _ in range(12):
+            controller._poll()
+            self.clock[0] += 0.1
+        generation = controller._pump.generation
+        controller.toggle()                                        # talk A ends
+        self.backend.stream = FakeStream(self.TALK)
+        controller.toggle()                                        # talk B listens
+        self.assertEqual(controller.state, talk_ui.LISTENING)
+        before = list(self.calls.statuses)
+        controller._on_partial(generation, "late words")
+        self.assertEqual(self.calls.statuses, before)
+
+    def test_a_failing_caption_pump_never_ends_the_talk(self) -> None:
+        # Fix round LOW 5: captions that cannot start leave the talk listening; what was said goes in.
+        controller = self.make()
+        with mock.patch.object(talk, "CaptionPump", side_effect=RuntimeError("boom")), \
+                self.assertLogs("briefing_reader.talk_ui", logging.INFO) as logs:
+            controller.toggle()
+            self.assertEqual(controller.state, talk_ui.LISTENING)
+            self.through(controller)
+        self.assertEqual(self.calls.submitted, [SAID])
+        self.assertTrue(any("no live captions this talk" in line for line in logs.output))
+        self.assertFalse(any("(device)" in line for line in logs.output))
+
+    def test_settings_talk_says_how_live_captions_are_set(self) -> None:
+        for captions, words in (("auto", "Auto - when the graphics card runs it"), ("on", "On"), ("off", "Off")):
+            with self.subTest(captions=captions):
+                self.assertEqual(dict(self.make(captions=captions).settings_rows())["Live captions"], words)
+        self.assertIn("live captions", talk_ui.SETTINGS_HOW)
+
+
+class LiveCaptionAppTests(unittest.TestCase):
+    """The app's side of a live caption: the bar's status line and Home's caption (dim thinking line) - during a call
+    too - and never the conversation, LIVE or the second screen's glance."""
+
+    def test_a_caption_reaches_the_bar_and_home_only_even_on_a_call(self) -> None:
+        from tests.ui_fakes import AppHarness, settle
+
+        app = AppHarness(self, config_extra='\n[talk]\nenabled = true\nlive_captions = "on"\n')
+        app.reading(autoplay=False)
+        controller = app.c.talk
+        self.assertIsNotNone(controller)
+        app.c._call_watch = SimpleNamespace(on_call=True)          # on a call: his voice is captions only
+        self.assertTrue(app.c._call_quiet())
+        controller._model_ready = lambda: True
+        controller._audio_missing = lambda: ""
+        controller._speech_missing = lambda: ""
+        backend = FakeBackend(FakeStream(tone(9000, VOICE)))
+        controller._backend_loader = lambda: (backend, "")
+        controller._client = PeekClient(Heard(True, SAID), device="cuda")
+        controller._stopkeys = FakeStopKeys()
+        controller.toggle()
+        self.assertEqual(controller.state, talk_ui.LISTENING)
+        controller._timer.stop()                                   # polled by hand: nothing read in the background
+        controller._on_partial(controller._pump.generation, "open my calendar for")
+        settle()
+        reading = app.c.window.reading
+        self.assertEqual(reading.command_bar.status(), "\u201copen my calendar for\u201d")
+        self.assertIn("open my calendar for", reading.captions.thinking())
+        self.assertFalse(any("calendar for" in repr(entry) for entry in reading.conversation.kept_entries()))
+        self.assertNotIn("calendar for", repr(app.c.live.snapshot()))
+        self.assertNotIn("calendar", str(reading.state_word()))     # the second screen's only words from Home
+        controller.cancel()
+        settle()
+        self.assertNotIn("calendar", reading.command_bar.status())
+        self.assertNotIn("calendar", reading.captions.thinking())
 
 
 if __name__ == "__main__":

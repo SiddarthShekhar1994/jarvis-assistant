@@ -99,13 +99,20 @@ TASK_OWN_READS = "own_reads"      # Jarvis's own reads and offers (the day read 
 TASK_DESKTOP = "desktop"          # a desktop request (Jarvis on your desktop): its route, what the planner was
                                   # given, the planner run and each step's check (reason codes, never a name or a
                                   # path). Never amber; never opens LIVE by itself (the HUD shows; SPEC 10.1)
+TASK_CAPTURE = "capture"          # a capture's reading (a picture, PDF or text): its kind, size and pages, the planner
+                                  # run, what was found (counts); never the file's name or text outside the stdin block
+TASK_REVISE = "revise"            # a draft rewritten in the owner's plain words (the Edit dialog's Rewrite): the draft's
+                                  # size, the planner run, what came back (sizes); never opens LIVE by itself
+TASK_DOC = "doc"                  # Jarvis writing in a document or a sheet (build plan item 5): the item's kind and size,
+                                  # the planner run, what came back (counts); never opens LIVE by itself
 TASK_AGENT = "agent"              # a task Jarvis works through (agent_ui): one step per tool call. Never opens LIVE by
                                   # itself; memory only, as every task here (SPEC D11)
 TASK_KINDS = (TASK_ASK, TASK_ACTION, TASK_BRIEFING, TASK_BACKGROUND, TASK_WEB, TASK_MEMORY, TASK_PLAN, TASK_PREP,
-              TASK_OWN_READS, TASK_NUDGE, TASK_MEETING, TASK_DESKTOP, TASK_AGENT)
+              TASK_OWN_READS, TASK_NUDGE, TASK_MEETING, TASK_DESKTOP, TASK_AGENT, TASK_CAPTURE, TASK_REVISE, TASK_DOC)
 TASK_TAGS = {TASK_ASK: "ASK", TASK_ACTION: "ACTION", TASK_BRIEFING: "BRIEFING", TASK_BACKGROUND: "BACKGROUND",
              TASK_WEB: "WEB", TASK_MEMORY: "MEMORY", TASK_PLAN: "PLAN", TASK_PREP: "PREP", TASK_OWN_READS: "READS",
-             TASK_NUDGE: "NUDGE", TASK_MEETING: "MEETING", TASK_DESKTOP: "DESKTOP", TASK_AGENT: "TASK"}
+             TASK_NUDGE: "NUDGE", TASK_MEETING: "MEETING", TASK_DESKTOP: "DESKTOP", TASK_AGENT: "TASK",
+             TASK_CAPTURE: "CAPTURE", TASK_REVISE: "REVISE", TASK_DOC: "DOC"}
 # Tasks that open the LIVE view by themselves ([live] auto_open) and set the tab's dot.
 ATTENTION_KINDS = frozenset({TASK_ASK, TASK_ACTION, TASK_WEB, TASK_PLAN, TASK_PREP, TASK_NUDGE})
 COMPACT_KINDS = frozenset({TASK_BRIEFING, TASK_BACKGROUND, TASK_MEMORY, TASK_OWN_READS})
@@ -153,6 +160,8 @@ OFFER_MADE = "offer.made"                 # an offer posted (or not, and why; sp
 MAIL_SCAN = "mail.scan"                   # Jarvis's own header scan of one account (or one thread again), counts
 MEETING_INPUT = "meeting.input"           # a meeting summary's input: the transcript (as data), the guests' names
 MEETING_VALIDATE = "meeting.validate"     # its answer checked: items kept or dropped, follow-up drafts, notes
+CAPTURE_INPUT = "capture.input"           # a capture's input: its kind, size, pages and pictures (never its name)
+CAPTURE_VALIDATE = "capture.validate"     # what the reading found, checked: items kept, past, refused (counts)
 # A desktop request's steps (SPEC 10.1): reason codes, kinds and counts - never a file name, a title or a path (the
 # planner's stdin block, shown as data, is the only place names appear).
 DESKTOP_REQUEST = "desktop.request"       # what the owner typed and its route (on this PC, or the planner)
@@ -174,7 +183,8 @@ STEP_KINDS = (ASK_REQUEST, ASK_CHECKS, CALENDAR_READ, MAIL_THREAD, MAIL_SEARCH, 
               ACTION_CALL, BRIEFING_FETCH, AGENDA_READ, EVENT_CHECK, ACCOUNT_SIGNIN, CLAUDE_CHECK, WEB_SEARCH,
               WEB_FETCH, WEB_SOURCE, RESEARCH_INPUT, RESEARCH_RUN, RESEARCH_VALIDATE, MEMORY_SAVE, MODE_REQUEST,
               PLAN_FREE, PLAN_VALIDATE, PREP_MEETING, PREP_PEOPLE, PREP_VALIDATE, CALENDAR_DAY, OFFER_MADE,
-              MAIL_SCAN, MEETING_INPUT, MEETING_VALIDATE, *DESKTOP_STEP_KINDS, *AGENT_STEP_KINDS)
+              MAIL_SCAN, MEETING_INPUT, MEETING_VALIDATE, CAPTURE_INPUT, CAPTURE_VALIDATE, *DESKTOP_STEP_KINDS,
+              *AGENT_STEP_KINDS)
 
 # Internal link ids a Field may carry besides a Jarvis-made Google result link: "tab:jarvis" (a tab),
 # "live:3" (a task), "picture:12" (step 12's picture shown larger; the step itself while it has none).

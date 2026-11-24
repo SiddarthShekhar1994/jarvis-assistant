@@ -53,7 +53,8 @@ your own scheduled routine (see
   a calendar change happens at once and its card offers **Undo** for 10
   minutes; a reply, email or cancellation shows **Sent** with **Undo** at once
   and goes out a few seconds later. A new recipient needs your tick first, and
-  he never sends or changes anything on his own. Share requests, Slack replies and links are
+  he never sends or changes anything on his own (but for a standing rule's
+  tidy-up, if you set one up: see below). Share requests, Slack replies and links are
   hand-offs (**Open**, **Copy**). See
   [Calendar actions](#calendar-actions),
   [Invitations, moves and cancellations](#invitations-moves-and-cancellations),
@@ -76,6 +77,16 @@ your own scheduled routine (see
   window of its own, for a second screen. It only shows, and only on screen:
   nothing of it is saved or logged. See
   [LIVE: watch Jarvis work](#live-watch-jarvis-work).
+- **Home is a canvas.** Home is one black canvas with Jarvis's orb in it.
+  When an answer has something to show, frames come up across the canvas -
+  the mail he read, your day, to-dos, a page picture, and the tables, charts,
+  timelines and worked maths an answer brings - and the orb moves to its
+  corner. At rest a small "Now" group shows what waits for your OK, today, your
+  to-dos and your agents. While he speaks, the frame a sentence is about
+  brightens. Frames only show: they never approve or send anything, and
+  nothing on them is saved. Jarvis can also show himself on a second monitor,
+  with mail text hidden there, and a few soft sounds mark moments such as a
+  frame landing. See [The look](#the-look-the-canvas).
 - **Web research.** Start a request with `web:` (or let the planner hand it
   over) to look something up on the web: a separate Claude Code run whose
   only tools are web search and web fetch, and which gets your words and
@@ -121,15 +132,35 @@ your own scheduled routine (see
   He may offer to remember a fact himself; it is kept only when you click
   **Remember this**. Part of the productivity bundle (`[productivity]`), off
   until you turn it on. See [Memory (the MEMORY tab)](#memory-the-memory-tab).
+- **Standing agents and rules.** Jobs that come back on their own, each set up
+  from one sentence in the bar: "agent: every weekday at 7:30, look at my
+  calendar and my lab's mail and tell me what needs me", "rule: when
+  billing@example.com sends a bill, add a to-do to pay it by its due date".
+  They wake at a time, every 30 minutes or more, on new mail that matches
+  their filter (looked for every 5 minutes, headers only) or on **Run now**,
+  read only their own sources, report on the **Agents** screen (**Ctrl+9**)
+  and line up cards that wait for your click. A rule may also star, label or
+  archive the one mail it matched, without a click and with an **Undo** for 7
+  days, if you set it up to. Your own Claude Code does the reading, on your
+  plan: at most 30 runs a day for all of them. Off until you turn it on, and
+  nothing runs before your yes on its consent card. See
+  [Standing agents and rules](#standing-agents-and-rules).
+- **Radar.** Four ready-made standing agents on the Agents screen:
+  internships, hackathons, deadlines and subscriptions (renewals and free
+  trials that end). One click adds one as a draft, made on this PC without
+  any Claude run; it reads only the mail its filter matches, fills a sheet of
+  its own with rows that wait for your Keep, and is off until you turn it on.
+  See [Radar (ready-made agents)](#radar-ready-made-agents).
 - **Always at hand.** **Ctrl+Alt+J** opens Jarvis from anywhere, and so does a
   Start menu shortcut. Minimize him to his taskbar button; while a scheduled
   run waits for the briefing, only his tray icon shows. See
   [Catch-up and the hotkey](#catch-up-and-the-hotkey) and
   [Start menu shortcut](#start-menu-shortcut).
 
-The assistant screen is a calm hologram: a dark, frameless window with Jarvis's
-orb in the middle and a rail of screens at its left edge (see
-[The look](#the-look-the-hologram)).
+The assistant screen is one black canvas that fills the window: Jarvis's orb in
+the middle (in its corner while frames are up), his frames across the screen,
+and small controls in the corners for the other screens (see
+[The look](#the-look-the-canvas)).
 
 ## How it stays safe
 
@@ -186,14 +217,34 @@ orb in the middle and a rail of screens at its left edge (see
   block or draft still waits for its own click (and keeps its Undo). Jarvis's own reads
   for the offers are of your calendar only (titles, times and guests, on this
   PC, kept in memory) and are shown in LIVE.
+- **The board only shows.** Its frames are data Jarvis checked and hands it
+  (words and numbers, shown as plain text), on one locked-down web view with
+  no network and nothing saved; nothing on it approves, sends or undoes
+  anything, and a waiting reply's chip only opens its card on Approvals. The
+  second-screen display never shows mail text, a web research's answer, a
+  search, your question or what Jarvis says ([The
+  look](#the-look-the-canvas), [Privacy and cost](#privacy-and-cost)).
 - **Mail Jarvis reads on his own is headers only (sender, recipients, subject,
   date), from the last 14 days, on this PC; never the text, never saved, never
-  sent anywhere.** The follow-up list's scan asks Gmail for named headers with a
+  sent anywhere**, but for the standing agents and rules you set up (the next
+  point). The follow-up list's scan asks Gmail for named headers with a
   field mask that has no snippet and no body, only for accounts whose Google
   account you confirmed, and only while the reading screen is visible. A
   thread's text is read only after your click on **Draft a reply** / **Draft a
   nudge** (that one thread), and only then does it reach your Claude Code; a day
   plan gets two counts of the list, nothing else.
+- **Standing agents and rules read the mail they watch, on their own, once you
+  said yes.** They are off by default, and nothing runs before your yes on
+  their consent card. Then, when a job runs, the text of each mail its filter
+  matched goes to your Claude plan without a click at that moment: only that
+  one message, never its whole conversation, with keys and passwords taken out
+  first. The run has no tools and no web, like Ask's, so a mail can't change
+  what is read, and every filter may use only words and addresses of your own
+  sentence. Their cards still wait for your click, and a reply is checked again
+  at it. A rule's tidy-up (star, one of your labels, archive) is the one change
+  made without a click: only if you set it up, only on the mail it matched,
+  each with an **Undo** for 7 days. See
+  [Standing agents and rules](#standing-agents-and-rules).
 - **A mail search Jarvis builds himself uses only a guest's address from your
   calendar, and only after your click** (or your typed "prep me ..."): one
   read-only search per guest of that meeting, the last 14 days, at most one
@@ -229,12 +280,15 @@ orb in the middle and a rail of screens at its left edge (see
   access is the few permissions listed in setup step 8.
 - **Gray zones, stated.** Driving your own signed-in Claude Code from your own
   app, when you ask, is personal use; sharing such a feature in a public
-  project, and automated web searching and page reading on a consumer plan,
-  are less clear-cut. So Ask is off by default, every user installs and signs
+  project, runs that start on their own (standing agents and rules), and
+  automated web searching and page reading on a consumer plan, are less
+  clear-cut. So Ask is off by default, every user installs and signs
   in to Claude Code themselves, and web research is small, runs only when you
   ask and shows every step in LIVE (`[research] enabled = false` turns it
-  off). See [Privacy and cost](#privacy-and-cost) and
-  [Web research](#web-research).
+  off); standing agents and rules are off by default too, wait for your yes on
+  their consent card and make at most 30 runs a day. See
+  [Privacy and cost](#privacy-and-cost), [Web research](#web-research) and
+  [Standing agents and rules](#standing-agents-and-rules).
 
 ## How it fits together
 
@@ -253,9 +307,9 @@ orb in the middle and a rail of screens at its left edge (see
                         |  read-only Notion API
  YOUR WINDOWS PC        v
  +----------------------------------------------+     Task Scheduler: AM, PM
- | Jarvis desktop app (Python 3.13, PySide6)    | <-- and catch-up tasks; the
+ | Jarvis desktop app (Python 3.13, PySide6)    | <-- and catch-up tasks, the
  | JARVIS / BRIEFING / LIVE, NEEDS YOUR OK      |     Ctrl+Alt+J hotkey agent
- +----------------------------------------------+
+ +----------------------------------------------+     and the agents check
         |                  |                  |
         v                  v                  v
  Google APIs        Claude Code CLI      Voice
@@ -293,13 +347,18 @@ orb in the middle and a rail of screens at its left edge (see
   changes you approve and, for Ask, the events it plans from (by default
   yesterday to 14 days ahead, with guests' names and addresses; see "What
   Claude Code gets" under [Ask Jarvis](#ask-jarvis-optional)); Gmail to send
-  what you approved and, for Ask, to read the threads a request is about.
+  what you approved and, for Ask, to read the threads a request is about; for
+  [standing agents and rules](#standing-agents-and-rules), to look for new
+  mail that matches their filters (headers only) and read the one message each
+  matched, and, for a rule's tidy-up you set up, to star, label or archive it.
 - **Claude Code** runs on this PC (`claude -p`), signed in to your claude.ai
-  plan: once per Ask (twice when it reads mail), and as a separate, isolated
-  run for web research.
+  plan: once per Ask (twice when it reads mail), as a separate, isolated
+  run for web research, and once for each run of a standing agent or rule (at
+  most 30 a day).
 - **Windows Task Scheduler** starts the app for the AM and PM runs and at
-  logon and unlock (the catch-up), and keeps a small agent waiting for the
-  hotkey. What the app keeps (sign-ins, decisions, logs) is in
+  logon and unlock (the catch-up), keeps a small agent waiting for the
+  hotkey, and every 5 minutes starts a windowless check for standing agents
+  and rules. What the app keeps (sign-ins, decisions, logs) is in
   `%LOCALAPPDATA%\briefing-reader` on this PC.
 
 The modules are listed under [Project layout](#project-layout).
@@ -353,9 +412,9 @@ not of this list.
    powershell -NoProfile -ExecutionPolicy Bypass -File .\install-schedule.ps1
    ```
 
-   It registers the AM, PM, catch-up and hotkey tasks. Set `[schedule]` in
-   `config.toml` (or pass `-AmTime` and `-PmTime`) a few minutes after your
-   routine writes the page.
+   It registers the AM, PM, catch-up, hotkey and agents tasks. Set
+   `[schedule]` in `config.toml` (or pass `-AmTime` and `-PmTime`) a few
+   minutes after your routine writes the page.
 8. **Add a Start menu shortcut** that starts
    `pythonw.exe -m briefing_reader --open` in the project folder (see
    [Start menu shortcut](#start-menu-shortcut)), or just press **Ctrl+Alt+J**.
@@ -369,15 +428,32 @@ Built: **Visual snapshots in LIVE** - see [Pictures in LIVE](#pictures-in-live);
 **Plan and prep offers** - see [Offers](#offers-plan-my-day-and-prepare-brief);
 **Follow-up nudges** - see [Follow-ups and nudges](#follow-ups-and-nudges);
 **Meeting recording and summaries** (only with the consent of everyone in the
-meeting) - see [Meetings](#meetings-recording-and-summaries).
+meeting) - see [Meetings](#meetings-recording-and-summaries);
+**Standing agents and rules** - see
+[Standing agents and rules](#standing-agents-and-rules);
+**Capture** (screenshots, PDFs, pasted text and calendar files into events and
+to-dos) - see [Capture](#capture-pictures-pdfs-text-and-calendar-files);
+**The canvas** (Home as one black canvas with the orb, frames across the screen,
+the "Now" group, the second-screen display and the soft sounds) - see
+[The look](#the-look-the-canvas);
+**Mail extras** (rewrite a draft in your own words, unsubscribe help that asks
+first, and Add all for calendar cards) - see
+[Mail extras](#mail-extras-rewrite-unsubscribe-and-add-all);
+**Documents and datasheets** (documents and typed tables on this PC that Jarvis
+and your standing agents write in, every change waiting for your Keep) - see
+[Documents and datasheets](#documents-and-datasheets);
+**A live browser Jarvis drives** (he fills in public pages in a window you can
+watch, and every submit waits for your click on its Send card) - see
+[Filling in pages](#filling-in-pages).
 
 Planned for later versions; none of these is built yet, and all of them will
-keep the same rules (proposals, your click, every step visible in LIVE):
+keep the same rules (they propose, your click approves, and what they did
+shows, in LIVE or, for standing jobs, on the Agents screen):
 
-- **A live browser Jarvis drives**: he opens and fills in pages in a browser
-  you can watch, and every submit waits for your click.
-- **Radar**: internships, hackathons, deadlines and subscriptions (renewals,
-  trials that end) worth your attention.
+- **Smaller items**: a fallback model that runs on
+  this PC, filling forms in the apps you allow (see
+  [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud)), and for his
+  voice: knowing yours.
 
 ## About the name
 
@@ -392,8 +468,9 @@ changed; to keep existing setups working, the internals keep the old name:
   `py -3.13 -m briefing_reader ...` (also in shortcuts and scheduled tasks);
 - the data folder `%LOCALAPPDATA%\briefing-reader` (sign-ins, decisions and
   the log, `briefing-reader.log`) and the audio folder `%TEMP%\briefing-reader`;
-- the scheduled tasks "Briefing AM", "Briefing PM", "Briefing catch-up" and
-  "Briefing hotkey", and the names of the app's single-instance locks;
+- the scheduled tasks "Briefing AM", "Briefing PM", "Briefing catch-up",
+  "Briefing hotkey" and "Briefing agents", and the names of the app's
+  single-instance locks;
 - the `.env` keys (`NOTION_TOKEN`, `BRIEFING_PAGE_ID`, `JARVIS_...`).
 
 **Coming from briefing-reader?** Update the folder you have (`git pull`). An
@@ -411,7 +488,7 @@ accounts and trusted domains back to their defaults. Then rerun
 from) and point your Start menu shortcut's **Start in** at it.
 
 **The rest of this README is the reference:** [Requirements](#requirements)
-and [Setup](#setup), [the look](#the-look-the-hologram),
+and [Setup](#setup), [the look](#the-look-the-canvas),
 [using it](#using-it), [Calendar actions](#calendar-actions) and the other
 cards, [Ask Jarvis](#ask-jarvis-optional) and [web research](#web-research),
 the [proposal](#proposed-actions-format) and [deadline](#deadlines-format)
@@ -567,7 +644,7 @@ cd "<project folder>"
 
    The script checks that Python 3.13 and the packages import, reads `[schedule]`
    and `[hotkey]` from `config.toml`, warns if `.env` has no `NOTION_TOKEN` or no
-   `BRIEFING_PAGE_ID` value (it never prints the values), and registers four
+   `BRIEFING_PAGE_ID` value (it never prints the values), and registers five
    tasks for your user:
 
    | Task | When | Runs (in the project folder) |
@@ -576,6 +653,7 @@ cd "<project folder>"
    | Briefing PM | daily 23:42 | `pythonw.exe -m briefing_reader --run pm --slots am=10:12,pm=23:42` |
    | Briefing catch-up | at logon and when you unlock the PC, 20 s later | `pythonw.exe -m briefing_reader --catch-up --slots am=10:12,pm=23:42` |
    | Briefing hotkey | at logon (and started right away) | `pythonw.exe -m briefing_reader --hotkey-agent --slots am=10:12,pm=23:42` |
+   | Briefing agents | at logon and every 5 minutes | `pythonw.exe -m briefing_reader --standing-run --origin task` |
 
    `pythonw.exe` is the full path of Python 3.13's windowless interpreter, which
    the script finds with `py -3.13` and prints. The tasks used to start the `pyw`
@@ -607,6 +685,17 @@ cd "<project folder>"
    without logging off. If `[hotkey] enabled = false` or `-NoHotkey` is given, the
    hotkey task is not installed and an existing one is stopped and removed. The
    hotkey task always runs windowless, also with `-Console`.
+
+   The agents task checks for the
+   [standing agents and rules](#standing-agents-and-rules) that are due: at
+   logon and every 5 minutes, never waking the PC, also on battery, one at a
+   time (a start missed while the PC slept runs as soon as it can) and stopped
+   after 30 minutes at most (a check starts no job after 15 minutes and
+   usually ends within seconds). It is always installed, also with
+   `-NoHotkey`, and always windowless, also with `-Console`; while standing
+   agents and rules are off it ends at once each time. An install from before
+   this version has no such task: run the script again once (the Agents
+   screen says "Background runs off" until you do).
 
    **Wake timers.** A task can wake a sleeping PC only when the power plan setting
    "Allow wake timers" is **Enable**, both plugged in and on battery. The script
@@ -779,12 +868,15 @@ cd "<project folder>"
    | `https://www.googleapis.com/auth/calendar.events` | Add the event you approved, and first look for the same event (same title and start) so it is not added twice; read your events of today (or tomorrow) and the next 14 days for TODAY and DEADLINES; read one event by its id for an invitation, move or cancel card. Only after your click on that card (a cancellation after its short hold): answer an invitation (only your own answer is sent), move an event you organize (or may change as a guest) or cancel an event you organize, always telling the guests as the card says ("guests notified" by default); and only on your click on that card's **Undo**, reverse exactly that change (delete the event Jarvis added, put your earlier answer back, move the event back), unless it was changed since. It never changes or deletes anything else. |
    | `https://www.googleapis.com/auth/calendar.settings.readonly` | Read your calendar's time zone, so that "15:00" means 15:00 where your calendar is. |
    | `https://www.googleapis.com/auth/gmail.send` | Only for an account with `"gmail_send"` in its features (step 8b). Only after your click on **Send** on that card and its short hold: send that one reply or email, exactly as the card shows it. It cannot read, search, change or delete any mail. |
-   | `https://www.googleapis.com/auth/gmail.readonly` | Asked for at every sign-in of an account with `"gmail_read"` in its features (the shipped `config.toml` has it on both accounts), **even while Ask Jarvis is off**; remove `"gmail_read"` if you do not use Ask (step 8c). Used only while Ask Jarvis is on: read the Gmail threads one request is about (at most 3, each read only when you ask Jarvis something); with the productivity bundle on, also a [meeting brief](#meeting-prep)'s reads, only after your typed "prep me ..." or your click: one lookup per guest of that meeting on the meeting's account, from the **last 14 days**, at most one thread per guest and 3 in all; also the [follow-up list](#follow-ups-and-nudges)'s header scan (while the reading screen is visible, every 30 minutes: sender, recipients, subject, date and labels of the **last 14 days**, never the text) and a draft's read (after your click on Draft a reply / Draft a nudge: that one thread). Read only: it cannot send, change or delete any mail; the text is used for that one request and never saved or logged. |
+   | `https://www.googleapis.com/auth/gmail.readonly` | Asked for at every sign-in of an account with `"gmail_read"` in its features (the shipped `config.toml` has it on both accounts), **even while Ask Jarvis is off**; remove `"gmail_read"` if you do not use Ask (step 8c). Used only while Ask Jarvis is on: read the Gmail threads one request is about (at most 3, each read only when you ask Jarvis something); with the productivity bundle on, also a [meeting brief](#meeting-prep)'s reads, only after your typed "prep me ..." or your click: one lookup per guest of that meeting on the meeting's account, from the **last 14 days**, at most one thread per guest and 3 in all; also the [follow-up list](#follow-ups-and-nudges)'s header scan (while the reading screen is visible, every 30 minutes: sender, recipients, subject, date and labels of the **last 14 days**, never the text) and a draft's read (after your click on Draft a reply / Draft a nudge: that one thread). With [standing agents and rules](#standing-agents-and-rules) on (after your yes on their consent card): every 5 minutes, the ids and named headers of new mail that matches a job's filter (never a snippet or a body); when that job runs, the one message its filter matched (a rule's dry run, on your click: up to 8 of the newest matches); the account's own labels, when a rule's tidy-up names one; and, at your click on a standing reply's Send, that conversation once more. Read only: it cannot send, change or delete any mail; the text is used for that one request (or that one run) and never saved or logged. |
+   | `https://www.googleapis.com/auth/gmail.modify` | Only for an account with `"gmail_tidy"` in its features (step 8d), and only in that account's own tidy-up sign-in (`google_token_<account>.tidy.json`), never in its main one. Only for a [standing rule's tidy-up](#standing-agents-and-rules) you set up: read the label ids of the one message the rule matched (and whether other messages of its conversation are in the inbox), then star it, add the rule's one label or take it out of the inbox, without a click; and, on your click on its **Undo**, take exactly that change off again. Google's permission is broad (everything but deleting mail for good); Jarvis never uses it to read a mail's text, send, trash, mark as spam, read or unread, or change any other label or a whole conversation. |
    | `openid`, `https://www.googleapis.com/auth/userinfo.email` | Learn which Google account a sign-in is (its address and account id), to bind the account name to it (see above). Nothing else. |
 
    No other access: Jarvis reads mail only through `gmail.readonly`, for Ask
-   Jarvis (step 8c), its meeting briefs and the follow-up list (headers only)
-   and its drafts, and has no access to Drive, contacts or anything else.
+   Jarvis (step 8c), its meeting briefs and the follow-up list (headers only),
+   its drafts and the standing agents and rules you set up; `gmail.modify`
+   (step 8d) only changes the labels of a mail a rule matched; and he has no
+   access to Drive, contacts or anything else.
 
    **Disconnecting.** Right after a name's first sign-in, **No, use another
    account** in the question above does it for you: that name's saved sign-in
@@ -792,7 +884,8 @@ cd "<project folder>"
    (Jarvis closed, or a binding you confirmed earlier): delete
    `%LOCALAPPDATA%\briefing-reader\google_token_personal.json`
    (or `google_token_work.json` for the work account; the next click on that
-   account's card signs in again), and remove the app's access at
+   account's card signs in again; a rule's tidy-up sign-in is
+   `google_token_<account>.tidy.json`), and remove the app's access at
    <https://myaccount.google.com/permissions> (pick your app, jarvis-assistant,
    and remove its access), in each Google account you signed in with. To use an
    account name with another Google account, also delete that name's entry in
@@ -809,7 +902,7 @@ cd "<project folder>"
    using calendar actions and email without disconnecting, set
    `[calendar] enabled = false` in `config.toml`; to stop acting for one
    account, remove its `[accounts.<name>]` table, or one of its features
-   (`"calendar"`, `"gmail_send"`, `"gmail_read"`).
+   (`"calendar"`, `"gmail_send"`, `"gmail_read"`, `"gmail_tidy"`).
 
    **8b. Sending replies and emails.** Only needed if **Send** on a Reply or
    Email card should send it for you; without it those cards stay hand-offs
@@ -885,69 +978,279 @@ cd "<project folder>"
    account's sign-in is then blocked (`admin_policy_enforced`), remove
    `"gmail_read"` from that account first; Calendar and sending keep working.
 
+   **8d. Letting a rule tidy the mail it matched (optional).** Only needed
+   for a [standing rule](#standing-agents-and-rules) that stars, labels or
+   archives the mail it matched. Without it such a rule still lines up its
+   cards, and its ACTIVITY rows say why nothing was tidied.
+
+   1. The Gmail API is enabled already if you did step 8b (otherwise do 8b.1).
+   2. **OAuth consent screen > Data access**: **Add or remove scopes**, tick
+      `.../auth/gmail.modify`, then **Update** and **Save**. Like
+      gmail.readonly it is a "restricted" scope: for an app only you use, no
+      verification or security assessment is needed.
+   3. In `config.toml`, add `"gmail_tidy"` to that account's `features` (no
+      account has it in the shipped file), and restart Jarvis. It never
+      joins the account's main sign-in, so nothing else signs in again.
+   4. On the Agents screen (once you said yes on its consent card, and while
+      a rule of yours tidies that account's mail), the card "Tidy-up needs its
+      own sign-in" says what the tidy-up may do; **Sign in for tidy-up** opens
+      Google's sign-in. Pick the same Google account as that account name's
+      own (another one is refused). It asks only for `gmail.modify` and who
+      the account is, and is kept apart, in
+      `%LOCALAPPDATA%\briefing-reader\google_token_<account>.tidy.json`.
+
+   Delete that file to sign the tidy-up out on this PC (the rule then makes
+   cards only), and remove `"gmail_tidy"` from the account to stop it for
+   good.
+
 9. **Uninstall**
 
    ```powershell
    powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall-schedule.ps1
    ```
 
-   It removes "Briefing AM", "Briefing PM", "Briefing catch-up" and "Briefing
-   hotkey" if they exist (the hotkey agent is stopped first, so the hotkey is
-   free at once) and reports what was removed or not found (`-WhatIf` shows what
-   it would do). Files, `.env`, logs, the Google sign-in and saved decisions are
-   left alone; see "Disconnecting" in step 8 and
+   It removes "Briefing AM", "Briefing PM", "Briefing catch-up", "Briefing
+   hotkey" and "Briefing agents" if they exist (the hotkey agent is stopped
+   first, so the hotkey is free at once) and reports what was removed or not
+   found (`-WhatIf` shows what it would do). Files, `.env`, logs, the Google
+   sign-ins, saved decisions and your standing agents and rules are left
+   alone; see "Disconnecting" in step 8 and
    [Logs and saved files](#logs-and-saved-files).
 
-## The look (the hologram)
+## The look (the canvas)
 
-The assistant screen is a hologram on a near-black ground with a faint cyan
-grid. One thing is bright on each screen (the orb, the card that waits, the
-line being read); the rest stays quiet. Colours mean one thing each: cyan is
-Jarvis (and a fresh, NEW briefing), amber only something that waits for your
-decision, coral only a failure or a NEW RECIPIENT, mint "it's done" and steel
-"off" (muted, the Windows voice, undone). Three fonts (see [Fonts](#fonts)):
-Chakra Petch for the J.A.R.V.I.S. wordmark and headings, Sora for text and
-JetBrains Mono for labels and times. Technical readouts (planner runs, runs
-left, seconds, sizes) never appear on Home or the screens' tiles: LIVE keeps
-them.
+Home is one black canvas that fills the window, with Jarvis's orb in it.
+There is no sidebar and no chat column: what Jarvis shows you comes up as
+frames across the canvas, and small controls sit in its corners. Colours mean
+one thing each: cyan is Jarvis, amber only something that waits for your
+decision, coral only a failure, mint "it's done" and steel "off" (muted, the
+Windows voice). Three fonts (see [Fonts](#fonts)): Chakra Petch for the
+wordmark and headings, Sora for text and JetBrains Mono for labels and times.
+Technical readouts (planner runs, seconds, sizes) never appear on the canvas:
+LIVE keeps them.
 
-- **Frameless window.** The header is the title bar: drag it to move the
-  window. At its left the J.A.R.V.I.S. wordmark and the **state word** with its
-  dot: STANDBY, LISTENING, THINKING, SPEAKING, NEEDS YOU (amber), PAUSED,
-  MUTED, OFFLINE VOICE, QUIET HOURS UNTIL 8:00 AM (steel), WAITING FOR THE AM
-  BRIEFING. At its right the **clock** (time and date, such as 9:51 AM over
-  MON 12 OCT; `[display] clock = "24h"` shows 21:51), which opens the Day
-  view; the **mute** button (**Ctrl+M**; pressed, struck through and steel
-  while Jarvis's own voice is muted; see [Jarvis talks](#jarvis-talks));
-  **minimize** (the window goes to its taskbar button; click that button, the
-  tray icon or press the hotkey to bring it back); and **close**, which is the
-  same as Done. The window stays on top of other windows.
-- **Services in the header.** A service that is not OK shows as its name with
-  a dot after the state word (**NOTION**, **VOICE**, **CALENDAR**, **CLAUDE**;
-  steel while it may pass, coral for an error), with the details as its
-  tooltip; nothing shows while every service is fine, and nothing shows twice:
-  the Windows voice is the OFFLINE VOICE state, and a briefing that could not
-  load or Claude Code not signed in are error tiles (see [States](#states)).
-  The small classic prompt keeps its earlier header with three chips instead:
-  **notion** (grey: checking, green: loaded, amber: retrying, red: error),
-  **voice** (grey: no audio yet, green: online voice, amber: the Windows
-  voice, red: no speech could be generated) and **calendar** (green: signed in
-  to Google, amber: not signed in yet, grey: turned off or not set up).
-- **The orb** in the middle of Home shows the same state as the header word:
-  it breathes at rest, draws in while you type, races while Jarvis thinks,
-  pulses with his voice, shows an amber arc while something waits for you,
-  turns steel and struck through while muted, flat with a broken outer track on
-  the Windows voice, dim with one slow scanner while he waits for a briefing,
-  and at 70 % in quiet hours. A failure never turns it red: the failure is a
-  tile beside it. It moves only while the window is visible and not minimized
-  (and not while the PC is locked), and slower after two quiet minutes.
+- **The window.** Jarvis opens maximised; **F11** gives true full screen and
+  back, and **Esc** on the canvas also leaves full screen. It is a normal Windows
+  window: it has its taskbar button with Jarvis's icon (click it to minimise
+  and restore), Alt+Tab and Win+Tab show it, **Win+Up** maximises it without
+  covering the taskbar, **Win+Down** restores and then minimises it,
+  **Win+Left** and **Win+Right** snap it, and Alt+F4 closes it as Close does.
+  Drag the top band (the wordmark's row) to move it: drag it to the top edge to
+  maximise, to a side to snap, or down from maximised to restore;
+  double-click the band to maximise or restore it; right-click it, or press
+  Alt+Space, for the system menu. Hovering the maximise button at the top right
+  shows Windows 11's Snap Layouts. The edges resize it. It is no longer always
+  on top of other windows. The close button at the top right closes Jarvis, and
+  "Hey Jarvis" stops with him; minimise him to keep him listening.
+- **The orb** is a set of glowing rings on one axis, drawn by the canvas
+  itself. Each state moves in its own way: waiting, a slow precession like
+  breathing; listening, the rings lean toward you and the tick ring follows
+  your voice; thinking, the rings counter-spin faster; speaking, the main ring
+  pulses with his voice; needs you, an amber arc sweeps the outer ring; muted,
+  dim and struck through; on the Windows voice, steel. While he speaks (and a
+  moment after) it turns to face you and closes into a round JARVIS badge.
+  While frames are on the canvas it moves to the bottom-right corner, and it
+  comes back to the centre when the canvas is cleared. With Windows' "Show
+  animations" off (or `[ui] motion = "off"`) it cuts between its states with a
+  short fade and nothing turns; `"calm"` makes it slower and gentler.
+- **The corners.** Top left: the J.A.R.V.I.S. wordmark, the **state word**
+  (STANDBY, LISTENING, THINKING, SPEAKING, NEEDS YOU in amber, MUTED ...), a
+  Send's hold with **Undo**, and the date and time, which open the Day view.
+  Top right: **History** (the Transcript), **Now**, **Tidy**, **Clear view**,
+  **Pinned** and **Show board** (each only while it can work), then
+  **Briefing**, **Approvals** with its count, **Follow-ups**, **Meetings**,
+  **Agents**, **Live**, **Memory**, **Settings**, **Desktop**, and minimise,
+  maximise and close; in a narrow window the rest go under **More**. Bottom
+  left: the microphone's level, **Mute**, "Hey Jarvis" (below) and, while a
+  meeting records, REC with **Stop**. Bottom centre: what Jarvis says, as a
+  caption, over a slim ask line. The line names your talk key ("Type, or tap
+  Ctrl+Alt+T and talk", with the key `[talk] key` sets), or says "Type to ask"
+  while talking is off; the CTRL K cue at its right is the key that puts you in
+  it. A button shows only while pressing it works, and each one does exactly
+  what the same control does elsewhere in Jarvis.
+- **An offer or a problem** (Plan my day, a briefing that could not load ...)
+  shows as one amber tile at the top left of the frames' area, with its own
+  buttons (Not now, Plan my day, or the problem's action). Frames are placed
+  around it, never under it, and it steps aside while a frame is open big.
+- **"Hey Jarvis" and "can't hear you".** At the bottom left, a small dot, then
+  HEY JARVIS and its state: **Listening** (cyan, the dot breathes),
+  **Hearing you** (while he listens to what you say after "Hey Jarvis"),
+  **Paused** (grey) or **Can't hear you** (amber). Jarvis can't hear you when
+  "Hey Jarvis"'s microphone gives only silence (or is a virtual microphone),
+  or when your last talk got nothing at all from it. A note then says "Jarvis
+  can't hear you. The microphone is <its name>. Pick yours in Settings >
+  Talk." with **Pick a microphone**, which opens Settings at Talk with its
+  **Microphone** row in view. Jarvis never picks a microphone for you and never
+  changes Windows' default.
+- **The other screens** (Briefing, Approvals, Follow-ups, Meetings, Agents,
+  Live, Memory, Settings, History) open over the canvas in its frame style,
+  with **Back** at their top left; **Esc** goes back too, and Ctrl+1 to Ctrl+9
+  still open them. The plan and the brief open the same way.
+- **The badge elsewhere.** The desktop HUD, the toast and the second screen
+  draw the orb as the same flat JARVIS badge, in every state (the amber arc of
+  needs you too), and the HUD's bar, chips, result cards and keycaps and the
+  toast are square frames in the canvas's style. Briefing's and the plan's
+  rings wear the badge too.
+
+### Frames on the canvas
+
+- **The "Now" group.** At the start (and whenever you bring it back with
+  **Now**), a few resting frames come up: **Waits for your OK** (only while
+  something waits; each card's kind and title, and its button opens
+  Approvals), **Today** (your day, or "Nothing booked today"), your
+  **To-dos** (when there are some) and **Agents** (your standing agents, each
+  with its state and what it last did; its button opens Agents). They are
+  kept current while they show: a frame that changes glows once, and one whose
+  source has nothing left goes. A later answer always takes the first places.
+- **A task card first.** While Jarvis works on a request, a card says what he
+  is doing in his own words ("Reading your calendar"), a timer, the steps and
+  sources so far, and **Stop** (exactly the ask line's own cancel). When the
+  answer brings frames, the card shrinks to the head of its group.
+- **Frames.** Each answer's frames come up together as one group, the newest
+  answer top left, on a grid that fills the canvas: your day (a bar with a
+  "now" line, the events, the next one "IN 19 MIN"), a mail thread he read
+  (with an amber "Reply waits on Approvals" when he drafted a reply for your
+  OK), to-dos, follow-ups, a page picture from web research (only a picture:
+  it opens nothing), web research's answer with its sources, a web search's
+  results, a big number for a change, and the tables, charts, timelines and
+  maths of an Ask's answer
+  ([below](#tables-charts-timelines-and-maths-from-ask)). A frame boots: its
+  outline draws itself, a scan line wipes down, the heading decodes, numbers
+  count up. What waits on you is amber, with corner ticks. A frame that could
+  not be made shows its warning and why, in coral. Every word in a frame is
+  plain text. What cannot fit folds to a tile (its title and one fact),
+  oldest answer first; nothing scrolls off and nothing is cut.
+- **Tidy, Clear view, pin, close.** **Tidy** packs the frames again (it shows
+  only after a close left a gap). **Clear view** folds every unpinned frame to
+  a line drawn into the orb, with "Board cleared · Bring back" for a few
+  seconds. **P** (or a frame's pin) keeps a frame and its place, six at most;
+  **Delete** (or its close) leaves "Closed: ..." with **Bring back** for 8
+  seconds. At most 24 frames in 8 groups: past that, the oldest group without a
+  pin leaves whole. Frames last for the session: they are never saved.
+- **Reading is safe.** While the pointer is over the frames (or the keyboard is
+  in them, or you scrolled there in the last 8 seconds), a new answer does not
+  move them: "New answer above · Show" appears, and it lands on **Show** or
+  after 8 quiet seconds.
+- **Open big** (**Enter**, a double click or a frame's open-big button): the
+  frame grows over the canvas; **Esc** puts it back. A long table or working
+  scrolls inside it.
+- **While Jarvis speaks**, the frame a sentence names (by its title, a
+  sender, an event) brightens. When a later answer brings a frame that is
+  already up (the same thread, day, page, list or table) with something new in
+  it, that frame updates where it is and says CHANGED.
+- **Nothing on the canvas acts.** No frame approves, sends or undoes anything.
+  A waiting reply's amber chip (or **Ctrl+3**) only opens its card on
+  Approvals, where you decide as always.
+- **The keyboard.** **F6** (Shift+F6 back) moves between the ask line, the
+  frames and the corners. Among the frames the arrows move by where they are,
+  Home and End go to the first and the last, Tab reaches a frame's buttons,
+  Enter opens big, P pins, Delete closes and Esc goes back to the ask line.
+  Jarvis's own keys (Ctrl+1 to Ctrl+9, Ctrl+K, Ctrl+M, Ctrl+B and the rest)
+  keep working there.
+- **On the HUD** ([Jarvis on your desktop](#jarvis-on-your-desktop-the-hud)) a
+  "9 on the board" chip brings Jarvis back with his frames.
+
+### If the canvas can't start: the hologram and the desk
+
+The canvas is a page Jarvis draws in a locked-down web view (see
+[Privacy and cost](#privacy-and-cost)). If that can't start on this PC, or it
+stops for good, Home goes back to the earlier hologram look, and
+`[look] board = false` keeps that look with no frames at all:
+
+- **The window and the header.** A frameless window with a header for a title
+  bar (drag it to move the window): the wordmark, the state word, a note for a
+  service that is not OK (**NOTION**, **VOICE**, **CALENDAR**, **CLAUDE**,
+  with the details as its tooltip), the clock (which opens the Day view),
+  **mute** (**Ctrl+M**), minimise and close. The Dock on the left edge opens
+  the screens ([Using it](#using-it)).
+- **The ring.** Jarvis's ring in the middle of Home shows the same state as the
+  header word, each look with a shape of its own at every size (also the
+  36 px one in the Dock and the LIVE pop-out), so none relies on colour alone:
+  it swings level to face you while you talk, a white head races round it
+  while he thinks, its band reaches out with his voice while he speaks, an
+  amber arc shows while something waits, steel and struck through while muted.
+  A meeting being recorded adds a coral ring and quiet hours dim it. A failure
+  never turns it red: the failure is a tile beside it.
+- **The desk.** With frames to show, Home becomes a desk: the conversation on
+  the left with the ring at its head, and the frames on the right as plain
+  read-only tiles under the line "The board can't start on this PC. Answers
+  still show here as text." A turn's "4 frames on the board" scrolls the tiles
+  to its answer. **Ctrl+B** folds the desk away and back. While an offer's or
+  an error's tile waits (a briefing that could not load, Claude Code not
+  signed in, Gmail refusing a reply), the desk's chips start with an amber chip
+  in the tile's own words: it shows Home's stage with the tile, and the desk
+  comes back once you have answered or dismissed it. The header's note for
+  that service is greyed only while the tile is in sight.
+
+### Tables, charts, timelines and maths from Ask
+
+With [Ask Jarvis](#ask-jarvis-optional) on, an answer (a web research's too)
+may come with a short topic for its group and up to three frames of its own,
+when one shows more than the answer says: a **table** (up to 6 columns and 12
+rows, the changed row banded with its change in cyan, its source under it), a
+**chart** (up to 8 bars with their values; a changed bar shows where it was
+and by how much), a **timeline** (up to 8 steps marked DONE, NEXT or DUE, and
+where today is) or **worked maths** (up to 8 numbered steps, the answer
+boxed). Most answers bring none. Jarvis checks each one strictly before it
+reaches the board: only words and finite numbers, every size capped, maths
+only from a short list of operations, never markup, a link or a script. A
+frame that fails is dropped (the log counts it) and the answer itself is never
+affected. One of Jarvis's own [instant answers](#instant-answers), a sum with
+a step in its working, shows that working the same way.
+
+### Jarvis on your second screen
+
+Turn it on in Settings > Look: "Show Jarvis on my second screen" (greyed, with
+"Needs a second monitor", while Windows sees one monitor; `[look]
+second_screen` sets the default). Your other monitor then shows, in large type
+for reading across a desk, the orb in its live look, the state word, the clock
+and the date, your next event ("In 19 minutes · video call"), what waits on you
+("Waiting on Approvals, on the main screen"), whether a briefing is ready, how
+many frames are on the board, and the board's first nine frames as outline
+tiles. With the canvas this wall wears its style: the orb is the flat JARVIS
+badge, and the tiles are square, with a thin cyan edge and no glow (true black
+stays black); what waits on you is amber with two corner ticks. It is only for
+glancing at: it takes no clicks and never the keyboard,
+it never makes a sound, and nothing on it can be approved or opened. It never
+shows mail text ("Mail text hidden on this screen": senders and subjects
+show), the text of a web research's answer (its sources show), web searches,
+your question or what Jarvis says. It is left out of screenshots and screen
+sharing, and it hides while the PC is locked, the display is off, battery
+saver is on or a full-screen app runs on that monitor. For OLED screens it is
+true black and never still for long: it shifts a few pixels every 30 seconds,
+swaps its two sides every hour, dims after 5 quiet minutes and keeps only the
+still orb and the clock after 20. While the LIVE pop-out or a task's watch
+window is on that monitor, it folds to a strip at the far edge (the orb, the
+clock and the counts) and comes back 2 seconds after they close; a monitor
+under 1,600 px wide shows only the strip. Jarvis draws it himself (no web
+page), from what his main window shows.
+
+### Soft sounds
+
+A few moments have a soft sound, which Jarvis makes himself (no sound files
+come with him): he writes them once to the data folder the first time they are
+on, and a normal start after that makes nothing; while they are off nothing is
+made at all, and turning them on makes them then. The moments: when he hears you (the talk key or "Hey Jarvis"),
+when a request has had no answer after a moment, when a frame lands on the
+board and when a group of frames has settled, when something new waits for
+your OK, when a frame changes, when an approved card is done or has failed,
+and when a frame opens big or goes back. They are quiet (at most 8 % of full
+volume) and silent while Jarvis is muted, in quiet hours, in focus mode, while
+a meeting records, while you are on a call (see
+[Quiet during calls](#quiet-during-calls)), while the PC is locked, while
+Windows says you are busy or a full-screen app runs, and over his voice (a sound that would play then is
+dropped, never kept for later). The board's sounds play only while its window
+shows, and the frame and change sounds not with motion off. Settings > Look
+turns them off (or on again) on this PC; `[look] sounds = "off"` turns them
+off whatever Settings > Look says. The "Hey Jarvis" chime is not one of them:
+it keeps its own sound and rules.
 
 ## Using it
 
 **Opening Jarvis.** The Start menu shortcut (see
 [Start menu shortcut](#start-menu-shortcut)), the hotkey (**Ctrl+Alt+J**) and
 `py -3.13 -m briefing_reader --open` (or no option at all) open the assistant
-screen at the bottom right, in front, with the command bar ready when
+screen in front (the canvas opens maximised), with the ask line ready when
 [Ask Jarvis](#ask-jarvis-optional) is on. Jarvis says one short greeting picked
 at random for the time of day ("Good morning, sir.", "Evening, sir. What can I
 do for you?", "At your service, sir."), never the one you heard last; when a
@@ -964,8 +1267,10 @@ greeting was more than 2 minutes ago. Without sound (muted, `[assistant]
 speak = false`, no voice available) the same words are shown in the JARVIS
 tab; `[assistant] greet = false` turns the greeting off.
 
-**The Dock and the screens.** The Dock on the window's left edge opens the
-screens: each one with its glyph and its name (Home, Briefing, Approvals, Live,
+**The screens.** On the canvas the screens are the buttons at its top right
+(see [The look](#the-look-the-canvas)), each opening over the canvas with
+**Back**. In the hologram look (when the canvas can't start, or with
+`[look] board = false`) the Dock on the window's left edge opens them: each one with its glyph and its name (Home, Briefing, Approvals, Live,
 Memory, Follow-ups, and Settings at the bottom), its count or its cyan NEW dot,
 and a glowing cyan rail that slides to the screen you are on. In a narrow window
 (under about 1,000 px wide) it folds to glyphs only: hover a glyph, or Tab to
@@ -993,8 +1298,9 @@ the J.A.R.V.I.S. name types in. None of it waits: you can click and type at
 once. `[ui] motion = "calm"` makes it slower and gentler, `"off"` turns these
 effects off, and so does turning off "Show animations in Windows".
 
-- **Home** (**Ctrl+1**; the Dock's glyph is Jarvis's small orb) is Jarvis
-  himself: the large orb in the middle shows what he is doing, the same word
+- **Home** (**Ctrl+1**) is Jarvis himself. On the canvas it is as
+  [The look](#the-look-the-canvas) describes; in the hologram look (below) the
+  large orb in the middle shows what he is doing, the same word
   sits in the header, and what he says appears under the orb a few words at a
   time (at most 14 words a page). Below them: one quiet
   chip and the command bar (**Ctrl+Space** from any screen). The chip is, first
@@ -1045,12 +1351,34 @@ effects off, and so does turning off "Show animations in Windows".
   follow-ups are on (see [Memory (the MEMORY tab)](#memory-the-memory-tab) and
   [Follow-ups and nudges](#follow-ups-and-nudges)); with the bundle off they
   are not there at all.
-- **Settings** (**Ctrl+,**) is read only: it shows the settings as Jarvis
+- **Agents** (**Ctrl+9**; a cyan dot while a run has something you have not
+  seen) shows only while [standing agents and rules](#standing-agents-and-rules)
+  are on (with Ask Jarvis): the jobs, what they did and their reports.
+- **Settings** (**Ctrl+,**) shows the settings as Jarvis
   loaded them (Voice, Briefing times, Ask, Accounts, Quiet hours, LIVE and
-  privacy), says which `config.toml` tables hold them and opens `config.toml`
-  or the data folder. Every setting lives in `config.toml` (secrets in `.env`);
-  change it there and restart Jarvis. Nothing on this screen changes a
-  setting, and it never shows a secret, a token or an email address.
+  privacy, Look and the rest), says which `config.toml` tables hold them and
+  opens `config.toml` or the data folder. The comfort settings have
+  **Change** on their row: his speed and volume, whether he speaks on his own,
+  his answers and what happened after an approval, the greeting (and its one
+  fact), how long his voice stays loaded, how a scheduled briefing arrives, the
+  clock, the screen motion, where LIVE opens, and, with their features on,
+  quiet hours and the meeting brief's lead time, the instant answers'
+  temperature, and the quiet that ends a talk and how long its speech model
+  stays loaded. Change opens the row's own editor under it (On / Off or a
+  choice as buttons, a number with **Less** and **More** inside its limits, a
+  time as HH:MM); **Save** keeps it on this PC, **Cancel** keeps nothing, and
+  Esc is Cancel. A changed row says "Changed here" (until the restart:
+  "Changed here to ... - used after a restart") and has **Back to
+  config.toml**, which takes the change away again. Changes are used after you
+  restart Jarvis; there is no Restart button. Everything else, and anything
+  that decides what leaves the PC, what Jarvis reads, who gets something or
+  what runs by itself (every `enabled`, the accounts, models, keys, folders,
+  the schedule and the network switches), is changed only in `config.toml`
+  (secrets in `.env`), then a restart. Nothing on this screen writes
+  `config.toml`; what Change sets is kept in the data folder's
+  `settings.json` (see [Configuration](#configuration)), and the few switches
+  of Settings > Look act on this PC only (`assistant.json`). It never shows a
+  secret, a token or an email address.
 
 Elsewhere in this README "the JARVIS tab" means Home's Transcript, "the
 BRIEFING / LIVE / MEMORY tab" the screen of that name and "the NEEDS YOUR OK
@@ -1178,12 +1506,14 @@ itself, and none adds a new moment when he speaks or shows something):
   offer flashes the taskbar button, Jarvis also shows his own small window at
   the bottom right of the screen: the small orb, one line ("Your AM briefing is
   ready, sir." / "Project Development check-in in 15 minutes, sir.") and ONE
-  button. It never takes the focus (what you type keeps going where it went),
+  button; with the canvas, the orb is its flat JARVIS badge and the toast a
+  square canvas frame. It never takes the focus (what you type keeps going where it went),
   it is not a Windows notification (nothing lands in Windows' notification
   history), it hides after 8 seconds (pointing at it pauses that) and it is
   posted nowhere else. **View** opens the Briefing screen; **Prepare brief**
-  opens Home with the offer's tile, which still needs its own click: the toast
-  never reads, prepares or sends anything.
+  opens Home with the offer's tile (also when Home was the desk: Home's stage
+  shows it), which still needs its own click: the toast never reads, prepares
+  or sends anything.
 - **Offline voice.** When his usual voice can't speak - the local voice is not
   downloaded or can't run, or the online one cannot be reached - and the Windows
   voice speaks instead (see [Offline fallback](#offline-fallback)), the header
@@ -1294,6 +1624,15 @@ voice when the online one cannot be reached), politely and to the point:
   guests (prep offers), while the briefing plays, while a card is being
   carried out (a Send's hold included) or while Jarvis plans or speaks: some of those wait for a quieter moment,
   others leave the offer as text only (the table under Offers says which).
+- **Standing agents and rules** (see
+  [Standing agents and rules](#standing-agents-and-rules)): one fixed line
+  when a run needs you, built from counts: "Sir, your agents left 2 cards for
+  your OK.", "Sir, your agents have 1 new item for you." With the voice made
+  on this PC it names the job ("Sir, Bills left 1 card for your OK."). Never a
+  report, a subject, a sender or a card's text. It waits while the PC is
+  locked, in `[standing]` quiet hours, while a meeting records, in focus mode,
+  while you are on a call or while Windows says you are busy, and each run is
+  told once.
 
 Everything he says is also written in the JARVIS tab. While he speaks the orb
 reads SPEAKING and the large line next to it shows his words. He never talks
@@ -1301,7 +1640,7 @@ over the briefing: if it is playing he pauses it and it carries on 0.4 seconds
 after he has finished (unless you pressed Play, Pause, Skip section or a
 section meanwhile). Pressing one of those, or Read everything, stops him at
 once and drops what he still had to say. Something that waited too long (a
-greeting 20 seconds, an answer 30, a result 60) is left out; it stays in the
+greeting 30 seconds, an answer 30, a result 60) is left out; it stays in the
 JARVIS tab.
 
 **Mute.** The speaker button in the header (left of minimize, on the assistant
@@ -1313,6 +1652,39 @@ voice off for good (no speaker button), `speak_replies = false` keeps Ask
 silent, `speak_results = false` keeps the confirmations silent, `greet = false`
 drops the greeting, and `address` changes "sir" (see
 [Configuration](#configuration)).
+
+#### Quiet during calls
+
+While another app is using your microphone (a call or a video meeting),
+Jarvis keeps to captions, as while a meeting records:
+
+- **His voice is captions only.** His words show on Home and in the JARVIS
+  tab and are not said; nothing is kept to say later. A line he was saying
+  stops, and a playing briefing pauses (Play carries on). Home's line says
+  "You're on a call, sir: I'll keep to captions." (shown, never said).
+- **The soft sounds and the end sound of a timer or reminder keep quiet**; the
+  timer's or reminder's toast still shows.
+- **"Hey Jarvis" pauses**; the talk key still works, and its answer is
+  captions only.
+- **A standing agent's or rule's line waits**, and a background check does not
+  open Jarvis while you are on a call.
+- **A scheduled briefing waits**: it comes forward (without the focus) once
+  the call ends, if that is within the 3-hour catch-up; if the call outlasts
+  it, nothing is shown and the briefing waits for you under BRIEFING. A setup
+  problem is still shown at once (as text; nothing is said).
+
+How it knows: every 3 seconds it reads Windows' own record of which apps are
+using the microphone (the same list as Windows' microphone privacy page),
+read only, and leaves out an entry that started before the PC last started
+(one a crash left behind). It keeps only a yes or no: never which app, in
+memory or in a log.
+Jarvis's own Python programs are left out, so his own listening never counts;
+that also leaves out your other Python programs. A call is over 6 seconds after
+the microphone was let go, so a short gap is not taken as the end. An app that
+keeps the microphone open all day keeps him quiet all day: Home's line shows
+it, and Settings > Voice > **Quiet during calls** (Change) or `[voice]
+quiet_in_calls = false` turns this off after a restart (then nothing is read
+at all; a background standing check follows it from its next run).
 
 ### LIVE: watch Jarvis work
 
@@ -1558,14 +1930,19 @@ To turn them off, in `config.toml`:
   and search snippets out of the pictures (their headers and result titles
   still show).
 
-The first page picture of a session starts a web engine inside Jarvis: the
-window may pause for a second or a few. The engine then stays loaded (about
-50-80 MB of memory, no extra process, no CPU) until Jarvis closes. It is part
-of PySide6 (6.8 or newer); without it the step says "Picture unavailable".
-That first picture also starts Jarvis's network gate: a small proxy on this PC
-(127.0.0.1, a free port) that the hidden window must use. It too stays until
-Jarvis closes; any program on this PC that finds it reaches through it only
-what the window may: public https servers, under the same rules.
+The web engine these pictures use is already running: it starts with the
+window, for the canvas (Home's page), and stays loaded until Jarvis closes. It
+is part of PySide6 (6.8 or newer); without it the step says "Picture
+unavailable" (and Home is the hologram look). The hidden window must use
+Jarvis's network gate: a small proxy on this PC (127.0.0.1, a free port). When
+no page picture and no agent page can be asked for in this run (`[live]`
+page pictures off and the agent off), there is no gate at all: the engine
+starts with a dead proxy address. Otherwise the gate starts with the canvas but
+**sealed** (it refuses every connection), and only the first page picture (or
+agent page) about to be taken opens it; the canvas itself needs no network.
+Once open it stays until Jarvis closes; any program on this PC that finds it
+reaches through it only what the window may: public https servers, under the
+same rules.
 
 ### Plan my day
 
@@ -2259,7 +2636,10 @@ card is as it was.
 
 The window folds into the orb, the orb flies to the top of your screen and a
 slim command bar opens with chips under it ("Briefing ready", "2 need your
-OK", REC while a meeting records). A chip, **Bring Jarvis back** (also in the
+OK", REC while a meeting records). With the canvas, the orb there is its flat
+JARVIS badge (every state, and the amber arc of needs you), and the bar, its
+chips, its result cards and the keycaps of the HUD key are square canvas
+frames. A chip, **Bring Jarvis back** (also in the
 tray menu) or the window key bring the window back on that screen. The window is
 only hidden meanwhile, never closed. The HUD never takes your typing by itself:
 only the HUD key or a click in its bar gives the bar the keyboard, and Enter or
@@ -2521,8 +2901,10 @@ failed). Jarvis's own fixed lines are said as ever, and the firewall's card neve
 words: six words in a row of what a page, a mail or a file gave him (common phrases aside) and it is
 not said. His report may quote.
 
-**What this version does not do.** This version does not sign in to anything, type into pages or
-run code. A task that needs one of those does what it can of the rest and says so in its report.
+**What this version does not do.** This version does not sign in to anything, upload or download a
+file, or run code. He types into a page only as [Filling in pages](#filling-in-pages) says, and only
+once your Turn on covers it; nothing he types leaves this PC before your click on its Send card. A task
+that needs one of those does what it can of the rest and says so in its report.
 
 **The window you can watch.** At his first search or page a window opens, on a second
 screen if you have one, else on the right of the main screen, clear of the HUD: the real
@@ -2541,9 +2923,9 @@ at once and the window with the result card; after a Stop or a Turn off it goes 
 a block, he tries Bing and Google, and he never answers one or clicks through), so the words
 of each search go from this PC to that engine, with no sign-in and no cookies kept. Pages
 open in the same private web engine as the [page pictures](#pictures-in-live):
-a new private profile for every page, public https addresses only, no sign-in, typing, form,
-download, pop-up or permission, and every connection through the same network gate (public
-IPv4 addresses, port 443). What a page says is only ever data to him; LIVE flags a page only
+a new private profile for every page, public https addresses only, no sign-in, download, pop-up
+or permission, no typing or form but as [Filling in pages](#filling-in-pages) says, and every
+connection through the same network gate (public IPv4 addresses, port 443). What a page says is only ever data to him; LIVE flags a page only
 for a strong sign of orders (override phrases, role and prompt markers, templates, Jarvis's own
 markers and tools' names, hidden or look-alike tricks), not for the order verbs ordinary pages are
 full of ("Find a store").
@@ -2655,7 +3037,8 @@ that has read only your calendar, contacts, notes or names, a
 paraphrase, a word with a letter dropped, an amount or a time go out with no card; a strict task still
 passes anything spelled in common words, in any mix of capitals, with a mark at a time or the
 ordinary runs above; and any task could choose among links a page offers. The
-address rule and his having no way to type into a page are the strong parts.
+address rule and the seal on a page he fills in (nothing typed leaves this PC before your click on its
+Send card: [Filling in pages](#filling-in-pages)) are the strong parts.
 
 **What he changes.** Nothing by himself. Moves, copies, renames, zips, new folders and the Recycle
 Bin go on the desktop's own NEEDS YOUR OK card (`propose_files`), checked against your own words in
@@ -2710,7 +3093,12 @@ at once: the process is killed and anything it was still doing is dropped, and h
 more: what he was saying goes too, and a Turn off leaves nothing of the task in the conversation
 either, nor his report in LIVE. (A briefing being read aloud reads on.) The bar says
 "Passing that on, sir." when your words went in; in the first seconds of a task they go in right
-after your request.
+after your request. While one of his steps runs it says "Passing that on, sir: he'll have it when
+this step ends.", for Claude Code hands your words over only when that step returns (words that
+wait to go in with his next turn get the plain "Passing that on, sir."). Once they
+reached him the bar says "He has your message, sir." (shown, not said) and LIVE notes "Your message
+reached him"; while a card waits for a click, only LIVE does, and the bar keeps saying the card
+needs a click.
 
 **Its budget.** After `[agent] max_turns` turns or `max_minutes` minutes of work he asks
 "Keep going?" (the clock rests while he waits for you and while the PC sleeps). Reached while a card is up or a batch is at
@@ -2750,6 +3138,558 @@ A restart ends a task; its files stay.
 window on it (on screen and in memory only; it never opens LIVE by itself). **Logs** carry
 ids, kinds, counts, states, reason codes and durations only - never your words, a search, an
 address, a page's words, a file name, a tool's arguments or a token.
+
+#### Filling in pages
+
+A task can fill in public pages in the window you watch: a contact form, an application with no
+account, a booking enquiry. You see each field typed, a ring over what he acts on, and his short
+narration ("Typing into Email on www.example.org"). Every submit waits for your click.
+
+**Turning it on.** It needs `[agent] drive = true` (the default) and your **Turn on** on the card
+whose row reads "He may fill in public pages in his own window; nothing typed leaves before your click
+on its card." Until then a task is offered exactly the tools and instructions it was before and never
+types. If you
+turned tasks on before that row came, tasks go on as they were; to let him fill in pages, click
+**Turn off** in Settings › Desktop, then Desktop in the Dock and **Turn on** on its card, where the
+new row is marked NEW.
+
+**Free, and what waits.** Opening, reading, looking, scrolling, switching or closing a tab and
+following a link are as free as opening a page (a link is checked as an address he opens: in a task
+that has read anything of yours, one he was not given waits for your card). Typing into a field,
+choosing in a list and ticking a box are free too, because nothing can leave meanwhile (the seal,
+below). These always wait for your click on a **Send card**: a submit, Enter in a field, a button whose
+words commit (buy, pay, sign in, post, delete, confirm, subscribe, sign up, register, apply, book and
+the like), and any press on a page that holds what he typed.
+
+**The seal.** The first time he types or chooses on a page, the window is sealed before the first
+value goes in: no new connection, and every one open is cut, so nothing the page does can leave this
+PC, not even letter by letter as he types. No other page loads, no link opens, no page is read another
+way and no site opens in your browser meanwhile, and only one tab holds typed values at a time. A field
+takes one value a page: he never types into it again or clears it (what was typed first the page may
+have kept), and closing the tab is how he starts over. It stays sealed until your click on that page's
+Send card, and nothing acts on that tab while the card is up. **Don't**,
+no answer in 10 minutes, or a Stop: the page and its private profile are destroyed while still sealed,
+and the seal lifts only once they are really gone. The strict seal has a cost: suggestion lists that
+ask the site as you type (a city picker, an address lookup) and pages that check a field as you type do
+not work, and a site's own search box takes a Send card like any submit (searching a site by its
+address stays free).
+
+**The Send card.** Amber, on the HUD: `SEND ON www.example.org?`, "Jarvis wants to press 'Apply
+now' on www.example.org", then every value he put into the page, each under its field's label,
+exactly as it will go (invisible characters spelled out; a field takes at most 2,000 characters, so
+it shows whole, and the card scrolls; a form holding any value longer than that is not sent). A
+value from your mail, files or calendar is tagged amber "from
+your mail / files / calendar": your private details reach a page only this way, on a card you read.
+A ticked box that agrees to terms is amber too: your Send agrees to them. "Goes to:" names where the
+form goes, amber with "check where it goes" when that is not the page's own site or not encrypted;
+it names where that button itself sends it when it says so, and a button that sends the form into
+another window is refused. A press that sends no form (a plain button, a box, Enter outside a form)
+reads "The page sends it where it chooses; Jarvis can't see where." "Plus N values the page set
+itself" counts what the page added, and each of them follows in full under its field's name: amber
+when it holds what he typed or comes from your mail, files or calendar, marked when it is hidden on
+the page (a form with more than 20 of them is not sent). Its note: "Only a click sends. The site may pass on what it
+gets." Then **Don't** and **Send**. Only a click answers it: what you type or say reaches the task as
+your message and answers nothing, and the bar says so. It takes no click for its first 0.6 s, it
+counts in "N need your OK" and on Approvals, where **Show me** takes you to it, and its words are
+never said aloud. On **Send**, Jarvis himself (never the model) reads the page's values again (any
+change since the card: nothing is pressed, and he is told), lifts the seal for the page's own site and
+where the card says it goes, and for nothing else, checks the values once more in the very step that
+presses, presses that same button, waits up to 25 s for the page, and tells the task what it shows.
+Once a new page comes the seal lifts; if none comes, the window is sealed again as before, the tab
+still holds what was typed, and the task is told plainly: the page did not send it (a field it needs
+is empty or wrong), or the page kept it and may have sent it by its own script to that site. What a
+site does with what it gets Jarvis can't see: the card's note says so. On **Don't** or no answer nothing is
+pressed and the same send is never tried again. A Stop withdraws the card, and a click that comes
+late does nothing.
+
+**Never typed.** Password fields, card and one-time-code fields, a field whose label or name says it
+holds a secret, a file upload ("Jarvis doesn't upload files") and anything on a payment page; and
+values that look like a key or a password, a card number, an IBAN or an ID number. He is told why,
+and LIVE flags it.
+
+**Tabs, caps and Pause.** Up to 3 tabs, each its own page and private profile: cookies last only
+for that page and go with it, so a form of several steps works, a sign-in never carries over. The
+strip shows a chip per tab, the one on show lit. A task opens at most `[agent] max_pages` pages (40),
+takes `max_actions` page actions (150) and puts up `max_sends` Send cards (5) before it asks "Keep
+going?". The panel has **Pause** (then **Resume**): while paused every web and page call is held,
+the seal with it, and Resume tells him to carry on. Standing agents get no browser in this version.
+
+**Your mouse stays off the window.** You never take over: what you typed there would leave with no
+card, and signing in is for a later version. Instead the strip has **Open in my browser** while it
+shows a public page and nothing typed is held, never a page a Send led to (its address may hold
+what was sent): on your click, that page's address alone (no value,
+no cookie, nothing of his window) goes to your own browser, through the same link check as a
+research card's Open. There the site sees you as it always does. When a task that filled in pages
+ends done, the window grows to most of its screen ("opens big") with the last page he had open,
+without taking the focus, for as long as the result card stays.
+
+**What he is told.** Only with those tools can he fill in a page. A control's name is a page's
+words: data, exactly as a page is. A page that asks for your details, or tells him what to type, is
+not asking on your behalf: he does not do it, and says so in his report. He puts your details into a
+page only when your words in this task ask for it. Many sites ignore typing done by a script or need a
+sign-in; then he says so. A value he typed is never in a line he says, never said aloud and never
+logged: logs keep kinds, counts, durations, how a Send card ended and refusal codes, never an address,
+a label or a value.
+
+### Capture: pictures, PDFs, text and calendar files
+
+Drop a screenshot, a photo, a PDF, a text file or a calendar file (`.ics`) on
+Jarvis, and the events and to-dos in it become cards for your OK, each linked
+to where it came from. A class that meets every Tuesday and Thursday is **one**
+card: its whole series goes onto your calendar with one Approve and comes off
+again with one Undo.
+
+**Ways in**
+
+- **Drop** a file on the Jarvis window (a picture `.png .jpg .jpeg .gif .webp
+  .bmp`, a `.pdf`, an `.ics` or a `.txt`), or drag text or a calendar link
+  (`webcal://...`, or an `https://` link that ends in `.ics`) onto it.
+- **Ctrl+V** in the ask line with a picture or copied files on the clipboard.
+  **Ctrl+Shift+V** captures copied text (a plain **Ctrl+V** of text still
+  types it, as ever - also when a spreadsheet or a slide put a picture of it
+  beside the text).
+- **Type** `capture:` and the text ("capture: Lab report due Friday 5 PM").
+
+A drop or a paste only puts it in the **tray**, one line above the ask line
+("syllabus.pdf · PDF · 120 KB", **Read it**, **Remove**). Nothing is read,
+sent or fetched until you click **Read it** (or press **Enter**); words you
+type in the ask line then go along as yours ("only the exam dates").
+
+**What Read it does**
+
+- A **calendar file** is read on this PC and never goes to Claude.
+- A **calendar link** is fetched **once**, on that click: `webcal` is read as
+  `https`, only `https`, only a public web host - its name and every address
+  it leads to (every redirect checked, at most 3) - at most 2 MB, in at most 10
+  seconds for the whole fetch, with no proxy or saved password from this PC's
+  settings. It is a one-time import, not a subscription; the tray names the
+  host before you click.
+- A **picture, PDF or text** is read by Claude, as one Ask run (it counts
+  under Ask's caps): a PDF's text is read on this PC page by page, and only
+  the pages without a text layer go as pictures; pictures go inside the
+  message itself, never as a file path, and Claude has no tools. What Claude
+  reads there is treated as other people's words: data, never instructions.
+  If your Claude Code can't take pictures, a picture is refused before
+  anything starts. Claude only lists what it finds; Jarvis checks every date
+  and builds every card and every repeat rule himself. A monthly or yearly
+  repeat is added only when the capture names its day ("the 3rd of each
+  month": "monthly on the 3rd"); otherwise its card has no Approve and says
+  so.
+
+Then a **Capture frame** goes up on the board ("Capture · term.ics"): a row
+per item that **WAITS** for your OK (amber), is **ON YOUR CALENDAR** already,
+was **DECIDED** before, is **PAST**, or that Jarvis **CAN'T ADD** (and why).
+Its amber chip opens Approvals; it approves nothing.
+
+**In Approvals** (Ctrl+3) the cards are under **CAPTURE**: an event or a whole
+series has **Approve** (your personal calendar, with Undo), a to-do has **Deny**
+and **Done** and joins To-dos and Plan my day. Each card says where it came from
+("From syllabus.pdf, p. 2", also in the event's description), and its
+**Source** opens the kept copy in Jarvis's own viewer: the picture, the PDF page
+or the text, read only. **Clear capture** there takes away its waiting cards and
+the kept copy at once.
+
+**Duplicates and the past.** Jarvis reads your personal calendar once over the
+coming months (never a sign-in) and skips what is already there: by the
+calendar file's own id (an event Jarvis added from a capture carries it too),
+by title and start (a series: an occurrence on its days at the same time), and
+by what you already decided. Skipped items are listed on the frame, never
+dropped silently; when the calendar can't be read, the cards are still made
+and the frame says "Not checked against your calendar" (also when the coming
+months hold more events than one read takes). Past events, finished
+series and cancelled entries get no card (they are counted). An event over a
+year away is shown with "check the year" and no Approve.
+
+**Time zones.** A one-off event in another time zone is moved to your
+calendar's time. A repeating event set in another time zone, in UTC or in a
+zone Jarvis can't tell gets a card without Approve that says so ("Jarvis
+can't add this repeat").
+
+**Limits** (not settings): at most 50 cards per capture ("later ones not
+shown") and 100 capture cards kept; at most 30 items from one Claude reading,
+5 pictures, 20 PDF pages or 40,000 characters; files and fetched calendars at
+most 2 MB; a calendar file at most 500 entries.
+
+**What stays on this PC.** The kept copy (`captures\<id>\source.<ext>` in the
+data folder) and `captures.json` (the cards: titles, times, places) stay on
+this PC. A capture goes 30 days after it was made, or 7 days after its last
+card was decided. Files named like passwords or keys, files outside the types
+above and anything inside Jarvis's own data folder are refused. Logs hold
+counts, kinds, sizes, durations and reason words only - never a file name, a
+title, a link or a host.
+
+### Documents and datasheets
+
+**Documents** (the Dock's Documents, **Ctrl+0**) keeps documents and
+datasheets on this PC: notes and plans you write, and tables with typed
+columns.
+
+- **New document** opens an empty one in **Edit**: what you type is markdown
+  (`# a heading`, `- a list`, `**bold**`). **Read** shows it as text, read
+  only: no web page, picture or file is ever loaded for it, HTML in it stays
+  plain text, and links are not clickable.
+- **New sheet** starts a table: **Add column** names a column and picks its
+  type - Text, Number, Date (written `2026-11-22` or `11/22/2026`), Choice (one
+  of the choices you list), Checkbox or Link. A value that doesn't fit its
+  column is refused with the reason ("That isn't a date"). **Add row** adds a
+  row; **Open link** opens the link in the selected cell, only when it passes
+  the same link check as a web research card.
+- What you type is yours and is saved as you go (a moment after you stop
+  typing, and when you leave the screen). **Ctrl+Z** undoes while you edit.
+- **Versions** lists what was kept before: one while you edit (at most every
+  two minutes), one before each Keep and Restore, and one when the file was
+  changed outside Jarvis. **Restore** brings one back (what was there becomes a
+  version first). Each document or sheet keeps 30 versions (4 MB at most).
+- **Delete** moves it to **Deleted** (with **Undo** at once, and **Restore** for
+  30 days; then it goes for good).
+- **Export .md** saves the kept text; **Export .csv** saves the kept rows
+  (UTF-8, each cell by its type; a cell that starts with `=`, `+`, `-` or `@`
+  gets a leading `'` so a spreadsheet never runs it as a formula, and the file
+  is marked as from the internet). You pick where; the picker starts in
+  `Jarvis\Exports` in your user folder. A folder OneDrive syncs is asked about
+  first: the file would leave this PC.
+
+**Jarvis writes in them (with Ask on).** Ask in the ask line ("add a budget
+section after Packing to my trip plan", "put Globex in my internships sheet")
+and Jarvis hands it to that document or sheet: the exact name, else the only one
+that shares a word with it (when two could be meant he asks which), else a new
+one. Or use the editor's own **Ask Jarvis to change this...** line. Either way
+one run sees only that document or sheet (as data: nothing in it is ever an
+instruction), the tables on the board, the conversation and the notes chosen as
+for any Ask - never your mail, calendar or the web - and your own words.
+
+What Jarvis writes **waits for you**: his changes sit in the document or sheet
+in amber ("2 changes wait on you"), each with what it removes struck through and
+what it adds in cyan, and **Keep**, **Discard** or **Keep all**; **Undo** follows
+until the next change. The list shows "N WAIT" and the Dock's Documents an amber
+dot. Nothing changes before your click, and voice never keeps anything. He only
+touches what he names: a section after a named heading (or at the end), a named
+heading's section (replaced or removed), new rows, or the cells of a named row.
+He never deletes a row or a column or changes a column's type; a new sheet gets
+its columns with its first rows. A change whose section has gone since offers
+**Add at the end**. Jarvis holds back an answer with a link or an email address
+that was not in what he was given, a heading, row or column that isn't there, a
+value of the wrong type or more than he may write at once (6 changes and 16,000
+characters for a document; 50 new rows and 50 cells for a sheet), and says why.
+
+**On the canvas.** An answer about a document or a sheet puts its frame on the
+board: a document's start and its headings (CHANGED or NEW where a change
+waits), a sheet's first rows (the waiting ones first), and the amber chip while
+changes wait. Opening the frame (Enter, a double click, its open button, or the
+chip) shows the item in a pane over the frames, with **Open in Documents** and
+**Close**; the pane never takes the keyboard from the ask line, and it steps
+aside while a frame is open big. After a Keep the frame is drawn again in its
+place. The canvas's top row has **Documents** too.
+
+**Standing agents write there too.** Set an agent up with where its reports go
+("every morning put new internships from my job mail in my Internships sheet").
+Its setup card says **Writes to:** - the document or sheet of that name, or a
+new one ("Internships (a new sheet: Company · Role · Deadline · Status)") that
+**Turn on** makes. Each run's report then waits in the document as a section
+("## Nov 22 · Internship watch"), or its rows wait in the sheet: an agent only
+adds; a row whose key column (the first, for a sheet it made) matches a kept
+row becomes cell changes, and one already there or waiting is dropped; a cell
+that doesn't fit its column is left empty. The agent is shown the sheet's
+columns, never its rows. The Agents screen says "3 rows wait in Internships"
+with **Open**. Nothing an agent writes is kept before your Keep; Pause all and
+the consent card still stop every run. Run files go after `[standing]
+keep_days`: Jarvis takes each run in when he next opens.
+
+**What stays on this PC.** Everything is kept in the `docs` folder of the data
+folder (`index.json`, a folder per document or sheet with its `doc.md` or
+`sheet.json`, its versions, and `trash`), never synced. A file Jarvis can't
+read safely (damaged, made by a newer Jarvis, or too large) is shown read
+only and never overwritten. The caps: 300 documents and sheets, 200,000
+characters a document, 20 columns and 2,000 rows a sheet, 500 characters a
+cell. Logs hold ids, kinds, counts, sizes and reason words only - never a
+name, a heading, a cell or a column's name.
+
+### Standing agents and rules
+
+Some jobs come round again and again: "every weekday at 7:30, tell me what in
+my calendar and my lab's mail needs me", "when a bill comes in, line up a
+to-do to pay it". A **standing agent** is such a job, set up from one sentence
+of yours: it wakes at a time, every so often, on new mail that matches its
+filter or when you click **Run now**, reads only the sources it was given,
+writes a short report on the **Agents** screen (**Ctrl+9**) and lines up
+cards (to-dos, events, reply drafts) that wait for your click like any other.
+A **rule** is one sentence too, and narrower: a hard Gmail filter, one yes or
+no question about each new mail it matches, the values to find in it (an
+amount, a date, a name) and what a "yes" makes: a to-do, an event, a reply
+draft, or a line that just tells you. If you want it, a rule also tidies the
+one mail it matched (stars it, gives it one of your labels or archives it)
+without a click, with an **Undo** for 7 days. Your own Claude Code does the
+reading, on your plan, with no tools and no web: Jarvis gathers each job's
+sources himself and builds every card from what the run answers.
+
+**Turning it on.** It is off in the public `config.toml` (its `[standing]`
+table is there, commented out, with `enabled = false`). Turn it on for this PC
+with the line `JARVIS_STANDING_ENABLED=true` in `.env`, then restart Jarvis.
+It also needs [Ask](#ask-jarvis-optional) on, and an account with
+`"gmail_read"` for anything about mail. Then run `install-schedule.ps1` once
+more (setup step 6): it adds the "Briefing agents" task, which checks every 5
+minutes, also while Jarvis is closed. Until you do, Jarvis checks every 5
+minutes only while he is open, and the Agents screen says so ("Background runs
+need the scheduled task: run install-schedule.ps1 again."). Off, nothing of it
+runs, the Dock has no Agents screen and the task ends at once each time.
+
+**Setting one up.** Type `agent:` or `rule:` and your sentence in the bar
+("rule: when billing@example.com sends a bill, add a to-do to pay it by its
+due date and star it"), or just ask ("every Monday at 8, look at my week and
+tell me what to prepare"): Ask's first planner run may hand it to the setup,
+and only your own words go there, never the planner's. One setup run on your
+plan turns the sentence into a draft (it gets your sentence, your account
+names and what each can do, and the date; never mail) and shows it on the
+Agents screen's setup card in plain words: when it runs, what it reads (each
+filter as Jarvis will use it), what it asks and finds, what it may line up,
+its tidy-up and its caps, with the privacy line, and **Dry run** (a rule),
+**Turn on**, **Edit** (your sentence back in the bar, to reword it; the draft
+goes) and **Discard**. A sentence that is not something to do again and again
+is not set up ("Ask it as a normal request, or say when it should happen.").
+Every filter is checked against your own sentence, as Ask's mail searches
+are: it may use only words and addresses you typed, never OR, AND, brackets, a
+lone "-", a time or one single message, never a security or payment sender, a
+word about codes, passwords, banking or statements, a label, spam or trash,
+and it must narrow. A rule that tidies must name its sender (`from:`), and a
+label tidy-up's label must already be one of your Gmail labels ("make the
+label in Gmail first").
+
+**The dry run.** A rule goes on only after its dry run. Gmail's own count of
+its matches in the last 30 days comes first (headers only, no Claude run): a
+filter that matches more than 300 is refused right there ("it would read
+nearly everything. Name a sender or a subject to narrow it."). Then the newest
+matches (up to 8) are read and judged in one run, counted like any other, and
+the card says for each what a live rule would have done: the card it would
+line up, the line it would tell you, the tidy-up it would make, or why not.
+Nothing is proposed, starred, labelled or archived. A filter with more than 90
+matches in those 30 days never tidies: it makes cards only.
+
+**The consent card and Turn on.** Before anything runs, the Agents screen
+shows one card (your yes is asked once and kept on this PC): "Agents and
+rules read the mail they watch, on their own", with what that means (see
+**What goes where** below), **Yes, let them run** and **Not now**. Until you
+say yes nothing runs and Turn on waits. Turn on also needs each account the
+job reads mail from signed in, and records which Google account each one is:
+if that account name is later signed in as another Google account, the job's
+cards are not shown and its tidy-up stops. A draft's row and its setup card
+show **Sign in work** (the account's name) for each account that is not
+signed in to Jarvis yet (a rule's dry run reads that mail too, so it comes
+first): it opens that account's Google sign-in in your browser, the same one
+a card's **Sign in** opens, and the row and card say "Finish the sign-in in
+your browser..." until it is done, then whether it signed in or why not.
+
+**When they run.** A timed agent at its times on its days (by the local date
+and clock, so a daylight-saving night neither skips nor repeats a run; a time
+missed while the PC was off or asleep runs once at the next check if it is at
+most 3 hours old, `catch_up_hours`, and is noted as missed otherwise); an
+interval agent every N minutes or hours (30 minutes at the shortest; after a
+long sleep one run, never a backlog); a mail job on new mail that matches its
+filter, looked for every 5 minutes (one probe per account, then each filter:
+Gmail's ids and headers only, no Claude run); and an agent when you click
+**Run now**, or type "run" and its name ("run Morning check"). A job sees only
+mail that came after it was turned on (its first check sets the start). A run
+happens only when there is something to read: a mail job with no new mail
+makes no Claude run and no file (a **Run now** with nothing to read says so
+in ACTIVITY, still with no run). When a run fails, its mail is checked again
+next time, and nothing is ever proposed twice.
+
+**The Agents screen** (the Dock, **Ctrl+9**; a cyan dot while a run has
+something you have not seen):
+
+- **The status line**, such as BACKGROUND RUNS ON · 4 OF 30 RUNS TODAY · NEXT
+  7:30 AM (CHECKS WHILE JARVIS IS OPEN, or BACKGROUND RUNS OFF, while the task
+  has not run for 15 minutes), and under it what to fix: rerun the installer,
+  an account that "can't be read in the background", "No Claude runs until
+  ..." while a limit holds, `standing.json` kept read only, and a Delete's
+  **Undo**.
+- **Pause all** / **Resume all** beside the title: nothing runs and nothing is
+  tidied until you resume.
+- **The cards Jarvis puts first**: the consent card, a tidy-up's sign-in card
+  and the setup card.
+- **AGENTS**: one row each with its name, when it runs and what it reads, its
+  next and last run and its runs today (your own words are its tooltip), and
+  **Run now**, **Pause** / **Resume** and **Delete** (with **Undo** for 10
+  minutes). Pausing or deleting a job withdraws its cards that still wait.
+- **RULES**: one row each with its sentence, its dry run ("Dry run: 3 of 8
+  yes"), the mails it checked today and its tidy-up, and **Dry run**, **Turn
+  on**, **Pause** / **Resume** and **Delete**.
+- **ACTIVITY**: a receipt for everything the jobs did, newest first: each card
+  (WAITING, with an **Undo** that withdraws it from Approvals; DECIDED;
+  WITHDRAWN), each match a rule told you of, with the values it found, each
+  tidy-up with its own **Undo** or why there was none, and a run that made
+  nothing ("Reached its runs for today; it waits until tomorrow.", "Missed a
+  run while the PC was off or asleep.", "Couldn't finish a run.").
+- **REPORTS**: what the agents wrote, each under "Written by Claude from your
+  mail", and **Clear**, which deletes the reports and receipts kept on this PC
+  at once (a card that still waits stays until you decide it).
+
+**Cards.** A standing card is an ordinary card on Approvals, under its own
+AGENTS header between Ask's and the briefing's ("RULE · TODO", "AGENT ·
+REPLY"), at most 40 at a time. Jarvis builds each one himself: a rule's value
+counts only when that mail itself holds it, a reply goes only to the sender of
+the mail it answers and never repeats another mail, and every recipient counts
+as new (a NEW RECIPIENT tick, unless Jarvis sent to that address before). A
+standing **Reply** is checked again at your click, before its hidden hold:
+Jarvis reads that conversation again, and the message must still be there,
+you must not have written in it since, and its recipients must be on that
+message; then Send goes on by itself ("Checking that conversation again
+before it goes..."). If not, nothing is sent and the card says why. A card is
+kept on this PC with its run for 7 days (`keep_days`); one still waiting then
+goes with it.
+
+**Telling you.** When a run needs you, Jarvis says one fixed line built from
+counts, never the model's words ("Sir, your agents left 2 cards for your
+OK."); with the voice made on this PC (`[voice] engine = "local"`) it names
+the job when the news is from one ("Sir, Bills left 1 card for your OK."),
+since nothing he says then leaves the PC. The JARVIS tab shows it at
+once with **View agents**, and so does a toast when you are in another app.
+The spoken line waits while the PC is locked, during `[standing]` quiet hours
+(22:00-08:00), while a meeting records, in focus mode, while you are on a call
+(see [Quiet during calls](#quiet-during-calls)), or while Windows says you are
+busy (presentation mode, a full-screen program or game, quiet time).
+Each run is told once, and one more than 12 hours old is only shown. With
+Jarvis closed, a check opens him quietly, without taking the focus (as a
+scheduled briefing does; `--standing-show`), but never in quiet hours or with
+`open_when_closed = false`: then the news waits for the first check after
+them, or for your next open.
+
+**The tidy-up.** Only a rule tidies, only the mail it matched and only when
+you set it up so: your choice, and the one thing Jarvis changes without a
+click (an agent never tidies). For each "yes" it may star that one message,
+add the one label of yours the rule names, or archive it (take it out of the
+inbox), nothing more. It never sends, deletes, trashes, marks as spam, read or
+unread, never touches any other label and never changes a whole
+conversation. It needs:
+
+1. `"gmail_tidy"` in that account's `features` in `config.toml` (no account
+   has it in the shipped file), and Gmail's `gmail.modify` permission on your
+   OAuth consent screen (setup step 8d);
+2. its own sign-in for that account: once you said yes on the consent card, a
+   rule with a tidy-up shows the card "Tidy-up needs its own sign-in", which
+   says what the tidy-up may do, and its **Sign in for tidy-up** opens
+   Google's sign-in, where you pick that account. It asks for nothing but
+   `gmail.modify` and who the account is, must be the same Google account
+   (another is refused) and is kept apart from the account's main sign-in, in
+   `google_token_<account>.tidy.json`. The main sign-in never asks for it.
+
+Every "yes" then passes these first, or nothing is changed and its ACTIVITY
+row says why ("Not archived: you have written to that sender"):
+
+- no mail of that run's batch reads like instructions to Jarvis, and the batch
+  did not say yes far more often than the dry run did (either one holds the
+  whole batch);
+- the mail passed Gmail's own sender check (DMARC), is not your own, not sent
+  mail or a draft and, to archive, not starred or important (its labels are read
+  again just before the change);
+- Pause all is still off and the rule is still on, both read again at that
+  moment, and your own addresses could be read;
+- the account has `gmail_tidy`, its tidy-up sign-in and your yes on its card
+  are there, that sign-in was not signed out or in again since the check
+  began, and it is the Google account Turn on recorded;
+- the rule's filter names a sender by address or domain, the mail's own address
+  is that sender (a display name never counts), and its dry run counted at most
+  90 matches in 30 days;
+- to archive: you have never written to that sender, neither through Jarvis
+  (`recipients.json`, only read) nor from that account (one look at its Sent
+  mail); if that can't be checked, nothing is archived;
+- the rule's tidy-ups for today are not used up (`tidy_per_day`, 40).
+
+Each change is written to a journal before Gmail is called (then "done" or
+"failed"; a call that got no answer stays "not known"), so a check that stops
+midway shows "Not known: Jarvis may have
+starred one message (the check stopped midway). Look at it in Gmail." An
+archived mail whose conversation has other messages in the inbox leaves that
+conversation in the inbox for them, and its row says so. Each tidy-up's row
+has its own **Undo** for 7 days: it takes off exactly Jarvis's change, through
+the tidy-up sign-in, and only while the message's labels are still exactly as
+he left them ("Not undone: the mail's labels changed since Jarvis's change;
+nothing was changed."). The row lives with its run's receipts, so **Clear**,
+or a `keep_days` under 7, takes that Undo away too.
+
+**Caps.** At most 30 Claude runs a day for everything together
+(`max_runs_per_day`, by your local date; setup runs, at most 20 a day, and dry
+runs count too), and 6 for each agent. A rule judges at most 8 mails in one
+run and 40 a day, and tidies at most 40 a day. Rules run on Haiku (one yes or
+no and a few values per mail), agents and setups on Sonnet (`[standing]
+rule_model`, `model`). A job that reaches its cap waits until tomorrow and
+says so once. When your plan's limit is reached, every standing run waits
+until it resets (6 hours when Claude Code names no time); when Claude Code
+says you are near your limit, until that reset (2 hours when none is named),
+so the rest of your plan stays yours; and a run that would be billed to extra
+usage is stopped and pauses Ask too. Standing runs are counted apart from
+Ask's (`standing_usage.json`), and they wait while Ask is paused for extra
+usage.
+
+**Background runs.** The "Briefing agents" task runs `pythonw.exe -m
+briefing_reader --standing-run --origin task` at logon and every 5 minutes
+(setup step 6), windowless. One check runs at a time (a second ends at once),
+and it starts no job after 15 minutes. It reads Google with sign-ins it holds
+in memory only: it never saves, deletes or moves a sign-in and never signs
+in, so an account whose sign-in needs you waits for you ("The work account
+can't be read in the background: sign it in again in Jarvis."). Standing
+runs, the setup and dry runs too, do not show in LIVE: the Agents screen's
+ACTIVITY and REPORTS are their record, and the log keeps ids, kinds, counts,
+durations and statuses only. `--standing-check` prints how things stand (see
+[Command line](#command-line)).
+
+**What goes where.** When a job runs, the text of each mail its filter matched
+goes to your Claude plan without a click at that moment: only that one
+message, never its whole conversation, with its quoted history and what
+plainly is a key or a password taken out first (the same rule as a task's:
+[Keys and passwords in what he reads](#tasks-jarvis-works-it-through)), cut
+to 4,000 characters (`mail_chars`), each in a block of its own marked as
+data, with its sender, subject and date. A rule's run gets its question and
+the values to find, and never a Gmail id; an agent's run gets your own words
+for the job, your own addresses (never as a recipient) and, if you set it to,
+some days of your calendar (titles, times and places, no guests) and your
+notes. The run has no tools and no web, so a mail can't change what is read
+or make anything happen. Cards still wait for your click. The reports,
+receipts (a matched mail's sender and subject, the values found) and cards
+stay on this PC for 7 days (`keep_days`), and **Clear** deletes them. See
+also [Privacy and cost](#privacy-and-cost).
+
+#### Radar (ready-made agents)
+
+While Documents are on, the Agents screen has a **Radar** card with four
+ready-made agents: **Internships**, **Hackathons**, **Deadlines** and
+**Subscriptions**. Each button adds that agent as a draft, made on this PC
+from fixed words and filters: no Claude run, nothing counted against your
+runs, nothing leaves the PC. The card offers only the ones you have not added
+yet, steps aside while Jarvis is setting another job up, and **Hide** puts it
+away (kept in `standing_app.json`); the line **Show them** on the Agents
+screen brings it back.
+
+| Agent | Wakes | Reads (each account) | Lines up | Its sheet (columns) |
+|---|---|---|---|---|
+| Internships radar | on new mail | mail matching `internship`, `internships` | to-dos | Internships: Company, Role, Deadline, Link, Status |
+| Hackathons radar | on new mail | mail matching `hackathon`, `hackathons` | to-dos | Hackathons: Hackathon, Organizer, Deadline, Link, Status |
+| Deadlines radar | every day at 8:00 AM | mail matching `deadline`, `"due date"`; your calendar for 14 days when an account has the `calendar` feature | to-dos | Deadlines: What, Due, From, Link, Status |
+| Subscriptions radar | on new mail | mail matching `subscription`, `trial` | calendar reminders, 3 days before the date | Subscriptions: Service, Amount, Renews on, Kind, Link |
+
+Each reads the signed-in accounts that can read mail (`gmail_read`), the
+first two by name; when none is signed in yet, the ones that can read mail,
+each with its **Sign in** button on the card. Each reports only when
+something needs you and runs at most `agent_runs_per_day` times a day. None
+drafts a reply.
+
+The setup card shows its exact words first ("Does: ..."), then what it reads,
+what it may line up and where it writes, as for any draft. It is **off** until
+you turn it on: **Turn on** waits for your yes on the consent card and for its
+accounts' sign-in, then makes its sheet (or uses a sheet of the same name you
+already have, which it never writes to before then). What a run finds waits
+in the sheet for your **Keep**; a row whose first columns (its keys: Company
+and Role, What and Due, Service and Amount, or the hackathon's name) match a
+kept row's becomes changes to that row; a sheet you already had keeps its own
+keys. Subscriptions' reminders are events
+that wait on Approvals like any other. **Edit** puts its words in the bar to
+reword and set up as your own agent; **Discard** removes the draft, and the
+card offers it again. **Pause all** stops these as it stops every job.
+
+These agents read mail only. An agent's run has no tools and no web, and the
+consent card says so: a search built from what a mail says would leave the PC
+without a click and could be steered by that mail. For web research, ask
+Jarvis yourself in the bar (Ask). A web option for a ready-made agent would
+need a new consent card first, in a later version.
 
 ## TODAY and DEADLINES
 
@@ -2814,8 +3754,9 @@ reads only mail headers, never while hidden or minimized; see
 
 ### Talk to Jarvis (the talk key)
 
-Off until you turn it on (below). Tap **Ctrl+Alt+Space**, say what you want, and
-Jarvis takes it after about half a second of quiet: "what's on my calendar
+Off until you turn it on (below). Tap the **talk key**, say what you want, and
+Jarvis takes it after about half a second of quiet (the key is `[talk] key` in
+`config.toml`; Settings > Talk shows yours, on its **Talk key** row): "what's on my calendar
 today", "plan my day", "remember my exam is on the 14th". Tap the key again to
 end sooner, or press Esc to cancel (while he listens, Esc works wherever you
 are, as it does while he tidies files). What he heard goes in exactly as if you
@@ -2838,14 +3779,41 @@ as typed words do, and "stop" stops it.
   many characters). The model stays loaded for 10 minutes after a talk
   (`[talk] keep_warm_minutes`), so the next one starts at once; the first after
   a while takes a few seconds while it loads.
-- **The microphone** is the one picked in Settings > Meetings, else the Windows
-  default. When you tap, Jarvis stops talking and the briefing pauses (playing
+- **Live captions.** While you talk, the words he has heard so far show on the
+  bar's status line (in the window and on the HUD) and as Home's dim caption
+  line, the newest eight words in quotes, a little behind you. They are on screen
+  only: never on the second screen, in LIVE, in the conversation or in a log, and
+  they never go in. What goes in is still what the speech model makes of your
+  whole request once you stop, so a caption that misheard a word changes
+  nothing. They go the moment the talk ends (Esc and a cancel too), and they
+  show during a call as well. `[talk] live_captions`: `"auto"` (the default)
+  shows them only while talk's speech runs on the graphics card (Settings >
+  Talk's **Runs on** row says where), where they keep up;
+  `"on"` shows them on the processor too, where each caption can take seconds:
+  the final words then wait for the one being made, and after one caption slower
+  than a second and a half no more are shown in that talk; `"off"` never. In a
+  long request the captions follow its newest twelve seconds. Captions need the
+  speech model already loaded from an earlier talk (they never load it). The log
+  keeps only how many captions a talk had and how long each took.
+- **The microphone** is the one picked on Settings > Talk's **Microphone**
+  row, else the Windows default. It is one setting with Settings > Meetings'
+  "Microphone (You)" (when meetings are on): either row changes it, and it is
+  the microphone for talking, "Hey Jarvis" and meetings. On some PCs the Windows
+  default is a virtual microphone (one an audio app added) that gives only
+  silence: pick your real one there. A microphone "Hey Jarvis" heard nothing
+  from is marked "(silent)" in the list. When a talk gets nothing at all from
+  the microphone, the canvas
+  says "Jarvis can't hear you" with **Pick a microphone** (see
+  [The look](#the-look-the-canvas)). When you tap, Jarvis stops talking and the briefing pauses (playing
   or about to play on), so neither is heard; neither resumes by itself.
 - **Turning it on.** Install the two add-ons yourself (Jarvis never runs pip;
   Settings > Talk shows the command), click Download in Settings > Talk, add
   `JARVIS_TALK_ENABLED=true` to `.env` and restart the "Briefing hotkey" task.
-  The key (`[talk] key`), the model and the quiet that ends a talk (`[talk]
-  quiet_ms`) are in `config.toml`. It needs Ask Jarvis on.
+  The key (`[talk] key`) and the model are in `config.toml`; the quiet that
+  ends a talk (`[talk] quiet_ms`), how long the model stays loaded and live
+  captions (`[talk] live_captions`) are there too, or set with **Change** in
+  Settings > Talk (used after a restart).
+  It needs Ask Jarvis on.
 
   ```powershell
   C:/Users/<you>/AppData/Local/Programs/Python/Python313/python.exe -m pip install faster-whisper==1.2.1 PyAudioWPatch==0.2.12.9
@@ -2869,7 +3837,9 @@ your click). "Hey Jarvis" itself is taken off the front.
   click Download (about 3.7 MB from GitHub; see the licence below). It needs
   talking set up first ([Talk to Jarvis](#talk-to-jarvis-the-talk-key)): it
   uses the same add-ons, the same speech model and the same microphone (the
-  one picked in Settings > Meetings, else the Windows default). Nothing new to
+  one picked in Settings > Talk, else the Windows default, which on some
+  PCs is a virtual microphone that gives only silence: pick your real one in
+  Settings > Talk). Nothing new to
   install: its runtime, onnxruntime, comes with faster-whisper.
 - **While Jarvis runs.** It listens while his window is open, minimized or on
   your desktop, and stops when you close him, so minimize him rather than
@@ -2879,13 +3849,15 @@ your click). "Hey Jarvis" itself is taken off the front.
   breath. **Nothing is saved or sent while it waits**, and no log holds
   audio, words or device names.
 - **It pauses** while he speaks or reads the briefing (so he never wakes
-  himself), while a talk listens, while a meeting records and in focus mode,
-  and listens again a moment after. Saying "Hey Jarvis" while he speaks does
+  himself), while a talk listens, while a meeting records, in focus mode and
+  while you are on a call ([Quiet during calls](#quiet-during-calls)), and
+  listens again a moment after. Saying "Hey Jarvis" while he speaks does
   nothing: tap the talk key to interrupt him. While he is in control on your
   desktop it is ignored, as the talk key is.
-- **What shows it.** A small HEY JARVIS mark in his window's header and on the
-  desktop HUD (cyan while it listens, dim while paused, amber when it can't
-  hear you), a dot on his tray icon with the same words in its tooltip, and
+- **What shows it.** A small HEY JARVIS mark at the canvas's bottom left (in
+  the hologram look, in the header) and on the desktop HUD (cyan while it
+  listens, dim while paused, amber when it can't hear you; on the canvas
+  "Can't hear you" also brings the note with **Pick a microphone**), a dot on his tray icon with the same words in its tooltip, and
   Windows' own microphone icon in the taskbar. Settings > Talk says exactly
   what it is doing and which microphone it listens to.
 - **Sensitivity** (Settings > Talk): *Fewer false wakes*, *Balanced* (the
@@ -3556,6 +4528,66 @@ every address new again.
   while it ran, so it may or may not have been sent. Jarvis never sends it
   again by itself, and one click sends at most one message: look in that
   account's Sent mail first, then click **Retry** or **Deny**.
+
+### Mail extras: rewrite, unsubscribe and add all
+
+Three helpers around your cards. Each one only prepares or lists; nothing goes
+out before your own click on that card, as everywhere else.
+
+**Rewrite a draft in your words.** Click **Edit** on a Reply or Email card
+(while Ask is on). Under the message there is a line, "Change it in your
+words": type how to change it ("warmer, and say I'll send it Friday") and
+click **Rewrite** (or press Enter there). Jarvis asks Claude once, showing it
+only that message and your words: no thread, no notes, no search, no web. The
+answer replaces only the message in the dialog; the recipients and the subject
+never change. Read it, **Rewrite** again, or **Put back** the message as it
+was. Nothing is kept until **Save**, and Send works as before. A rewrite you
+saved is read whole in the Edit dialog before it can be sent, even when it
+fits on the card. While it runs, the words and the message are read only and
+the button reads **Stop**; closing the dialog stops it too. Jarvis holds a
+rewrite back when it adds an email address or a link that is in neither the
+message nor your words, has hidden characters, or is empty or too long; a
+question back or a failure is said in Jarvis's own words in the dialog. Each
+Rewrite counts as one Ask run.
+
+**Unsubscribe from a list.** In the ask line: "unsubscribe me from the Acme
+deals emails". Ask reads the matching mail as usual, and Claude may only name
+a message Jarvis showed it whose own List-Unsubscribe header Jarvis read; it
+never writes the link or the address. Jarvis then builds the card from that
+header himself, and only for a sender Gmail verified (its DMARC check passed):
+
+- **UNSUBSCRIBE** card (the list supports one-click unsubscribe): "One-click,
+  the list's host, the account". **Unsubscribe** shows UNSUBSCRIBED with
+  **Undo** at once; after the same short hidden hold as a Send, Jarvis tells
+  the list's own server once (one web request, never retried, no redirect
+  followed, no cookies). Undo works only until it goes. A server that does not
+  answer clearly turns the card UNKNOWN: Jarvis never tries again by itself.
+- An **Email** card to the list's own address (when the list takes email):
+  the usual Reply / Email rules, with that address as a NEW RECIPIENT to tick
+  and the note "An unsubscribe request to the list's own address".
+- An **Open** card for the list's page, when that is all it offers.
+- Information only, with the reason, when Gmail could not verify the sender
+  (mark it as spam in Gmail instead) or the message names no usable way.
+
+No new Google permission is needed: reading mail stays read only, an email
+goes out through the usual send, and the one-click request needs no Google
+sign-in at all. Read receipts are not built: Jarvis's mail stays plain text
+and asks for none.
+
+**Add all for calendar cards.** On Approvals (Ctrl+3), while at least two
+cards would each add an event or a to-do's block to your personal calendar, a
+bar over the cards reads **Add all N to calendar...**. It opens a list of
+exactly what each card adds (title, time, place, calendar) with **Cancel** and
+**Add N**; no button is focused, so Enter adds nothing. **Add N** checks the
+list again (if anything changed: "The list changed - check it again") and then
+adds the cards one at a time, each through its own Approve path, with every
+card locked meanwhile ("Adding 2 of 5..." with **Stop**). It stops at the first
+card that fails or is unknown, at Stop, at a sign-in or when Jarvis closes;
+each added card keeps its own **Undo** for 10 minutes, and one ACTIVITY row
+says how far it got ("Added 3 of 5; stopped: failed"). Replies, emails,
+invitations, moves, cancels, unsubscribes, day plan blocks and cards with an
+amber note never go in Add all: each waits for its own click. Voice, Ask, the
+canvas and the desktop HUD never start it.
 
 ## Ask Jarvis (optional)
 
@@ -4246,7 +5278,8 @@ proposals that the user decides one by one.)
 
 ```
 py -3.13 -m briefing_reader [--run {am,pm} | --catch-up | --hotkey-agent | --ask | --ask-check | --ask-text TEXT
-                             | --plan-dry-run [REQUEST] | --followups-check] [--ask-dry-run] [--slots am=HH:MM,pm=HH:MM] [--open | --now | --read]
+                             | --plan-dry-run [REQUEST] | --followups-check | --standing-run | --standing-check]
+                            [--ask-dry-run] [--slots am=HH:MM,pm=HH:MM] [--open | --now | --read]
                             [--from-file PATH] [--debug] [--version]
 ```
 
@@ -4260,6 +5293,8 @@ py -3.13 -m briefing_reader [--run {am,pm} | --catch-up | --hotkey-agent | --ask
 | `--ask-text TEXT` | Ask Jarvis once from the command line, without a window: prints what the planner said, the proposals and how Claude Code started. One request on your Claude plan (two when it reads mail or hands the request to web research). Starting the text with `web:` runs web research only (one run; nothing is read from your accounts). With `--from-file`, the briefing comes from that fixture. With the productivity bundle's memory on, the planner gets your notes as in the app, read from `memory.json` without ever changing it; `remember that ...`, `forget that ...` and `what do you remember?` are the app's (MEMORY tab): the command line says so, saves nothing and exits with code 2. Like an Ask in the app, the planner also gets the conversation the app kept in the last day (`conversation.json`, read without changing it; `web:` never gets it), and `--ask-dry-run` shows each of its entries as its size. |
 | `--plan-dry-run [REQUEST]` | The productivity bundle's [day plan](#plan-my-day) without a run: reads that day of your calendar now (read only) and prints the exact text its run would get, with event titles, to-dos, briefing lines and notes as their sizes, the free stretches and the command line (only the prompt file and the answer format differ from an Ask's), or why there would be no run ("No planner run: ..."). REQUEST as typed in the app (`"plan tomorrow"`, `"plan my afternoon, gym"`; default `plan my day`); anything else exits with code 2. With `--from-file`, the to-dos, deadlines and briefing come from that fixture. No Claude request, nothing counted. |
 | `--followups-check` | The productivity bundle's [follow-up list](#follow-ups-and-nudges) scan once, for real, on every account with `"gmail_read"`: headers only (read only, the last 14 days, never the text). Prints counts per account only ("work: listed 42, read 42 header set(s); 3 waiting on you, 1 owed to you; skipped: automated 30, ...") - never a subject, a name, an address or an id. No Claude request; nothing saved. |
+| `--standing-run` | One check of the [standing agents and rules](#standing-agents-and-rules), without a window: what the "Briefing agents" task runs every 5 minutes (Jarvis also starts one for **Run now**, and every 5 minutes while he is open and no scheduled check came for 15 minutes). It does nothing while `[standing]` or Ask is off, before your yes on their consent card or under Pause all; one check runs at a time (a second ends at once), and it starts no job after 15 minutes. Google is read with sign-ins held in memory only: nothing is saved, deleted or moved, and it never signs in. |
+| `--standing-check` | Print what is set up and how the checks went: on or off, the consent and Pause all, the jobs (their ids, kinds, triggers, next run and runs today), the last check and who started it, a hold and until when, today's runs out of `[standing] max_runs_per_day`, and an account the check could not read. Counts, times and statuses only; no Claude request, nothing read from Google. |
 | `--ask-dry-run` | With `--ask-text`: print the exact text Jarvis would send to Claude Code (email text and memory notes as character counts) and the command line, and stop. With `web:`: the exact text the web research would get and its command line. No Claude request, nothing counted. |
 | `--slots am=10:12,pm=23:42` | The scheduled times (24-hour), which tell the app which briefing an answer belongs to. The tasks pass them; without it (or for a run it leaves out) `[schedule]` in `config.toml` applies. A value that cannot be read is logged and ignored. |
 | `--open` | Open Jarvis: the assistant screen in front, on its JARVIS tab, with a greeting (and "Your AM briefing is ready to view." when one is waiting); the briefing waits in its BRIEFING tab and nothing is read until you press Play. The same as starting without options. A running app comes forward. What the Start menu shortcut and the hotkey use. |
@@ -4270,7 +5305,10 @@ py -3.13 -m briefing_reader [--run {am,pm} | --catch-up | --hotkey-agent | --ask
 | `--version` | Print the name and version (such as `Jarvis Assistant 1.2.0`) and exit. |
 
 `--open`, `--now` and `--read` exclude each other, and none of them goes with
-`--catch-up`, `--hotkey-agent`, `--ask-check`, `--ask-text`, `--plan-dry-run` or `--followups-check`. Without `--run`,
+`--catch-up`, `--hotkey-agent`, `--ask-check`, `--ask-text`, `--plan-dry-run`, `--followups-check`, `--standing-run` or
+`--standing-check`. `--standing-show` (a check found something for you while
+Jarvis was closed: he opens without taking the focus and tells it) and
+`--origin` (who started a check) are only for Jarvis's own use. Without `--run`,
 the app fetches the page once (retrying if Notion cannot be reached) and does
 not wait for a fresh one; a briefing that is not from today still gets the
 spoken stale note when it is read.
@@ -4299,9 +5337,12 @@ research](#web-research) and the productivity bundle ([Memory](#memory-the-memor
 on or off for this PC, whatever `[ask] enabled`, `[research] enabled` and
 `[productivity] enabled` say; `JARVIS_DESKTOP_ENABLED` does the same for
 [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud) (`[desktop] enabled`),
-which then still waits for your **Turn on** on its first-run card, and
+which then still waits for your **Turn on** on its first-run card,
 `JARVIS_AGENT_ENABLED` for [tasks](#tasks-jarvis-works-it-through) (`[agent]
-enabled`). Variables already set in the environment win over `.env`.
+enabled`), and `JARVIS_STANDING_ENABLED` for
+[standing agents and rules](#standing-agents-and-rules) (`[standing]
+enabled`), which then still wait for your yes on their consent card.
+Variables already set in the environment win over `.env`.
 
 **`google_client_secret.json`** (next to this README, optional): the Google OAuth
 client for calendar actions (setup step 8).
@@ -4311,11 +5352,35 @@ optional. A bad value never stops the app: an invalid value is replaced by the
 default, a number outside its range is clamped, and a warning is written to the
 log. Changes apply the next time the app starts.
 
+**`settings.json`** (in the data folder, `%LOCALAPPDATA%\briefing-reader`):
+what you changed with **Change** in [Settings](#using-it), as
+`{"version": 1, "values": {"voice.rate": "+10%"}}`. Its values win over
+`config.toml` for these keys only: `[voice] rate`, `volume`,
+`keep_warm_minutes` and `quiet_in_calls`; `[assistant] speak`, `greet`, `greeting_context`,
+`speak_replies`, `speak_results` and `scheduled_prompt`; `[display] clock`;
+`[ui] motion`; `[live] auto_open`; `[productivity] quiet_from`, `quiet_until`
+and `prep_lead_minutes`; `[instant] temperature`; `[talk] quiet_ms`,
+`keep_warm_minutes` and `live_captions`. They are merged into `config.toml`'s values before they
+are checked, so every value keeps the limits in the table below; a value that
+does not fit, or any other key in the file, is left out with a warning that
+names only the key, and `config.toml`'s value (or the default) is used. No
+`enabled` can be set there, so `.env`'s `JARVIS_*_ENABLED` still decide. Every
+Jarvis process (the app, the hotkey agent, a standing run) reads the same file
+when it starts. The log says "Settings: N value(s) changed here" at the start
+and "Settings: <table.key> changed here" or "... back to config.toml" for each
+change, never a value. A file Jarvis cannot use as a whole (not readable, too
+big, damaged or written by another version) counts as empty, and before the
+first **Save** replaces it, it is kept as `settings.json.bak` (if that copy
+cannot be made, nothing is saved). A file edited or deleted while Jarvis runs
+is read again before each change and when Settings shows its rows. Delete the
+file to go back to `config.toml` for all of them.
+
 | Key | Default | Meaning |
 |---|---|---|
 | `[voice] engine` | `"local"` | Where his voice is made: `"local"` = on this PC (Kokoro-82M; nothing he says leaves the PC, so lines that may be private are said too; the Windows voice speaks until it is downloaded or when it can't run - never the online one), `"online"` = Microsoft's online voice (edge-tts), with private lines kept on screen. See [Jarvis's voice, made on this PC](#jarviss-voice-made-on-this-pc). |
 | `[voice] local_voice` | `"bm_george"` | The local voice: `bm_george`, `bm_fable`, `bm_lewis`, `bm_daniel` (British men), `bf_emma`, `bf_isabella`, `bf_alice`, `bf_lily` (British women), or an American one (`am_adam`, `am_echo`, `am_eric`, `am_fenrir`, `am_liam`, `am_michael`, `am_onyx`, `am_puck`, `am_santa`, `af_alloy`, `af_aoede`, `af_bella`, `af_heart`, `af_jessica`, `af_kore`, `af_nicole`, `af_nova`, `af_river`, `af_sarah`, `af_sky`). All 28 come in the one download. |
 | `[voice] keep_warm_minutes` | `0` | Minutes the local voice stays loaded after he last spoke (0 to 1440). `0` keeps it loaded while Jarvis runs, so he never waits for it; it takes about 1.3 GB of memory and about 5 seconds to load again. |
+| `[voice] quiet_in_calls` | `true` | While another app uses the microphone (a call), his voice is captions only, the soft sounds and timer end sounds keep quiet, "Hey Jarvis" pauses and a scheduled briefing waits for the call's end (see [Quiet during calls](#quiet-during-calls)). Not in the shipped `config.toml` (the code default holds); Settings > Voice's Change sets it too. `false` reads nothing. |
 | `[voice] voice` | `"en-GB-RyanNeural"` | Online edge-tts voice (`engine = "online"`). List them with `py -3.13 -m edge_tts --list-voices`. |
 | `[voice] rate` | `"+0%"` | Speed, a signed percentage from `"-50%"` to `"+100%"`, e.g. `"+15%"` faster, `"-10%"` slower. |
 | `[voice] volume` | `"+0%"` | Loudness, `"-100%"` to `"+100%"`, e.g. `"-20%"` quieter. |
@@ -4340,7 +5405,7 @@ log. Changes apply the next time the app starts.
 | `[actions] trusted_domains` | `[]` | Email recipient domains that do not get the red NEW RECIPIENT badge, such as `["example.edu"]` (its subdomains count too; a leading `@` is dropped). An Ask recipient you did not type yourself is the exception: it is new even in these domains. Any other address must be one Jarvis sent to before, or ticked on its card before Send; the sending account's own address is never sent to (see [Replies and emails](#replies-and-emails)). |
 | `[accounts.<name>]` | `personal` and `work` | The Google accounts Jarvis may act for, one table each; the name is what the briefing writes as `acct=` (lowercase letters, digits, `-`, `_`). Without any `[accounts]` table only `personal` exists. Which Google account a name is never goes here: you pick it in Google's sign-in, and its first sign-in binds the name to it in `accounts.json` (setup step 8). Calendar proposals, to-do blocks and TODAY always use `personal`. |
 | `[accounts.<name>] backend` | `"google"` | Who carries out the account's actions. Only `"google"` (your own OAuth client) works in this version; `"composio"` is accepted but its cards say "Composio is not built into this version". |
-| `[accounts.<name>] features` | `["calendar"]` (the shipped `config.toml`: `["calendar", "gmail_send", "gmail_read"]`) | What Jarvis may do for the account: `"calendar"` answers invitations and moves or cancels events; `"gmail_send"` sends the replies and emails you approve (send only; setup step 8b); `"gmail_read"` lets Ask Jarvis read the threads a request is about, and a [meeting brief](#meeting-prep) your latest thread with each guest of the last 14 days (read only, never used to send; step 8c). Adding a feature means one new Google sign-in for that account. `[]` makes the account's cards hand-off only (Open, Copy, Done, Deny). |
+| `[accounts.<name>] features` | `["calendar"]` (the shipped `config.toml`: `["calendar", "gmail_send", "gmail_read"]`) | What Jarvis may do for the account: `"calendar"` answers invitations and moves or cancels events; `"gmail_send"` sends the replies and emails you approve (send only; setup step 8b); `"gmail_read"` lets Ask Jarvis read the threads a request is about, and a [meeting brief](#meeting-prep) your latest thread with each guest of the last 14 days (read only, never used to send; step 8c), and is what a [standing agent or rule](#standing-agents-and-rules) reads mail with; `"gmail_tidy"` lets a standing rule star, label or archive the one mail it matched, without a click and with an Undo, through a sign-in of its own (step 8d; no account has it in the shipped file). Adding a feature means one new Google sign-in for that account (`"gmail_tidy"`: its own sign-in, from the Agents screen). `[]` makes the account's cards hand-off only (Open, Copy, Done, Deny). |
 | `[schedule] am` | `"10:12"` | Time of the AM task (24-hour `HH:MM`); the default is only an example, set it a few minutes after your own briefing task runs. `install-schedule.ps1` uses it unless you pass `-AmTime`; the app uses it to tell which briefing an answer belongs to when it was started without `--slots`. Rerun the script after a change. |
 | `[schedule] pm` | `"23:42"` | Time of the PM task, the same way (`-PmTime`). |
 | `[hotkey] enabled` | `true` | The global hotkey that opens Jarvis. `false`: `install-schedule.ps1` does not install the hotkey task (and removes an existing one); an agent that is started anyway exits at once. |
@@ -4378,7 +5443,7 @@ log. Changes apply the next time the app starts.
 | `[assistant] speak_results` | `true` | Speak what happened after an approved card was carried out ("Done, sir - ..."). |
 | `[assistant] scheduled_prompt` | `false` | `true`: the scheduled runs and the catch-up show the classic "Hear it now?" prompt (with Later and Read now) instead of announcing the briefing. |
 | `[display] clock` | `"12h"` | How the header clock, TODAY, ACTIVITY and the Intro line of the SECTIONS list show times: `"12h"` (1:05 PM) or `"24h"` (13:05). Times inside sentences ("Updated today at 10:04 AM", "asking again at 1:15 PM", "until 1:20 PM" on the prompt, in the tray and on the reading screen), the proposal cards, the DEADLINES due labels and the spoken briefing always use 12-hour times. |
-| `[ui] motion` | `"lively"` | How much the screen moves: `"lively"` (a scan line sweeps the stage and the new screen's panels assemble when you change screens; the orb's rings assemble and the J.A.R.V.I.S. name types in when Jarvis first opens or comes back after more than 30 minutes hidden), `"calm"` (slower, gentle fades only) or `"off"` (no entrance or transition effects). "Show animations in Windows" turned off counts as `"off"`. Nothing waits for these effects: clicks and typing work at once. The Settings screen shows it. |
+| `[ui] motion` | `"lively"` | How much the screen moves: `"lively"` (a scan line sweeps the stage and the new screen's panels assemble when you change screens; the orb assembles and the J.A.R.V.I.S. name types in when Jarvis first opens or comes back after more than 30 minutes hidden; the board's frames draw in as outlines, then fill), `"calm"` (slower, gentle fades only) or `"off"` (no entrance or transition effects: the board's frames are there at once and the orb holds one still pose per look). "Show animations in Windows" turned off counts as `"off"`. Nothing waits for these effects: clicks and typing work at once. The Settings screen shows it. |
 | `[live] enabled` | `true` | The LIVE tab ([LIVE: watch Jarvis work](#live-watch-jarvis-work)): every step Jarvis takes for an Ask or a card you approved, on screen only. `false`: no LIVE tab, nothing recorded. |
 | `[live] auto_open` | `"tab"` | When Jarvis starts on an Ask or an approved card: `"tab"` brings up the LIVE tab (not for a request typed on Home, not for a card approved on Approvals, not while the briefing plays, not when the window is hidden or minimized), `"window"` shows the LIVE pop-out window without taking the focus, `"off"` never switches. `true` / `false` mean `"tab"` / `"off"`. |
 | `[live] background` | `true` | Also show the reads Jarvis does on his own (agenda, event checks, sign-ins, Claude Code checks) in one compact LIVE row. The productivity bundle's own reads and offers have a row of their own that is always shown. |
@@ -4423,7 +5488,11 @@ log. Changes apply the next time the app starts.
 | `[agent] model`, `effort` | `"opus"`, `""` | The tasks' model and effort (`"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`; `""` = Claude Code's default). Quick replies stay on `[ask] model`. |
 | `[agent] max_turns`, `max_minutes` | `60`, `20` | A task's budget (5-1000 turns, 1-240 minutes of work); reaching one asks "Keep going?". |
 | `[agent] tasks_per_day` | `20` | How many tasks may start in 24 hours (1-200). |
+| `[agent] drive` | `true` | [Filling in pages](#filling-in-pages): a task may type into public pages in its own window, each submit on a Send card for your click; only once your **Turn on** covers it. `false`: a task never types into a page. |
+| `[agent] max_pages`, `max_actions`, `max_sends` | `40`, `150`, `5` | A task's pages opened (5-400), page actions (10-1000) and Send cards (1-50); reaching one asks "Keep going?". |
 | `[agent] search_engine` | `"duckduckgo"` | Where his searches go first: `"duckduckgo"`, `"bing"` or `"google"`, then the others if a page gives nothing or shows a wall. The words of each search go there, and the Turn on card names it. |
+| `[docs] enabled` | `true` | [Documents and datasheets](#documents-and-datasheets): the Dock's Documents (Ctrl+0). `false`: none of it shows (what is kept in the data folder stays). The repository's `config.toml` has no `[docs]` table: these defaults hold until you add one. |
+| `[docs] export_folder` | `""` | Where an export's picker starts: `""` = `Jarvis\Exports` in your user folder, else a full folder path. A folder OneDrive syncs is asked about before a file is saved there. |
 | `[agent] workspace` | `""` | The tasks' folder: `""` = `Jarvis\Workspace` in your user folder, else a full folder path. Never under OneDrive: a task refuses to start there. |
 | `[agent] private` | `["calendar", "contacts", "memory", "mail", "files"]` | What a task may read of your things, when it needs them and only while it is connected. A shorter list narrows it (`"memory"` covers your notes and what you said before the task); an entry that is none of these grants nothing, and so does something that is not a list. |
 | `[agent] speak_private` | `false` | With `[voice] engine = "online"`: `true` also says aloud a task's line that may hold something private; such lines go to Microsoft's online voice. Off, they stay on screen. The voice made on this PC says them anyway. |
@@ -4434,6 +5503,7 @@ log. Changes apply the next time the app starts.
 | `[meetings] device` | `"auto"` | Where a meeting is written down: `"auto"` (an NVIDIA card when it works, else the processor) or `"cpu"`. |
 | `[talk] keep_warm_minutes` | `10` | How long the speech model stays loaded after a talk, so the next starts at once (1..120). |
 | `[talk] quiet_ms` | `500` | How much quiet after you speak ends a talk, in milliseconds (300..2000). |
+| `[talk] live_captions` | `"auto"` | [Live captions](#talk-to-jarvis-the-talk-key) while you talk, on screen only: `"auto"` while talk's speech runs on the graphics card, `"on"` on the processor too (there a caption can take seconds and the final words wait for the one being made; after one slower than 1.5 s none more that talk), `"off"`. Not in the shipped `config.toml` (the code default holds); Settings > Talk's Change sets it too. |
 | `[talk] hints` | `[]` | Names Jarvis should expect to hear, e.g. `["Spotify", "Notion"]` ("Jarvis" always is); at most 20 short names. |
 | `[instant] enabled` | `true` | [Instant answers](#instant-answers): the time, dates, sums, conversions, timers and reminders on this PC, your calendar, the weather and currencies from free services. `JARVIS_INSTANT_ENABLED` in `.env` overrides it both ways. Needs Ask Jarvis. |
 | `[instant] weather` | `true` | Weather answers: only a town's name (then its coordinates) goes to Open-Meteo. |
@@ -4441,10 +5511,39 @@ log. Changes apply the next time the app starts.
 | `[instant] town` | `""` | The weather's town when a request names none, e.g. `"Oslo"` or `"Springfield, Illinois"`; `""` = none (the question goes to Claude). A town you set by saying "my town is ..." wins over it. Never logged. |
 | `[instant] calendar` | `true` | Calendar answers ("what's my next meeting", "am I free at 3") from every account's main calendar, read when you ask; titles are shown, and said only by the voice made on this PC (never a place). Needs `[calendar]` on and set up. |
 | `[instant] temperature` | `"auto"` | `"auto"` follows the Windows region (US units: Fahrenheit), else `"celsius"` or `"fahrenheit"`. |
+| `[standing] enabled` | `false` | [Standing agents and rules](#standing-agents-and-rules): jobs set up from the chat that run on their own and only propose (a rule's tidy-up aside). The shipped `config.toml` has the `[standing]` table commented out, so these defaults apply; to change a key, uncomment the table's header and that line. Turn it on for this PC with `JARVIS_STANDING_ENABLED=true` in `.env` (it overrides this key both ways), then rerun `install-schedule.ps1`. Needs `[ask] enabled = true`; nothing runs until your yes on the Agents screen's consent card. |
+| `[standing] model` | `"sonnet"` | The model of an agent's runs and of a setup run; `"haiku"` uses less of your plan. A name that starts with `-` or has spaces is refused. |
+| `[standing] rule_model` | `"haiku"` | The model of a rule's checks and its dry run (one yes or no and a few values per mail). |
+| `[standing] max_runs_per_day` | `30` | Claude runs a day for every agent and rule together, setup runs and dry runs included, by your local date (1-200). A job that finds it used up waits until tomorrow. |
+| `[standing] agent_runs_per_day` | `6` | The runs a day a new agent gets as its own cap (1-48). |
+| `[standing] rule_batch` | `8` | Mails a rule judges in one run, and the newest matches its dry run reads (1-8). |
+| `[standing] rule_checks_per_day` | `40` | The mails a day a new rule may judge (1-200). |
+| `[standing] tidy_per_day` | `40` | Tidy-ups each rule may make a day (0-200; `0`: none). |
+| `[standing] poll_minutes` | `5` | How often each mail job's filter is checked for new mail, headers only (5-60 minutes; the scheduled check comes every 5). |
+| `[standing] min_every_minutes` | `30` | The shortest interval an agent may run at (30-1440 minutes). |
+| `[standing] max_mail_per_run` | `20` | Mails one agent run reads (1-50). |
+| `[standing] mail_chars` | `4000` | Each matched mail's text is cut to this many characters before a run gets it (500-12000). |
+| `[standing] keep_days` | `7` | Reports, receipts and waiting cards are kept this many days on this PC (1-30); a tidy-up's Undo lasts while its receipt does, 7 days at most. |
+| `[standing] catch_up_hours` | `3` | A timed run missed by up to this many hours (the PC was off or asleep) runs once at the next check; an older one is noted as missed (0-12). |
+| `[standing] quiet_from`, `quiet_until` | `"22:00"`, `"08:00"` | Quiet hours: the spoken line waits, and a check never opens a closed Jarvis (what it found is told after them). The same time twice: never quiet. |
+| `[standing] open_when_closed` | `true` | `false`: a check never opens a closed Jarvis; what it found waits for your next open. |
+| `[standing] timeout_seconds` | `120` | One standing run may take this long (30-600); then it is stopped. |
+| `[look] sounds` | `"soft"` | The [soft sounds](#soft-sounds): `"soft"` or `"off"` (`true` / `false` mean `"soft"` / `"off"`). `"off"` here wins: Settings > Look then says they are off in config.toml and has no button for them. With `"soft"`, Settings > Look can turn them off on this PC. The "Hey Jarvis" chime keeps its own rules either way. |
+| `[look] board` | `true` | Home as the [canvas](#the-look-the-canvas), with its [frames](#frames-on-the-canvas) (Settings > Look calls it "Home as the canvas"). `false`: Home is the hologram look as it was before the board (no frames, no Board button, no hint line, no desk), the web view is never made, and the second screen shows only its counts. |
+| `[look] second_screen` | `false` | [Jarvis on your second screen](#jarvis-on-your-second-screen), by default. Once you use its switch in Settings > Look, your choice there wins over this key on this PC (it is kept in `assistant.json`). |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
 default 200 words per minute, and a volume above `+0%` cannot get louder than
 full volume.
+
+**Settings > Look** shows the sounds and the board as they are, and has the two
+things it changes on this PC: the soft sounds (**Turn sounds off** / **Turn
+sounds on**) and "Show Jarvis on my second screen" (a switch, greyed with
+"Needs a second monitor" while Windows sees one monitor; it follows monitors
+plugged in or out while Settings is open). Both take effect at once and are
+kept in `assistant.json`. `[look]` in `config.toml` sets the defaults:
+`sounds = "off"` there wins over the button, and the second screen's switch,
+once used, wins over `[look] second_screen`.
 
 ## How the page is read
 
@@ -4590,6 +5689,22 @@ says what is missing: an add-on (with the line to install it) or the
 download. The log says `The local voice can't run yet (addon_missing)` (or
 `model_missing`), or `The local voice failed (...); the Windows voice
 speaks, and the local voice is tried again in 60 s`.
+
+**His first words, in his own voice.** At a start his voice loads in the
+background (a few seconds, longer on a cold start). His own line waits for
+it up to 25 seconds while it loads or while it makes the briefing's audio,
+shown as a caption meanwhile; behind another of his own lines it waits up to
+10 seconds. A line never waits past its own time to be said less 4 seconds
+(an acknowledgement 8 s, so 4 s), so the Windows voice still says it in time.
+The briefing's audio is made only after his start-up line was said (or shown
+as text only, or you press Play, or 30 seconds went by); the reading screen
+shows the briefing meanwhile. A voice that fails to load, or whose start
+ends before it is ready, hands that line to the Windows voice at once; the
+next line tries his voice again. The log
+says `Voice: line audio after N ms (local; waited N ms, loading)` for each
+of his lines (`windows` when the Windows voice said it), and `The local
+voice could not say one segment (busy: loading); the Windows voice says it`
+when a line waited the whole time.
 
 ## Offline fallback
 
@@ -4741,6 +5856,47 @@ unreadable, draft_waiting), "Nudge: a denied draft was replaced" and "Nudge: a
 draft held back (note)". Never a subject, a name, an address, a thread id, a
 hash, a draft or your words.
 
+[Standing agents and rules](#standing-agents-and-rules) log one line per check
+and per run, with ids, kinds, counts, durations and statuses only: "Standing:
+check (task) done: 3 job(s) live, 1 run(s), 1 told", "Standing: rule
+r-0123456789ab checked 3 mail(s): 1 yes, 1 card(s)", "Standing: a rule run ok
+in 4.1 s (1 turn(s), 2210 in / 140 out tokens, exit 0)", "Standing: the line
+for 1 run(s) waits (quiet hours)", "Standing: no scheduled check lately; Jarvis
+started one". Never a job's name, your sentence, a filter, a report, a
+subject, a sender, an address or a label. The background check writes to the
+same log file, one line at a time, so the app can still rotate it.
+
+The [board](#frames-on-the-canvas) logs only kinds, counts, frame ids (the
+app's own numbers, such as `f3`), durations and reason words: "Board: made and
+starting", "Board: page ready in 420 ms", "Board: ready 640 ms after it
+started", "Board: an answer put up 5 frame(s) in 3 ms", "Board: 1 frame(s)
+changed", "Board: frame f3 open big" and "... back on the board", "Board:
+cleared (1 frame(s) kept)", "Board: a pin was refused (6 pinned at most)",
+"Board: a parked answer landed", "Board: a message was refused (size)", "Board:
+a request of the page was dropped (layout, rate)", "Board: the page's renderer
+stopped (crashed); loading the board again (1 of 2)" (a third stop shows the
+read-only tiles), "Board: it can't start on
+this PC (no_engine)" (no_engine, no_scheme, no_ready, load_failed, crashed,
+sandbox, ...), "Board: read-only tiles in its place (no_engine)" and, only when
+something was blocked, "Board: closed (requests blocked: file 1)"; the page's
+own console messages are counted, never kept. Never a frame's words, a turn's
+words or an address. Ask's frames add "Ask: 2 frame(s) to show (table, chart),
+1 dropped (depth 1), topic given" (web research: "Research: ..."). [The second
+screen](#jarvis-on-your-second-screen) logs "Second screen: 2 screen(s)",
+"Second screen: turned on", "Second screen: shown (full, 1920x1080)", "Second
+screen: hidden (locked)" (off, one_screen, locked, display_off,
+battery_saver, full_screen), "Second screen: folded to its strip (watch)",
+"Second screen: back in full" and, if Windows refuses to leave it out of
+screenshots, "Second screen: Windows did not leave it out of capture (...); it
+shows anyway"; never a frame's words, an event's title, a sender or an
+address. The [soft sounds](#soft-sounds) log "Sounds: 13 ready, 0 built in
+0.00 s" at a normal start (13 files: the nine moments, the frame's sound in four
+steps; "13 ready, 13 built in" about half a second the first time, nothing while they are
+off) and,
+with `--debug`, each sound left unplayed with its event and one word ("Sounds:
+settled held (speaking)": muted, quiet hours, speaking, hidden, ...);
+Settings > Look logs "Look: sounds turned off on this PC".
+
 Other files in `%LOCALAPPDATA%\briefing-reader`:
 
 | File | What it is |
@@ -4755,7 +5911,9 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `ask\` | The empty folder Claude Code runs in for Ask. Ask refuses to run while anything is in it (a `CLAUDE.md` or `.mcp.json` there would add instructions or tools). |
 | `research\` | The empty folder Claude Code runs in for web research; research refuses to run while anything is in it. |
 | `runstate.json` | Per scheduled briefing: when it was first shown, when it was announced (`announced_at`) and first viewed (`viewed_at`), when and how a classic prompt was answered (read, dismissed, done), and (the productivity bundle) when the plan offer was posted for it (`plan_offered_at`) and when its day was planned (`planned_at`; an evening "plan tomorrow" marks tomorrow's AM slot), kept for 14 days. The catch-up task uses it, and it keeps a briefing from being announced twice; see [Catch-up and the hotkey](#catch-up-and-the-hotkey). Safe to delete (a briefing may then be announced once more). |
-| `assistant.json` | Whether Jarvis's voice is muted, the ids of the last 5 greetings (so the next one differs), whether the briefings an older version read through its prompt were taken as viewed (done once, at the first start after the update, so they are not announced again), and, once you used it, where the LIVE pop-out window was and whether it was open, and `prod_hint_shown` once the "minimize instead of Done" hint was shown, and `followups_off` while the follow-up list is turned off on this PC, and `desktop_turned_on` (with `desktop_consent_version`, the card's version) once you turned [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud) on. Never any text. Safe to delete. |
+| `settings.json` | The settings you changed with Change in Settings (`{"version": 1, "values": {...}}`, the keys listed under [Configuration](#configuration)); they win over `config.toml` from the next start. Never a secret, an address or a path. Safe to delete (`config.toml`'s values hold again). A file Jarvis could not use is kept as `settings.json.bak` before a Save replaces it; safe to delete too. |
+| `assistant.json` | Whether Jarvis's voice is muted, the ids of the last 5 greetings (so the next one differs), whether the briefings an older version read through its prompt were taken as viewed (done once, at the first start after the update, so they are not announced again), and, once you used it, where the LIVE pop-out window was and whether it was open, and `prod_hint_shown` once the "minimize instead of Done" hint was shown, and `followups_off` while the follow-up list is turned off on this PC, and `desktop_turned_on` (with `desktop_consent_version`, the card's version) once you turned [Jarvis on your desktop](#jarvis-on-your-desktop-the-hud) on, and `look`: whether you turned the soft sounds off or the second screen on or off in Settings > Look, and how many times the empty board's hint line was shown. Never any text. Safe to delete. |
+| `sounds\` | The [soft sounds](#soft-sounds), `sound_<name>_v<n>.wav` (13 short tones: the nine moments, the frame's sound in four steps), made by Jarvis the first time the sounds are on and written once (again only when a file is missing or their recipe changes; nothing while the sounds are off). Nothing is ever recorded. Safe to delete: they are made again. The board itself writes nothing to disk: its frames last for the session only. |
 | `desktop\` | Jarvis on your desktop's own records, on this PC only: `journal\<run id>.jsonl`, for each NEEDS YOUR OK card you clicked, every file it moved, copied, renamed, zipped or put in the Recycle Bin with its old and new path (Undo needs them; never logged, never sent to Claude; kept 30 days); `timers.json`, your running timers and reminders and their labels (so a restart keeps them); `focus.json` while focus mode runs. Safe to delete (Undo of those changes goes with it). |
 | `instant.json` | The weather town you set by saying or typing "my town is ..." ([Instant answers](#instant-answers)): the place Jarvis found, as shown, and its coordinates. Never logged. "Forget my town" clears it; safe to delete. |
 | `wake.json`, `wake_chime.wav` | ["Hey Jarvis"](#hey-jarvis-the-wake-word): whether you turned it on, its sensitivity and today's two counts (wakes, and wakes that heard nothing) - no audio, words or device names; and the chime, a tone Jarvis makes himself. Deleting `wake.json` turns "Hey Jarvis" off. The wake model's files are in `models\openwakeword-hey-jarvis-v0.1\`. |
@@ -4763,6 +5921,17 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `prep_series.json` | The productivity bundle's repeating meetings whose prep offers ended unclicked: per series a 32-character hash (of the account name, the calendar and Google's series id, never in clear), how many times in a row (3 stops its offers) and the day of the last change; entries untouched for 60 days are dropped. No title, id or address. Safe to delete (the offers come back). |
 | `conversation.json` | The last 24 hours of the conversation (at most 100 entries: your requests, Jarvis's answers and results as the Transcript showed them, each with its time; never your memory lines), shown again at a start and given to Ask as `<conversation>` (a web research's question and answer are marked and never given; see [Ask remembers the conversation](#ask-remembers-the-conversation)). Written by the app a moment after the conversation changes and when it closes; older entries leave it at the start and within the hour after they turn a day old. **Clear conversation** in the Transcript deletes it; you can delete it yourself while Jarvis is closed. A broken file is ignored and replaced. Never logged. |
 | `memory.json` | The productivity bundle's memory ([Memory](#memory-the-memory-tab)): **the only file with your own text** - your notes, typed or suggestions you kept, each with an id, TOLD or SUGGESTED and when it was made or changed; and, for suggestions you dismissed, a short hash of each word (not the sentence; a common word or a name could be guessed from its hash). Written only by the app (the command line reads it without changing it). Delete it (also while Jarvis runs: the next Ask, MEMORY and any change take the file as it is), or delete the notes in MEMORY, to forget everything. If it can't be read, Jarvis never overwrites it (MEMORY says so). |
+| `standing.json` | The [standing agents and rules](#standing-agents-and-rules) as you set them up: each one's name, your own words or sentence, its filters, when it runs, what it may line up, its tidy-up (and its label's id and name), its status and cap, its dry run's counts and the Google account ids Turn on recorded. Written only by the app, on your clicks. A damaged file, or one a newer version wrote, is kept read only: nothing runs and nothing is saved over it (the Agents screen says so). Delete it to remove every agent and rule. |
+| `captures.json`, `captures\<id>\source.<ext>` | [Capture](#capture-pictures-pdfs-text-and-calendar-files): each capture's label, counts and cards (titles, times, places, where it came from) and the kept copy of what you dropped in. Written only by the app. A capture goes 30 days after it was made, or 7 days after its last card was decided; **Clear capture** removes one at once. A damaged file, or one a newer version wrote, is kept read only. |
+| `standing_app.json` | The app's side of them: your yes on their consent card (and on each account's tidy-up card), Pause all, the cards you withdrew, the receipts you undid, when you last cleared, which runs were told and whether the Radar card is hidden. Ids, times and that switch only. |
+| `standing_state.json` | The background check's own state: per job its last run and its last time slot, per job and account the Gmail ids it saw and how far it has read, what it proposed (stable keys, so nothing is proposed twice), a hold after a plan limit, the last check (and the last one the scheduled task started), the runs not told yet and an account it could not read. Written only by the check; no subject, sender or text. |
+| `standing_runs\` | One file per run (`<date>-<time>-<id>.json`), written once: an agent's report, the run's cards (with a draft and its recipients) and its receipts (each matched mail's sender, subject and Gmail ids, the values a rule found, each tidy-up with the labels before and after). Private: they hold what was written from your mail. Kept `[standing] keep_days` (7) days, then deleted by the check; **Clear** on the Agents screen deletes them at once (a run with a card still waiting keeps its file until you decide that card). |
+| `standing_requests\` | A **Run now** request (`<job id>.json`), taken and deleted by the next check. |
+| `standing_usage.json` | Claude runs, rule checks and tidy-ups by local date and job id, for the caps (the last 8 days; counts only), shared by the app's setup and dry runs and the background check (`standing_usage.json.lock` next to it only takes turns between processes). |
+| `standing_tidy.jsonl` | The check's tidy-up journal: one line per step ("doing" written before Gmail is called, then "done" with the labels after, or "failed"), with the rule's id, the account name and Gmail's message, thread and label ids only. An entry left at "doing" shows on the Agents screen as "Not known". |
+| `standing_tidy_undo.jsonl` | The same journal for the app's **Undo** of a tidy-up. |
+| `google_token_<account>.tidy.json` | An account's tidy-up sign-in (`"gmail_tidy"`, setup step 8d): `gmail.modify` and who the account is, nothing else. Private: never share it. Delete it to sign the tidy-up out on this PC (the rule then makes cards only). |
+| `standing-run\`, `standing-app\` | The empty folders Claude Code runs in for the background check and for the app's setup and dry runs; a run refuses to start while anything is in them. |
 
 Generated audio goes to `%TEMP%\briefing-reader\session-<process id>` (Jarvis's own
 sentences to its `say` folder) and is deleted when the app closes. If a section is still being generated at that
@@ -4779,6 +5948,14 @@ what you said. What he heard then goes where typed words go.
 PC for those words only: the audio stays in memory, nothing is saved or sent
 while it waits, and its one download (the wake model from GitHub) happens only
 when you click.
+[Quiet during calls](#quiet-during-calls) reads, every 3 seconds and read only,
+Windows' own record of which apps are using the microphone (in your user part
+of the registry), and asks Windows how long the PC has been on (to leave out
+entries older than its last start); nothing in Windows is changed. Only a yes
+or no is kept, never an app's name; the log holds only status words, counts
+and minutes (a call starting and how long it lasted, how many entries could
+not be read, a briefing waiting for the call, watching off), never an app.
+`[voice] quiet_in_calls = false` stops the reading (after a restart).
 
 [Instant answers](#instant-answers) about the time, dates, sums, conversions,
 timers and reminders never leave this PC. A weather question sends only the
@@ -4840,7 +6017,14 @@ The app talks to these services, all free:
   on and `"gmail_read"` (step 8c), Jarvis also searches and reads the threads one
   request is about (at most 3), read only, and only when you ask something; for
   a meeting brief, after your request, one search per guest of that meeting (the
-  last 14 days, the meeting's account) and at most 3 threads read. Each
+  last 14 days, the meeting's account) and at most 3 threads read. With
+  [standing agents and rules](#standing-agents-and-rules) on, Jarvis also
+  looks for new mail that matches each job's filter every 5 minutes (Gmail's
+  ids and named headers, never a snippet or a body), reads the one message a
+  filter matched when its job runs, and reads a standing reply's conversation
+  again at your click on Send; with `"gmail_tidy"` (step 8d), a rule's
+  tidy-up reads that one message's label ids and stars it, adds its one label
+  or archives it, through a sign-in of its own, without a click. Each
   sign-in also tells Jarvis which Google account it is (`openid`,
   `userinfo.email`): the address is kept in `accounts.json` on this PC and shown
   on the cards, never logged;
@@ -4856,6 +6040,14 @@ The app talks to these services, all free:
   guests), who Jarvis looked up and what he found, at most 3 threads with its
   guests from the last 14 days (read by Jarvis's own search of each guest's
   address, only after your request), and your notes; never your typed words.
+  A standing agent's or rule's run (only after your yes on their consent
+  card) sends, without a click at that moment, the text of each mail its
+  filter matched (that message only, never its conversation; keys and
+  passwords taken out; at most 4,000 characters each), the rule's question
+  and values or the agent's own words, and, for an agent that reads them,
+  some days of your calendar (titles, times, places) and your notes; a setup
+  run sends your sentence, your account names and what each can do, and a
+  rule's dry run, on your click, up to 8 of its newest matches.
   This
   is the same kind of data your briefing routine already sends Claude. It runs
   on your plan's usage, never on an API key (Claude Code gets only the Windows
@@ -4877,9 +6069,11 @@ a private window without your cookies or sign-ins (the site sees your IP
 address, as with any visit; its ads and analytics run as on any visit, and
 nothing of it is kept). That window reaches only public IPv4 addresses on the
 https port, checked where each name actually leads, never this PC or your
-local network, through Jarvis's network gate: a proxy on 127.0.0.1 that stays
-open from the first page picture until Jarvis closes (any program on this PC
-could use it too, to reach public https servers only). Email, calendar and
+local network, through Jarvis's network gate: a proxy on 127.0.0.1, sealed
+(refusing everything) until the first page picture or agent page is about to
+be taken and open from then until Jarvis closes (any program on this PC could
+use it too, to reach public https servers only); with page pictures and the
+agent off there is no gate at all. Email, calendar and
 search pictures are drawn from what Jarvis already has and send nothing.
 `[live] page_snapshots = false` (or `[live] text = false`) stops the page
 visits; see [Pictures in LIVE](#pictures-in-live).
@@ -4897,10 +6091,68 @@ false` in `config.toml` (this also turns off Approve) or sign out by deleting
 the briefing names, for accounts that are signed in, and are shown, not saved
 (also the address Google answered as, at the end of the line).
 
+**Standing agents and rules.** They are the one part of Jarvis that reads the
+text of your mail and gives it to your Claude Code without a click at that
+moment, and a rule's tidy-up is the one change he makes without a click. Both
+are your choice: off by default (`[standing] enabled`), nothing runs before
+your yes on their consent card, each job reads only what its own filter
+matches (checked against your own sentence, and never a security or payment
+sender), and a tidy-up needs its own feature, its own sign-in and a filter
+that names its sender. The runs have no tools and no web, are capped (at most
+30 a day for all of them) and stop at your plan's limit; every card they make
+still waits for your click, and every tidy-up keeps an **Undo** for 7 days.
+What they wrote (reports, receipts with a matched mail's sender and subject,
+cards with their drafts) stays on this PC for 7 days (`standing_runs\`), and
+**Clear** on the Agents screen deletes it. **Pause all** stops everything at
+once. See [Standing agents and rules](#standing-agents-and-rules).
+
+**The canvas (the board).** Home's canvas - the orb, the corners and the
+frames - is one web view inside Jarvis's window, on the web engine LIVE's page
+pictures use, and it only shows what Jarvis hands it. It never
+goes online: its page and its few files (its script, its style and the three
+fonts) come from an address scheme of its own inside the app, no web page or
+outside script, style or font is ever loaded, every other address is refused,
+and the page may make no connection at all; its pictures are images Jarvis
+re-encoded himself. It has a private profile of its own, off the record: no
+cache, no cookies, nothing written to disk. It can't open windows, download,
+use the clipboard or ask for the microphone, camera, location or
+notifications. What it can tell Jarvis is a short list of requests about the
+frames he gave it (focus, pin, close, open big, bring back, show its card on
+Approvals) and the fixed words of its corner buttons (each one does what the
+same control does elsewhere in Jarvis); anything else is dropped and counted,
+and nothing on it approves, sends or undoes anything. It never receives or
+sends what you type: the ask line is Jarvis's own control over it. Its engine
+starts with the window. It never opens Jarvis's network gate: with page
+pictures and the agent off there is no gate at all, and otherwise the gate
+stays sealed until the first page picture or agent page (see
+[Pictures in LIVE](#pictures-in-live)). No attribute of its page holds a word
+of your data (a frame's title or a fact is text; the buttons are named by
+reference to it). Frames last for the session and are never saved. While a frame is open
+big, the conversation column behind it is a picture Jarvis makes of his own
+window's column (from its own pixels, never a screen capture), held in memory
+only.
+
+**Ask's frames.** The tables, charts, timelines and maths an answer may bring
+cost a little more of your plan: their format and the instructions for them
+add about 3,000 characters (several hundred tokens) to every Ask and web
+research run, and a frame the model writes adds a little to its answer. They
+hold only what the answer is about, and a frame that fails Jarvis's checks is
+dropped, never the answer.
+
+**The second screen.** Jarvis draws it himself from what his main window
+shows (no web page, nothing read for it), and it never shows mail text, the
+text of a web research's answer, web searches, your question or what he says;
+senders, subjects, event titles and page pictures do show there, as on the
+board. It is left out of screenshots and screen sharing (if Windows refuses
+that, it still shows and the log says so), and it hides while the PC is
+locked, the display is off, battery saver is on or a full-screen app runs on
+that monitor. The soft sounds are made and played on this PC only.
+
 **Other proposals.** Share requests, Slack replies, to-dos without a block and
 links are only shown: the app has no access to Drive or Slack, and Gmail only
 to send what you approved on a card (and, for Ask Jarvis with `"gmail_read"`,
-to read the threads a request is about). **Open** hands a link to your browser only
+to read the threads a request is about; for standing agents and rules, see
+above). **Open** hands a link to your browser only
 when you click it.
 **Copy** puts the drafted text on the Windows clipboard, where any program can
 read it and, if Windows clipboard history (Win+V) is turned on, Windows keeps a
@@ -4908,13 +6160,16 @@ copy until you clear it (Win+V > Clear all).
 
 There are no paid API calls of any kind. Ask Jarvis uses your Claude plan (keep
 its extra usage off, see Ask's setup step 3), never an API key; a day plan, and a
-meeting brief with a run, is one Ask run on that plan. The offline voice runs
-entirely on this PC.
+meeting brief with a run, is one Ask run on that plan. A standing agent's or
+rule's run is one run on that plan too, counted apart from Ask's (at most 30 a
+day). The offline voice runs entirely on this PC.
 
 Driving your own signed-in Claude Code from your own app is ordinary personal
 use of it; sharing such a feature in a public project is less clear-cut, which
 is why Ask is off by default and every user installs and signs in to Claude Code
-themselves.
+themselves. Runs that start on their own, as standing agents' and rules' do,
+are less clear-cut still, so they are off by default too, wait for your yes on
+their consent card and make at most 30 runs a day.
 
 The LIVE tab shows on your screen what Jarvis read and sent - email text, the
 exact input he gave the planner, the message he will send and, for web
@@ -4940,7 +6195,9 @@ when it starts (nothing is installed into Windows):
 All three are licensed under the SIL Open Font License, Version 1.1
 (<https://openfontlicense.org>). Keep each licence file next to its font when you
 copy or share the folder. If a font file is missing, the app logs it and uses
-Windows fonts instead (Bahnschrift, Segoe UI, Cascadia Mono or Consolas).
+Windows fonts instead (Bahnschrift, Segoe UI, Cascadia Mono or Consolas). The
+board's page uses the same three fonts, handed to it from `fonts\` by Jarvis
+himself; nothing is downloaded.
 See also [License](#license).
 
 ## Tests
@@ -5048,6 +6305,54 @@ cases in the Gmail, prefs, actions, routes, persona, LIVE and productivity
 tests) use fake Gmail readers that answer header and thread reads, and check
 that no list item reaches a log, an ACTIVITY row or anything spoken, and that a
 scan never asks for a snippet or a body.
+
+The standing agents' and rules' tests (`test_standing_model.py` for the
+definitions and the `[standing]` table; `test_standing_store.py` for their
+files, one writer each, a damaged `standing.json` kept read only and the daily
+caps held across two processes; `test_standing_schedule.py` for when a job is
+due: daylight-saving nights, missed slots, a long sleep, quiet hours;
+`test_standing_google.py` for the background sign-ins, the filters and how new
+mail is found; `test_standing_modes.py` for the locked-down runs and what
+Jarvis builds of their answers, the tidy-up holds and the dry run;
+`test_standing_runner.py` for one check end to end, its holds, caps and lock;
+`test_standing_cards.py` for their cards on Approvals;
+`test_standing_app.py` for the Agents screen, the spoken line and a Reply
+checked again at the click; `test_standing_setup.py` for setting jobs up from
+the chat; `test_standing_tidy.py` for the tidy-up's gates, its journal and its
+exact Undo; `test_standing_radar.py` for Radar's ready-made agents, their
+drafts made without a run and the Radar card; and `standing_fakes.py`, their invented jobs, run files and Gmail)
+use invented mail only and fakes for Gmail, the Google sign-ins and Claude
+Code, keep every file in a temporary folder, and check that no subject,
+address, report or sentence of yours reaches a log. The lock and cap tests
+start a second Python process of their own; `--standing-run` does nothing
+while the tests run.
+
+The new look's tests (`test_holo_orb.py` for the ring: its looks at every
+size, facing you, the mic level, its frame rates and paint budget;
+`test_sounds.py` and `test_board_sounds.py` for the soft sounds and every rule
+that keeps them quiet, never touching an audio device; `test_look_ui.py` for
+Settings > Look; `test_board.py`, `test_board_frames.py`, `test_board_feed.py`,
+`test_board_glance.py`, `test_board_ways.py`, `test_board_lit.py`,
+`test_board_big.py` and `test_board_typed.py` for the board's messages and
+their caps, its frames, groups and limits, its read-only tiles, its ways (the
+strip, satellites, pin, close, Clear, parking, the keyboard), the lit frame and
+its cue line, open big and Ask's frames on it; `test_ask_frames.py` for Ask's
+tables, charts, timelines and maths, hostile ones first - markup, scripts,
+links, control characters, huge or deeply nested data - of which only text and
+numbers may arrive; `test_desk.py` for Home as a desk; `test_second_screen.py`
+for the second screen; `board_fakes.py` and `second_screen_fakes.py`, their
+stand-ins) run offscreen in the shared test process without the web engine:
+the board there is a stand-in page that keeps every message it would have run,
+or the real native fallback. `test_board_lockdown.py` runs the real board in a
+separate Python process per case (`tests\board_probe.py <case>`, offscreen,
+Chromium's proxy at an address that is not there): a page that tries every way
+out (fetches, pictures, sockets, new windows, navigation, forms, frames,
+workers, permissions, the clipboard) gets nowhere, Jarvis's keys still work
+after its renderer is killed, it falls back to its native tile when it may not
+start, and the desk, the board's ways, the lit frame, open big and Ask's frames
+work in the real page. The second screen's tests use fake monitors and a fake
+Windows layer. None of them shows a window on the real screen, plays a sound
+or starts a model.
 
 The hotkey tests register Ctrl+Alt+Shift+F24 (a key no keyboard has) for a
 moment with a private agent lock, simulate a press without pressing anything,
@@ -5179,6 +6484,77 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
 - **Web research: "Jarvis stopped the web research: it wanted a fifth web
   search ..."**: the question needed more searches or page reads than
   `[research] max_searches` / `max_fetches` allow; ask a narrower question.
+- **"agent: ..." or "rule: ..." started an ordinary Ask** (or there is no
+  Agents screen): standing agents and rules are off, or Ask is. Check
+  `JARVIS_STANDING_ENABLED` in `.env` (or `[standing] enabled`) and `[ask]
+  enabled`, then restart Jarvis.
+- **Agents: "Background runs off"** (or "Checks while Jarvis is open", and
+  "Background runs need the scheduled task: run install-schedule.ps1
+  again."): no check from the "Briefing agents" task came in the last 15
+  minutes, so it is not installed (an install from before standing agents)
+  or did not run. Run `install-schedule.ps1` again (setup step 6) and look
+  for "Briefing agents" in Task Scheduler (`taskschd.msc`) with its last run
+  result. Until then Jarvis checks every 5 minutes only while he is open.
+  `--standing-check` shows the last check and who started it (`task` or
+  `app`).
+- **Agents: "The work account can't be read in the background: sign it in
+  again in Jarvis."**: the background check found no sign-in it could read
+  that account's mail with: it is not signed in on this PC, or its sign-in
+  lacks the permission to read mail (it needs one more sign-in, or "Read your
+  email" was unticked; step 8c). The check never signs in itself. Open Jarvis
+  and sign that account in (**Allow work mail** under the bar, or a card's
+  **Sign in**), and answer the question about which Google account it is if
+  Jarvis asks.
+- **Agents: "No Claude runs until 3:00 PM (your Claude plan's limit)"** (or
+  "(Claude Code said you are near your limit)", "(extra usage would pay for
+  it)"): a run hit your plan's limit, or Claude Code warned that you are near
+  it, so every standing run waits until that time (6 hours, or 2 after a
+  warning, when no time was named) and the rest of your plan stays yours.
+  They go on by themselves. For extra usage, turn usage credits off (Ask's
+  setup step 3); Ask is paused too until then.
+- **A rule did not tidy** ("Not starred: ...", "Not labelled: ..." or "Not
+  archived: ..." on its ACTIVITY row): the row says which gate held it. "its
+  filter must name a sender and match few mails": delete the rule and set it
+  up again with the sender in your sentence ("rule: when billing@example.com
+  sends ..."), then Dry run (at most 90 matches in 30 days). "the account has
+  no gmail_tidy feature in config.toml": add `"gmail_tidy"` to that account's
+  `features` and restart Jarvis (setup step 8d). "the tidy-up's own sign-in
+  is not done yet": **Sign in for tidy-up** on the Agents screen's card. "the
+  account's tidy-up sign-in changed since Turn on": the tidy-up sign-in is
+  missing, was signed in again during that check, or is not the Google
+  account the rule recorded; sign in for the tidy-up with that account (or
+  set the rule up again). "you have written to that sender": a rule never
+  archives mail from an address Jarvis has sent your mail to. "the rule's
+  tidy-ups for today are used up": `[standing] tidy_per_day`. "everything was
+  paused": Pause all was on. "Gmail refused it": nothing changed. The others
+  are safety holds and stay so by design: a mail of that batch read like
+  instructions to Jarvis, the batch said yes far more often than its dry run,
+  the mail did not pass Gmail's sender check, it is your own, sent mail or a
+  draft, or (to archive) it is starred or important; the rule's card, if any,
+  still came.
+- **Agents: "Not known: Jarvis may have archived one message (the check
+  stopped midway)."**: a check ended (the PC slept or shut down) between
+  writing "doing" in the tidy-up journal and hearing back from Gmail. Look at
+  that mail in Gmail; nothing more happens to it by itself.
+- **Agents: "standing.json can't be read as it is"**: the file was changed by
+  hand or by another program, is damaged, or a newer version of Jarvis wrote
+  it. Jarvis keeps it exactly as it is: nothing runs and nothing is saved over
+  it, so no agent or rule is lost (a change on the Agents screen says "Jarvis
+  couldn't save the agents and rules"). Put back a good copy (or use the newer
+  version again) and Jarvis reads it within 30 seconds; deleting it removes
+  every agent and rule.
+- **Turn on does nothing** (or is greyed out): Jarvis says why, on the row
+  or setup card and in the button's tooltip: your yes on the consent card
+  first ("First say yes on the card above"), then each account the job reads
+  signed in ("Sign the work account in first: click Sign in work."; Turn on
+  records which Google account it is), then a rule's **Dry run**. **Sign in
+  work** opens that account's own sign-in; if it says the sign-in was
+  cancelled or did not finish, click it again (or **Edit** the draft and name
+  another account).
+- **How things stand, without the app**: `py -3.13 -m briefing_reader
+  --standing-check` prints whether they are on, the consent and Pause all,
+  each job's id, trigger, next run and runs today, the last check, a hold and
+  today's runs; no Claude request, nothing read from Google.
 - **LIVE: "Picture unavailable: this PC's PySide6 has no web engine
   (QtWebEngine)"**: page pictures need PySide6 6.8 or newer with its web engine
   (in PySide6-Addons): `py -3.13 -m pip install --upgrade PySide6`. The
@@ -5201,6 +6577,47 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
   type "environment variables": your account's or the system's) and restart
   Jarvis. **"... the private window could not be started"**: the log's
   "Page snapshots: ..." line says why; the next page tries again.
+- **Home is the hologram look, not the canvas, and the board says "The board
+  can't start on this PC. Answers still show here as text."**: the canvas's web
+  view could not start here (or stopped for good), so Home goes back to the
+  hologram look and the frames show as plain read-only tiles (its bar says READ-ONLY; the answers are whole
+  in the conversation, and nothing else changes). The log's "Board: it can't
+  start on this PC (...)" line says why: `no_engine` (this PySide6 has no web
+  engine: `py -3.13 -m pip install --upgrade PySide6`, 6.8 or newer),
+  `sandbox` or `unsafe_flags` (an environment variable changes the web
+  engine's safety settings: the same variables as in the LIVE item above),
+  `engine_failed`, `no_ready` or `load_failed` (the engine or its page did not
+  come up in time), or `crashed` (its renderer kept stopping). Restart Jarvis
+  to try again.
+- **Turning the canvas off**: **Ctrl+B** folds the frames away for now.
+  `[look] board = false` in `config.toml`, then a restart, keeps Home the
+  hologram look as it was: no frames, no Board button, no hint line, no desk,
+  and the web engine never starts for it.
+- **Jarvis takes more memory with the canvas**: the canvas's web view runs one
+  more process of the web engine (a renderer), started with the window and
+  kept until he closes. Measured
+  offscreen with 19 frames on the board: the renderer about 45 MB of private
+  memory (105 to 120 MB working set, at 100 % and 150 % scaling), and about
+  25 MB more in Jarvis's own process for the engine. `[look] board = false`
+  avoids it.
+- **Settings > Look's "Show Jarvis on my second screen" is greyed ("Needs a
+  second monitor")**: Windows sees one monitor. Plug in or turn on the other
+  one; the switch follows while Settings is open. On, but nothing on the
+  second monitor: it hides while the PC is locked, the display is off,
+  battery saver is on or a full-screen app runs on that monitor, and comes back
+  when that ends; the log's "Second screen: hidden (...)" line says which.
+- **"Jarvis can't hear you" on the canvas**: the microphone Jarvis listens to
+  gave him nothing at all. That is the one picked in Settings > Talk, else
+  the Windows default, which on some PCs is a virtual microphone (one an audio
+  app added) that gives only silence. Press **Pick a microphone** (it opens
+  Settings at Talk, on its Microphone row) and pick your real microphone; the
+  note goes once you pick another one, after the next talk that hears you, or
+  once "Hey Jarvis" hears on that microphone.
+- **Nothing moves on the canvas** (frames appear at once, no outline draws in,
+  the orb holds still): motion follows `[ui] motion` and Windows' "Show
+  animations" setting (Settings > Accessibility > Visual effects > Animation
+  effects). With animations off, or `motion = "off"`, everything is there at
+  once and the orb holds one still pose per look; that is on purpose.
 - **"Notion rejected the token (401)"**: the secret in `.env` is wrong or was
   regenerated. Copy it again from the integration page into `NOTION_TOKEN=`.
 - **"...not found or is not shared with the integration (404)"**: share the page
@@ -5264,14 +6681,14 @@ in a separate Python with a temporary `LOCALAPPDATA` and without reading `.env`.
   log, in a line starting with "Catch-up:". Check that "Briefing catch-up" exists
   in Task Scheduler (rerun `install-schedule.ps1`).
 - **Talk hears nothing** ("I heard nothing"): the message names the microphone
-  Jarvis listened to. A virtual one (Steam Streaming Microphone, Oculus Virtual
-  Audio Device, a virtual cable) is silent unless its app runs, and Windows
+  Jarvis listened to. A virtual one (the kind a game launcher, VR software or
+  a virtual cable adds) is silent unless its app runs, and Windows
   sometimes makes one the default: pick your real microphone in Settings >
-  Meetings > Microphone (talk uses the same choice), or make it the default
+  Talk > Microphone (meetings use the same choice), or make it the default
   input in Windows Settings > System > Sound.
 - **"Hey Jarvis" does nothing**: Settings > Talk's "Hey Jarvis" row says why
   (and the HEY JARVIS mark turns amber). "a virtual microphone": pick your real
-  one in Settings > Meetings > Microphone, as for the talk key; "paused": he is
+  one in Settings > Talk > Microphone, as for the talk key; "paused": he is
   speaking, a meeting records, or focus mode is on; "needs the wake model":
   click Download. It works only while Jarvis runs: minimize him rather than
   closing him. If he still misses you, try Sensitivity > Hears more.
@@ -5485,7 +6902,8 @@ they are quoted here in normal case, and the log has the same text)
 - Open <https://myaccount.google.com/permissions> in each Google account,
   pick your app (jarvis-assistant), remove its access, and delete
   `%LOCALAPPDATA%\briefing-reader\google_token_personal.json` (and
-  `google_token_work.json`).
+  `google_token_work.json`, and a tidy-up sign-in's
+  `google_token_<account>.tidy.json`).
   If you only revoke on Google's side, the next use of that account fails once
   with the "expired or was revoked" message and the app deletes the file itself.
 
@@ -5510,6 +6928,8 @@ briefing_reader/speech.py     Jarvis's voice: utterance kinds, the Voice interfa
 briefing_reader/voice_ui.py   Jarvis's voice in the app: his own player and the voice the controller speaks through (pauses and resumes the briefing, mute, the hold during a Send)
 briefing_reader/hotkey.py     global hotkey agent (RegisterHotKey), press handling, activation pipe
 briefing_reader/config.py     .env, environment and config.toml loading, paths, logging with secret redaction
+briefing_reader/calls.py      quiet during calls (no Qt): another app using the microphone, read only from Windows' own record; a yes/no only
+briefing_reader/overrides.py  the settings changed in the app (settings.json; no Qt): the editable keys and their limits, merged before the parsers
 briefing_reader/models.py     shared data types (flattened lines, script, audio, launch kinds)
 briefing_reader/notion_client.py  Notion REST client, block flattener, header parsing, freshness, polling, fixtures
 briefing_reader/text_prep.py  markdown stripping, text for listening, script with sections, stale note and Needs your OK part
@@ -5545,15 +6965,58 @@ briefing_reader/local_voice_ui.py  Settings > Voice's own part: whether the loca
 briefing_reader/player.py     QtMultimedia player that plays sections in order with pauses
 briefing_reader/hud.py        Jarvis HUD widget kit: colours, fonts, chamfered panels, orb, buttons, cards, agenda, command bar, tabs, conversation, the LIVE log, its pictures and the picture viewer
 briefing_reader/ui.py         assistant screen (JARVIS / BRIEFING / LIVE / MEMORY tabs), the LIVE pop-out window, classic prompt, tray icon, approvals, TODAY / DEADLINES, app controller (launch kinds, NEW, greeting, announcement)
+briefing_reader/orb.py        the orb: Jarvis's ring at every size, its looks and facing you, its frame clock and paint budget
+briefing_reader/settings_edit.py  Settings' Change editors (On / Off and choice buttons, Less / More steppers, HH:MM times; Save and Cancel)
+briefing_reader/look_ui.py    the new look in the app: the soft sounds' moments, Settings > Look, the board's and the second screen's controllers
+briefing_reader/sounds.py     the soft sounds, made in code: their recipes and every rule that keeps them quiet
+briefing_reader/board/        the board: its own address scheme (scheme), the messages both ways and their checks
+                              (protocol), the one web view with its fallback and read-only tiles (view), the frames
+                              from what Jarvis already knows (frames) and from Ask (ask_frames), what it holds (feed),
+                              a satellite's fact (facts), which frame a sentence is about (lit), the glance painter
+                              (glance); board/assets: its page, style and script
+briefing_reader/desk_view.py  Home as a desk: its geometry, the conversation column and its ring head, the cue line's native part, the hint line
+briefing_reader/desk_ui.py    the desk's controller: makes and feeds the board, its ways, parking
+briefing_reader/canvas_ui.py  Home as the canvas: starts its page with the window, tells it the orb and the corners, takes its buttons' words
+briefing_reader/canvas_view.py  the canvas's native half: the ask line, the caption and the one tile over the page
+briefing_reader/canvas_now.py  the resting "Now" group: what waits for your OK, today, to-dos and agents, kept current
+briefing_reader/window_chrome.py  the canvas window's Windows behaviour: snap, Win+arrows, the taskbar, Snap Layouts, the system menu
+briefing_reader/desk_cue.py   the lit frame and its cue line while Jarvis speaks
+briefing_reader/desk_big.py   open big
+briefing_reader/second_screen.py  the second-screen display, when it hides, and the broker of "the other screen"
 briefing_reader/agent/        Tasks (no Qt): the tool registry (tools), the task's own folder (workspace), the local MCP endpoint (endpoint), budgets and what is offered (policy), one run (runner), its prompt and settings (assets)
 briefing_reader/agent_ui.py   Tasks in the app: the controller of the one task that may run, its LIVE task, its words on the caption and in the voice
 briefing_reader/ask_ui.py     Ask Jarvis in the app: the command bar's controller and its "ask" thread (web: requests too)
+briefing_reader/standing/     Standing agents and rules (no Qt): definitions checked on every read (model), their files and
+                              daily counts (store), when a job is due (schedule), Google filters (filters) and new mail
+                              (mailwatch), the locked-down runs (engine), a rule's check (rules) and its values
+                              (values), an agent's run (agents), their cards (cards), setup from a sentence (setup), the
+                              dry run (dryrun), the tidy-up and its journal (tidy), one check (runner) and its lock
+                              (lock); standing/assets: the runs' prompts and answer formats
+briefing_reader/standing_setup.py  setting a job up in the app: the setup run, a rule's dry run, Turn on's checks, the cards' words
+briefing_reader/standing_ui.py  standing agents and rules in the app: their cards, the Agents screen's controller, the spoken line, a Reply checked again at the click, the tidy-up's Undo and sign-in
+briefing_reader/standing_view.py  the Agents screen (Ctrl+9): status line, AGENTS, RULES, ACTIVITY, REPORTS
+briefing_reader/capture.py     Capture's core: a series and its rule, a found item as a card, the duplicate check and the frame's rows
+briefing_reader/capture_store.py  captures.json and the kept copies of what was captured
+briefing_reader/capture_files.py  pictures, PDFs and text read on this PC for a capture
+briefing_reader/capture_net.py    a calendar link fetched once, on Read it
+briefing_reader/capture_ui.py     drops, the tray, Read it, the CAPTURE cards and the Source viewer
+briefing_reader/docs/model.py     documents and datasheets (no Qt): ids, the column types and their values, markdown sections and the one splice, the caps
+briefing_reader/docs/store.py     the docs folder (no Qt): index.json, doc.md, sheet.json, versions, the trash, read-only on damage, the export files
+briefing_reader/docs/proposals.py what Jarvis and agents propose in a document or sheet (no Qt): pending changes, the splice by heading, rows and cells, duplicates by key
+briefing_reader/ask/docs_mode.py  a document's or sheet's run: its answer read strictly and checked (headings, rows, columns, types, caps, no new link or address)
+briefing_reader/docs_view.py      the Documents screen: the list, the document editor (Read / Edit), the sheet editor (typed cells, Undo)
+briefing_reader/docs_ui.py        the Documents screen's controller: saving as you type, versions, Delete with Undo, Export through the picker
+briefing_reader/ics.py         calendar files read with the standard library
+briefing_reader/ask/capture_read.py  a capture read by Claude: the stdin, the strict answer, Jarvis's checks of each item
+briefing_reader/batch.py       Add all: which calendar cards may go together, the confirm list and its check
+briefing_reader/unsubscribe.py  a message's List-Unsubscribe header read, the method chosen, the one-click request
+briefing_reader/ask/revise.py  a draft rewritten in your words: the strict answer and Jarvis's check of it
 fonts/                        Chakra Petch, Sora and JetBrains Mono fonts with their OFL licences
-tests/                        unit tests and saved fake Notion pages (tests/fixtures)
-config.toml                   voice, prompt, polling, section, calendar, actions, schedule, hotkey, agenda, display, Ask, web research, assistant, LIVE and productivity settings
+tests/                        unit tests and saved fake Notion pages (tests/fixtures); board_probe.py runs the real board in a process of its own
+config.toml                   voice, prompt, polling, section, calendar, actions, schedule, hotkey, agenda, display, Ask, web research, assistant, LIVE, productivity and look settings
 .env.example                  template for .env (NOTION_TOKEN, BRIEFING_PAGE_ID; the optional JARVIS_ keys)
 requirements.txt              Python dependencies
-install-schedule.ps1          registers the Briefing AM / PM / catch-up / hotkey scheduled tasks
+install-schedule.ps1          registers the Briefing AM / PM / catch-up / hotkey / agents scheduled tasks
 uninstall-schedule.ps1        removes them
 LICENSE                       MIT licence of the code (the fonts keep their own OFL licences)
 .env                          your Notion token and page id (step 4; not in git, keep private)

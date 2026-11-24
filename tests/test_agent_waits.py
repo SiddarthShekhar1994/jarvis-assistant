@@ -672,7 +672,7 @@ class WordsInOrderTests(RunCase):
         run = self.go(script)
         self.question()
         self.assertEqual(run.owner_says("Blue"), "answered")
-        self.assertEqual(run.owner_says("no wait, make that Red"), "sent")
+        self.assertEqual(run.owner_says("no wait, make that Red"), "queued")   # behind the answer: in with it
         self.assertEqual(len(self.engine.sent), 1)              # nothing has jumped ahead
         release.set()
         self.end()
@@ -698,7 +698,7 @@ class WordsInOrderTests(RunCase):
         run = self.go(script, agent={"max_turns": 2})
         question = self.question()
         self.assertTrue(run.answer(question.id, "Keep going"))
-        self.assertEqual(run.owner_says("and keep it short"), "sent")
+        self.assertEqual(run.owner_says("and keep it short"), "queued")   # behind Keep going's yes
         release.set()
         self.end()
         self.assertEqual(self.engine.messages[1:], [ar.KEEP_GOING_YES, "The owner says: and keep it short"])
@@ -1575,8 +1575,8 @@ class TheFirstSecondsTests(RunCase):
             run = self.go(self.finishing_after(3))
             self.assertTrue(began.wait(5))
             self.assertIsNone(run._process)                     # there is no process to send anything to yet
-            self.assertEqual(run.owner_says("and keep it to one page"), "sent")
-            self.assertEqual(run.owner_says("in plain words"), "sent")
+            self.assertEqual(run.owner_says("and keep it to one page"), "queued")
+            self.assertEqual(run.owner_says("in plain words"), "queued")
             gate.set()
             end = self.end()
         self.assertEqual(end.outcome, "done")
@@ -1596,8 +1596,8 @@ class TheFirstSecondsTests(RunCase):
         self.addCleanup(process.hold.set)
         run = self.go(process)
         self.until(lambda: run._process is process)
-        self.assertEqual(run.owner_says("and keep it to one page"), "sent")
-        self.assertEqual(run.owner_says("in plain words"), "sent")
+        self.assertEqual(run.owner_says("and keep it to one page"), "queued")
+        self.assertEqual(run.owner_says("in plain words"), "queued")
         self.assertEqual(process.sent, [])                      # nothing before the goal
         process.hold.set()
         end = self.end()
@@ -1708,7 +1708,8 @@ class FileCardRoadTests(ThingsApp):
         self.assertRegex(self.feed.panel().content().head, r"^WORKING")
         self.assertEqual(self.feed.panel().content().tone, hud_overlay.TONE_CYAN)
         self.type_it("how is it going?")                             # no card is awaited: only words
-        self.assertEqual(self.c.ask.bar.status(), "Passing that on, sir.")
+        # The model is idle, so its replay may already have come: then the bar says it reached him (2026-11-24).
+        self.assertIn(self.c.ask.bar.status(), ("Passing that on, sir.", "He has your message, sir."))
         time.sleep(1.5)                                              # past the run's time for the card
         settle()
         self.assertTrue(self.desktop.busy())

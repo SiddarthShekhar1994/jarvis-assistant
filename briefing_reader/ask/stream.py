@@ -1,5 +1,7 @@
 """One planner run: Claude Code's stream-json output, checked event by event.
 
+    parse_event(line)        one stream line as an event, read with depth_bounded (a value nested deeper than
+                             EVENT_DEPTH is null: the line still parses, and only that value is lost); never raises
     check_init(event)        InitSummary, or GuardTrip: the first event must be system/init with
                              apiKeySource "none", no MCP server and no tool but StructuredOutput
     rate_limit_signal(event) a rate_limit_event that says the run is off the plan: extra usage
@@ -54,7 +56,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .cli import OutputTooLong, Process, Runner, holds_stdin, stream_message
+from .. import live
+from ..board import ask_frames
+from .cli import LINE_CAP_BYTES, OutputTooLong, Process, Runner, holds_stdin, stream_message
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +110,7 @@ MESSAGES = {
 OVERAGE = "overage"           # AskFailure.detail: Claude Code said this run uses extra usage
 REJECTED = "rejected"         # AskFailure.detail: Claude Code said the plan's limit is reached
 PRESTART_DIED = "prestart_died"   # AskFailure.detail: a process started ahead ended before any output (run cold)
+PICTURES_NEED_STREAM = "pictures_need_stream"   # AskFailure.detail: pictures without a stream-json command line (not sent)
 NO_INIT = "no_init"           # AskFailure.detail: no init event in time
 # How a run's process came (RunResult.start; the per-Ask log line says it).
 START_AHEAD = "prestarted"
@@ -114,6 +119,14 @@ START_FELL_BACK = "cold after a prestarted one failed"
 STREAM_EXIT_S = 1.5           # after the result a CLI that held its stdin has this long to end before it is killed
 OVERAGE_MESSAGE = ("Turn usage credits off at claude.ai/settings/usage: Claude Code said this request would use "
                    "them (extra usage), so Ask stopped it; " + NOTHING)
+
+# A stream line's arrays and objects nested deeper than this are read as null (depth_bounded). The deepest recorded line
+# is 7 levels and a real frame's at most about 15, while json.loads itself raises RecursionError from about 3,000.
+EVENT_DEPTH = 64
+REPLY_INDENT_CAP = live.MAX_BLOCK_CHARS   # raw_reply: longer than this indented, the reply is shown compact
+# One run of brackets (or a quote that opens no string that ends; empty at the end), after any text that is not a
+# bracket or a quote and any whole strings, read possessively: no backtracking, so a pass is linear in the line.
+_BRACKETS_RE = re.compile(r'(?:[^"\[\]{}]++|"[^"\\]*+(?:\\.[^"\\]*+)*+")*+([\[{]+|[\]}]+|"|$)', re.DOTALL)
 
 _CONTROL_RE = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]")
 _WORD_RE = re.compile(r"[A-Za-z0-9._\-\[\]]{1,80}")
@@ -222,6 +235,12 @@ class Plan:
     web: WebRequest | None = None   # web_research (only when the run was allowed to ask for it)
     remember: tuple[str, ...] = ()  # a suggested note (only when the run was allowed to suggest one)
     agent: AgentRequest | None = None   # agent_task (only when the run was allowed to ask for it)
+    standing: str = ""                  # standing_job's kind, "agent" | "rule" (acted on only when it was offered)
+    # The new look, part 6: the answer's "topic" and "frames" as board.ask_frames checked them (an AskFrames; a frame
+    # that fails is dropped there, never the plan). Shown on the board, never logged but as counts.
+    frames: Any = field(default=None, repr=False, compare=False)
+    # Documents (build plan item 5): doc_job's (kind "doc" | "sheet", the name as written; acted on only when offered).
+    doc: tuple[str, str] = field(default=(), repr=False)
 
 
 @dataclass(frozen=True)
@@ -300,10 +319,53 @@ def failure(kind: str, detail: str = "", message: str = "") -> AskFailure:
 # Events
 # --------------------------------------------------------------------------
 
-def parse_event(line: str) -> dict[str, Any] | None:
-    """One stream-json line as a dict with a "type", else None (garbage is skipped, never shown)."""
+def depth_bounded(text: str, bound: int = EVENT_DEPTH) -> str:
+    """JSON ``text`` with every array or object nested deeper than ``bound`` replaced by null, so it parses with no
+    deep recursion and a value the model nested too deep (a maths frame's expr: ask_frames drops that frame as
+    "depth") loses only itself. One pass, linear in the text: strings (with their escapes) are read whole, never as
+    brackets. "" for text that cannot be JSON (a string that never ends, a value that never closes)."""
+    if text.count("[") + text.count("{") <= bound:
+        return text                                   # it cannot nest deeper: the usual line, untouched
+    parts: list[str] = []
+    depth, kept, skipping = 0, 0, False               # kept: text[kept:] is still to be copied
+    for match in _BRACKETS_RE.finditer(text):
+        run = match.group(1)
+        if not run:
+            break
+        if run == '"':
+            return ""
+        at, size = match.start(1), len(run)
+        if run[0] in "[{":
+            if not skipping and depth + size > bound:
+                parts.append(text[kept:at + bound - depth])
+                parts.append("null")
+                skipping = True
+            depth += size
+        else:
+            if skipping and depth - size <= bound:
+                kept = at + depth - bound                 # just after the bracket that closes the deep value
+                skipping = False
+            depth -= size
+    if skipping:
+        return ""
+    parts.append(text[kept:])
+    return "".join(parts)
+
+
+def _loads(text: str) -> Any:
+    """json.loads of ``text`` read with depth_bounded; ValueError for anything that is not JSON (never a
+    RecursionError: parsing never makes run_cli raise)."""
     try:
-        event = json.loads(line)
+        return json.loads(depth_bounded(text))
+    except RecursionError:
+        raise ValueError("nested too deep") from None
+
+
+def parse_event(line: str) -> dict[str, Any] | None:
+    """One stream-json line as a dict with a "type", else None (garbage is skipped, never shown). The line is read
+    with depth_bounded: a value nested deeper than EVENT_DEPTH is null, the rest of the event as it came."""
+    try:
+        event = _loads(line)
     except ValueError:
         return None
     return event if isinstance(event, dict) and isinstance(event.get("type"), str) else None
@@ -507,7 +569,15 @@ def _plan_from(data: Any, *, allow_search: bool, allow_web: bool = False, fallba
         if agent is NOT_A_TASK:
             return None
     kept = tuple(line.strip() for line in lines if line.strip())
-    return Plan(say, question, kept, search, fallback, web, remember, agent)
+    wanted = data.get("standing_job")
+    standing = wanted["kind"] if isinstance(wanted, dict) and wanted.get("kind") in ("agent", "rule") else ""
+    wanted = data.get("doc_job")
+    doc: tuple[str, str] = ()
+    if isinstance(wanted, dict) and wanted.get("kind") in ("doc", "sheet") and isinstance(wanted.get("name", ""), str):
+        doc = (wanted["kind"], " ".join(str(wanted.get("name") or "").split())[:60])
+    # Part 6: the topic and the typed frames, checked strictly; a frame that fails is dropped, never the plan.
+    return Plan(say, question, kept, search, fallback, web, remember, agent, standing, ask_frames.check_answer(data),
+                doc=doc)
 
 
 def _fallback_plan(text: str, *, allow_search: bool, allow_web: bool = False,
@@ -517,7 +587,7 @@ def _fallback_plan(text: str, *, allow_search: bool, allow_web: bool = False,
     text = text or ""
     fenced = _FENCE_RE.match(text)
     try:
-        data = json.loads(fenced.group(1) if fenced else text)
+        data = _loads(fenced.group(1) if fenced else text)
     except ValueError:
         data = None
     plan = _plan_from(data, allow_search=allow_search, allow_web=allow_web, fallback=True,
@@ -932,14 +1002,22 @@ def _report(progress: Progress | None, what: str, value: Any = None) -> None:
 
 def raw_reply(event: Mapping[str, Any] | None) -> str:
     """The planner's reply in a result event as it came: structured_output as indented JSON, else
-    the result text ("" when there is neither)."""
+    the result text ("" when there is neither). Indenting never makes a reply huge: when the indented text would be
+    longer than the LIVE view keeps of a block (REPLY_INDENT_CAP) it is compact JSON, as it came on its line (cut at
+    cli.LINE_CAP_BYTES, which no line is longer than)."""
     if not isinstance(event, Mapping):
         return ""
     data = event.get("structured_output")
     if data is not None:
         try:
-            return json.dumps(data, indent=2, ensure_ascii=False)
-        except (TypeError, ValueError):
+            pieces, size = [], 0
+            for piece in json.JSONEncoder(indent=2, ensure_ascii=False).iterencode(data):   # built a piece at a time
+                pieces.append(piece)
+                size += len(piece)
+                if size > REPLY_INDENT_CAP:
+                    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))[:LINE_CAP_BYTES]
+            return "".join(pieces)
+        except (TypeError, ValueError, RecursionError):
             return ""
     text = event.get("result")
     return text if isinstance(text, str) else ""
@@ -1012,7 +1090,7 @@ def run_cli(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mapping[st
             now: Callable[[], datetime] = lambda: datetime.now().astimezone(),
             progress: Progress | None = None, capture: bool = False,
             watch: Callable[[Mapping[str, Any]], None] | None = None, process: Process | None = None,
-            after_start: Callable[[], None] | None = None) -> RunResult:
+            after_start: Callable[[], None] | None = None, images: Sequence[tuple[str, bytes]] = ()) -> RunResult:
     """Start the CLI with ``prompt`` on stdin and read its events until the result, a guard trip
     or stop, the timeout or Cancel (the process is killed then). Never raises for the CLI's
     behaviour. ``init_check`` checks the first event (InitSummary, or GuardTrip / RunStop),
@@ -1020,10 +1098,16 @@ def run_cli(runner: Runner, argv: Sequence[str], prompt: str, *, env: Mapping[st
     event. ``progress`` / ``capture``: see the module docs (neither changes the run). ``watch`` hears
     every stream_event that passed the checks (a callback that raises changes nothing). ``process``: a CLI
     started ahead of this question gets the prompt instead of a new one; ``after_start``: called once the prompt
-    is on its way (either way)."""
+    is on its way (either way). ``images``: a capture's pictures, which only a stream-json command line can carry
+    (cli.stream_message); with any other one the run is refused before it starts (nothing is sent)."""
     started = clock()
     stream_input = holds_stdin(argv)
-    payload = stream_message(prompt) if stream_input else prompt
+    if images and not stream_input:
+        return RunResult(failure=failure(ERROR, PICTURES_NEED_STREAM))
+    try:
+        payload = stream_message(prompt, images) if stream_input else prompt
+    except ValueError:
+        return RunResult(failure=failure(ERROR, PICTURES_NEED_STREAM))
     ahead = process is not None
     if process is not None:
         if not process.send(payload):   # it ended while it waited: nothing was sent

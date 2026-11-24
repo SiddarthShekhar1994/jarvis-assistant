@@ -446,5 +446,28 @@ class GroupHeaderTests(unittest.TestCase):
         self.assertFalse(cards.empty_label.isHidden())
 
 
+
+class CanvasSaidTests(unittest.TestCase):
+    """Canvas part 3: the canvas's check of the status line holds its owner weakly - a strong hold made a cycle (the bar
+    and the reading view), so a closed app's widgets were freed later by Python's cycle collector, inside another
+    app's event processing (an access violation in the desktop harness)."""
+
+    def test_the_check_does_not_keep_its_owner_alive(self) -> None:
+        import weakref
+
+        class Owner:
+            def said(self, _text: str) -> bool:
+                return True
+
+        bar = hud.CommandBar()
+        self.addCleanup(bar.deleteLater)
+        owner = Owner()
+        gone = weakref.ref(owner)
+        bar.set_canvas_said(owner.said)
+        del owner
+        self.assertIsNone(gone())                     # the bar alone does not keep it
+        bar.refresh_status()                          # its owner gone: no check, and nothing fails
+
+
 if __name__ == "__main__":
     unittest.main()

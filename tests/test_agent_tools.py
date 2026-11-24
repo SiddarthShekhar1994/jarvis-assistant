@@ -705,7 +705,8 @@ class FirewallSeamTests(unittest.TestCase):
 
     def test_of_the_guarded_tiers_only_the_web_is_offered(self) -> None:
         self.assertEqual({tool.tier for tool in policy.offered()} & policy.GUARDED_TIERS, {tools.TIER_WEB})
-        self.assertEqual(policy.GUARDED_TIERS, {tools.TIER_WEB, tools.TIER_PRIVATE, tools.TIER_CARD, tools.TIER_INSTANT})
+        self.assertEqual(policy.GUARDED_TIERS, {tools.TIER_WEB, tools.TIER_PRIVATE, tools.TIER_CARD, tools.TIER_INSTANT,
+                                                tools.TIER_DRIVE})
 
     def test_a_guarded_tool_with_no_firewall_is_refused(self) -> None:
         for tier in policy.GUARDED_TIERS:

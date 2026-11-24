@@ -54,6 +54,7 @@ PANEL_PAD = 12
 FIELD_HEIGHT = 46
 ROW_HEIGHT = 46
 PILL_WIDTH = 320
+PILL_NARROW = 280      # the new look: the pill a little narrower before it folds (the header's Board button)
 PILL_HEIGHT = 40
 
 
@@ -113,8 +114,21 @@ class FindButton(QAbstractButton):
     def is_compact(self) -> bool:
         return self._compact
 
+    def set_narrow(self, narrow: bool) -> None:
+        """The pill PILL_NARROW wide (its words and CTRL K whole): the header's first step before it folds."""
+        narrow = bool(narrow)
+        if narrow != getattr(self, "_narrow", False):
+            self._narrow = narrow
+            self.updateGeometry()
+            self.update()
+
+    def is_narrow(self) -> bool:
+        return bool(getattr(self, "_narrow", False)) and not self._compact
+
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt override
-        return QSize(PILL_HEIGHT if self._compact else PILL_WIDTH, PILL_HEIGHT)
+        if self._compact:
+            return QSize(PILL_HEIGHT, PILL_HEIGHT)
+        return QSize(PILL_NARROW if getattr(self, "_narrow", False) else PILL_WIDTH, PILL_HEIGHT)
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt override
         return self.sizeHint()
@@ -151,13 +165,18 @@ class FindButton(QAbstractButton):
         try:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-            radius = rect.height() / 2
-            if self._hover:
+            canvas = holo.canvas_look()            # part 4: the canvas's ask line (a square thin outline)
+            radius = 1.0 if canvas else rect.height() / 2
+            if self._hover and not canvas:
                 painter.setPen(QPen(holo.alpha(holo.HOLO, 0.10), 4.0))
                 painter.setBrush(Qt.BrushStyle.NoBrush)
                 painter.drawRoundedRect(rect.adjusted(2, 2, -2, -2), radius - 2, radius - 2)
-            painter.setPen(QPen(QColor(holo.HOLO) if self._hover else holo.LINE_STRONG, 1.0))
-            painter.setBrush(holo.alpha(holo.TILE, 0.72))
+            if canvas:
+                painter.setPen(QPen(holo.CANVAS_EDGE_HI if self._hover else QColor(143, 235, 255, 150), 1.0))
+                painter.setBrush(QColor(0, 0, 0, 160))
+            else:
+                painter.setPen(QPen(QColor(holo.HOLO) if self._hover else holo.LINE_STRONG, 1.0))
+                painter.setBrush(holo.alpha(holo.TILE, 0.72))
             painter.drawRoundedRect(rect, radius, radius)
             glyph = QRectF(0, 0, 18, 18)
             if self._compact:

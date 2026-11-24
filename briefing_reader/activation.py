@@ -172,7 +172,9 @@ def parse_activation(line: bytes) -> dict | None:
         message = json.loads(line.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
         return None
-    if not isinstance(message, dict) or message.get("cmd") != "activate":
+    # "activate": a launch asks Jarvis to come forward; "standing": a background standing check has news (an older
+    # app drops it as malformed, and the check tells the owner at the next open instead).
+    if not isinstance(message, dict) or message.get("cmd") not in ("activate", "standing"):
         return None
     return message
 
