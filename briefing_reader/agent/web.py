@@ -679,28 +679,32 @@ class WebSession:
         """The query on each search page in turn, in the window, until one gives results. A page that shows a captcha, a
         consent wall or a block is left as it is and the next one tried."""
         with self._one_at_a_time(call) as browser:
-            tried: list[tuple[str, str]] = []
-            for engine in self.engines:
-                left = call.left()
-                if left < MIN_TRY_S:
-                    tried.append((engine.name, T_NO_TIME))
-                    continue
-                self._page = None
-                self._results_shown = False
-                loaded = browser.load(engine.url(query), timeout_s=min(LOAD_TIMEOUT_S, left), cancelled=call.cancelled)
-                call.check()
-                if not loaded.ok:
-                    kind = snapshots.reason_kind(loaded.reason)
-                    if kind not in ("timeout", "load_failed", "crashed", "site_refused"):
-                        raise _load_failure(loaded, LOAD_TIMEOUT_S)
-                    tried.append((engine.name, WALL_BLOCK if kind == "site_refused" else T_NOT_LOADED))
-                    continue
-                how, read = self._results(browser, engine, query, call)
-                if not how and read is not None:
-                    self._results_shown = True
-                    return self._found(browser, engine, read, tried, loaded, call)
-                tried.append((engine.name, how or T_NO_RESULTS))
-            raise WebRefused(W_NO_RESULTS, NO_RESULTS_TEXT.format(tried=_tried_words(tried)))
+            return self._search_in(browser, query, call)
+
+    def _search_in(self, browser: Browser, query: str, call: Call) -> Found:
+        """search's work, its turn taken (agent.drive's session takes it with its own checks)."""
+        tried: list[tuple[str, str]] = []
+        for engine in self.engines:
+            left = call.left()
+            if left < MIN_TRY_S:
+                tried.append((engine.name, T_NO_TIME))
+                continue
+            self._page = None
+            self._results_shown = False
+            loaded = browser.load(engine.url(query), timeout_s=min(LOAD_TIMEOUT_S, left), cancelled=call.cancelled)
+            call.check()
+            if not loaded.ok:
+                kind = snapshots.reason_kind(loaded.reason)
+                if kind not in ("timeout", "load_failed", "crashed", "site_refused"):
+                    raise _load_failure(loaded, LOAD_TIMEOUT_S)
+                tried.append((engine.name, WALL_BLOCK if kind == "site_refused" else T_NOT_LOADED))
+                continue
+            how, read = self._results(browser, engine, query, call)
+            if not how and read is not None:
+                self._results_shown = True
+                return self._found(browser, engine, read, tried, loaded, call)
+            tried.append((engine.name, how or T_NO_RESULTS))
+        raise WebRefused(W_NO_RESULTS, NO_RESULTS_TEXT.format(tried=_tried_words(tried)))
 
     def _results(self, browser: Browser, engine: SearchEngine, query: str,
                  call: Call) -> tuple[str, ResultsRead | None]:
@@ -743,25 +747,29 @@ class WebSession:
         if why:
             raise WebRefused(W_NOT_PUBLIC, NOT_PUBLIC_TEXT.format(why=why))
         with self._one_at_a_time(call) as browser:
-            self._page = None
-            self._results_shown = False
-            seconds = min(LOAD_TIMEOUT_S, call.left())
-            loaded = browser.load(address, timeout_s=seconds, cancelled=call.cancelled)
-            call.check()
-            if not loaded.ok:
-                raise _load_failure(loaded, seconds)
-            read = self._read(browser, call)
-            final = loaded.final_url or read.url or address
-            if not web_link_problem(final):
-                self.book.see(final)
-            page = _Page(read.title, final, read.text, read.length, loaded.still_loading, final, read.hidden)
-            self._page = page
-            links = []
-            for words, link in read.links[:MAX_LINKS]:
-                number = self.book.number(link)
-                if number:
-                    links.append((number, words, link))
-            return self._part(page, tuple(links), self._shot(browser, call))
+            return self._open_in(browser, address, call)
+
+    def _open_in(self, browser: Browser, address: str, call: Call) -> Opened:
+        """open_page's work, its address checked and its turn taken."""
+        self._page = None
+        self._results_shown = False
+        seconds = min(LOAD_TIMEOUT_S, call.left())
+        loaded = browser.load(address, timeout_s=seconds, cancelled=call.cancelled)
+        call.check()
+        if not loaded.ok:
+            raise _load_failure(loaded, seconds)
+        read = self._read(browser, call)
+        final = loaded.final_url or read.url or address
+        if not web_link_problem(final):
+            self.book.see(final)
+        page = _Page(read.title, final, read.text, read.length, loaded.still_loading, final, read.hidden)
+        self._page = page
+        links = []
+        for words, link in read.links[:MAX_LINKS]:
+            number = self.book.number(link)
+            if number:
+                links.append((number, words, link))
+        return self._part(page, tuple(links), self._shot(browser, call))
 
     def _read(self, browser: Browser, call: Call) -> PageRead:
         """The page as it is now; a page with nothing on it yet is given a moment."""
@@ -848,19 +856,23 @@ class WebSession:
         """A file of this task's folder in the window, on Jarvis's own scheme; ``name`` is a good name of a file that
         is there. Read as a page is; its address never goes out of this PC."""
         with self._one_at_a_time(call) as browser:
-            if not browser.scheme_ready():
-                raise WebRefused(W_NO_WINDOW, NO_WINDOW_TEXT)
-            self._page = None
-            self._results_shown = False
-            seconds = min(LOAD_TIMEOUT_S, call.left())
-            loaded = browser.load_file(name, folder, timeout_s=seconds, cancelled=call.cancelled)
-            call.check()
-            if not loaded.ok:
-                raise _load_failure(loaded, seconds)
-            read = self._read(browser, call)
-            page = _Page(read.title or name, name, read.text, read.length, loaded.still_loading, name, read.hidden)
-            self._page = page
-            return self._part(page, (), self._shot(browser, call))
+            return self._show_in(browser, folder, name, call)
+
+    def _show_in(self, browser: Browser, folder: TaskFolder, name: str, call: Call) -> Opened:
+        """show's work, its turn taken."""
+        if not browser.scheme_ready():
+            raise WebRefused(W_NO_WINDOW, NO_WINDOW_TEXT)
+        self._page = None
+        self._results_shown = False
+        seconds = min(LOAD_TIMEOUT_S, call.left())
+        loaded = browser.load_file(name, folder, timeout_s=seconds, cancelled=call.cancelled)
+        call.check()
+        if not loaded.ok:
+            raise _load_failure(loaded, seconds)
+        read = self._read(browser, call)
+        page = _Page(read.title or name, name, read.text, read.length, loaded.still_loading, name, read.hidden)
+        self._page = page
+        return self._part(page, (), self._shot(browser, call))
 
     def _shot(self, browser: Browser, call: Call) -> snapshots.ShotResult | None:
         """The window's picture for the step in Live. A page without one still counts."""

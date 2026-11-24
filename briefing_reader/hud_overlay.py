@@ -2806,6 +2806,7 @@ PANEL_COMPACT = PANEL_PAD[0] * 2 + PANEL_HEAD + 8 + PANEL_LINE + PANEL_ACTIVITY 
 MORE_TEXT = "+{count} more"
 STOP_TEXT = "Stop"
 SHOW_TEXT = "Show"
+PAUSE_TEXT, RESUME_TEXT = "Pause", "Resume"   # a task that fills in pages: its web and drive calls held, or let go
 PANEL_BUTTON_SIZE = 26         # their drawn height
 TASK_CARD_WIDTH = DESK_WIDTH
 TASK_CARD_MIN_WIDTH = 320
@@ -2813,6 +2814,10 @@ TASK_CARD_MIN_BODY = 64        # at least this much of its text shows, whatever 
 TASK_LINE = 21
 TASK_ROW = 40                  # an output: its name, its two links
 TASK_ROW_NOTE = 18             # ... and any plain words under it
+FIELD_GAP = 10                 # a Send card's value rows: between them
+FIELD_LABEL = 18               # ... a row's label line
+FIELD_TAG = 22                 # ... its tag, when it has one
+EMPTY_VALUE = "(empty)"
 _ROW_INK = {STEP_TODO: holo.INK_4, STEP_DOING: holo.HOLO, STEP_DONE: holo.INK_2, STEP_FAILED: holo.ALERT_TX}
 _SCROLL_STYLE = ("QScrollArea { background: transparent; border: 0; } "
                  "QScrollBar:vertical { background: transparent; width: 8px; margin: 0; } "
@@ -3013,6 +3018,8 @@ class PanelButtons(_OverlayWindow):
 
     stopClicked = Signal()
     showClicked = Signal()
+    pauseClicked = Signal()
+    resumeClicked = Signal()
 
     def __init__(self, *, native: HudNative | None = None, hide_from_capture: bool = True) -> None:
         super().__init__(HUD_FLAGS, native, hide_from_capture)
@@ -3020,21 +3027,28 @@ class PanelButtons(_OverlayWindow):
         self.setWindowTitle("Jarvis")
         self._fill = holo.TILE
         self.show_button = holo.HoloButton(SHOW_TEXT, holo.GHOST, size=PANEL_BUTTON_SIZE, parent=self)
+        self.pause_button = holo.HoloButton(PAUSE_TEXT, holo.GHOST, size=PANEL_BUTTON_SIZE, parent=self)
+        self.resume_button = holo.HoloButton(RESUME_TEXT, holo.GHOST, size=PANEL_BUTTON_SIZE, parent=self)
         self.stop_button = holo.HoloButton(STOP_TEXT, holo.DANGER_GHOST, size=PANEL_BUTTON_SIZE, parent=self)
         for button, signal, words in ((self.show_button, self.showClicked, "Show the window Jarvis reads in"),
+                                      (self.pause_button, self.pauseClicked, "Pause the task's pages"),
+                                      (self.resume_button, self.resumeClicked, "Resume the task's pages"),
                                       (self.stop_button, self.stopClicked, "Stop the task")):
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             button.setAccessibleName(words)
             button.clicked.connect(signal)
         self.set_buttons(False, False)
 
-    def set_buttons(self, stop: bool, show: bool, tone: str = TONE_CYAN) -> None:
+    def set_buttons(self, stop: bool, show: bool, tone: str = TONE_CYAN, pause: str = "") -> None:
+        """``pause``: "pause" (Pause shows), "resume" (Resume shows) or "" (neither: a task that fills in no pages)."""
         self.stop_button.setVisible(bool(stop))
         self.show_button.setVisible(bool(show))
+        self.pause_button.setVisible(bool(stop) and pause == "pause")
+        self.resume_button.setVisible(bool(stop) and pause == "resume")
         self._fill = _DESK_LOOKS.get(tone, _DESK_LOOKS[TONE_CYAN])[0]
         x = 0
         high = 0
-        for button in (self.show_button, self.stop_button):
+        for button in (self.show_button, self.pause_button, self.resume_button, self.stop_button):
             if button.isHidden():
                 continue
             hint = button.sizeHint()
@@ -3045,7 +3059,8 @@ class PanelButtons(_OverlayWindow):
         self.update()
 
     def any_shown(self) -> bool:
-        return not self.stop_button.isHidden() or not self.show_button.isHidden()
+        return any(not button.isHidden() for button in (self.stop_button, self.show_button, self.pause_button,
+                                                         self.resume_button))
 
     def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
@@ -3122,6 +3137,18 @@ class TaskRow:
 
 
 @dataclass(frozen=True)
+class TaskField:
+    """One row of a Send card (agent_feed, from agent.drive.CardLine): a field's label and the value exactly as it goes,
+    or one plain line (``label`` ""): where it goes, what the page set itself. ``tag``: mono caps under it, and
+    ``amber``: it needs the owner's eye (a value from their mail, files or calendar; a form going elsewhere)."""
+
+    label: str
+    value: str = ""
+    tag: str = ""
+    amber: bool = False
+
+
+@dataclass(frozen=True)
 class TaskContent:
     kicker: str
     body: str = ""
@@ -3131,6 +3158,85 @@ class TaskContent:
     rows: tuple[TaskRow, ...] = ()
     show_text: str = SHOW_TEXT
     folder_text: str = "Folder"
+    fields: tuple[TaskField, ...] = ()     # a Send card's rows, under its words (they scroll with them)
+
+
+def _laid_lines(text: str, font: QFont, width: float, line: float) -> tuple[QTextLayout, float]:
+    """``text`` wrapped at word boundaries, or anywhere in a long word: every character on show."""
+    layout = QTextLayout(text, font)
+    option = QTextOption()
+    option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+    layout.setTextOption(option)
+    layout.beginLayout()
+    y = 0.0
+    while True:
+        made = layout.createLine()
+        if not made.isValid():
+            break
+        made.setLineWidth(max(1.0, float(width)))
+        made.setPosition(QPointF(0.0, y))
+        y += line
+    layout.endLayout()
+    return layout, y
+
+
+class _FieldRow(QWidget):
+    """One TaskField: its label (small), the value whole and wrapped, never cut, and its tag in amber caps."""
+
+    def __init__(self, item: TaskField, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.item = item
+        self._label_font = hud.body_font(12)
+        self._value_font = hud.body_font(14)
+        self._tag_font = hud.mono_font(10, 500, 0.12)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAccessibleName(item.label or item.value)
+        self.setAccessibleDescription(f"{item.value} {item.tag}".strip() if item.label else item.tag)
+
+    def value_text(self) -> str:
+        return (self.item.value or EMPTY_VALUE) if self.item.label else self.item.value
+
+    def height_for(self, width: int) -> int:
+        height = FIELD_LABEL if self.item.label else 0
+        height += _laid_lines(self.value_text(), self._value_font, width, TASK_LINE)[1]
+        return math.ceil(height + (FIELD_TAG if self.item.tag else 0))
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        item = self.item
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            width = self.width()
+            y = 0.0
+            if item.label:
+                painter.setFont(self._label_font)
+                painter.setPen(QColor(holo.AMBER_TX2 if item.amber else holo.INK_3))
+                painter.drawText(QRectF(0, 0, width, FIELD_LABEL), int(Qt.AlignmentFlag.AlignLeft
+                                                                       | Qt.AlignmentFlag.AlignVCenter),
+                                 QFontMetricsF(self._label_font).elidedText(item.label, Qt.TextElideMode.ElideRight,
+                                                                            width))
+                y = FIELD_LABEL
+            layout, high = _laid_lines(self.value_text(), self._value_font, width, TASK_LINE)
+            empty = item.label and not item.value
+            painter.setPen(QColor(holo.INK_3 if empty else holo.AMBER_TX if item.amber else holo.INK_1))
+            layout.draw(painter, QPointF(0.0, y))
+            y += high
+            if item.tag:
+                metrics = QFontMetricsF(self._tag_font)
+                words = item.tag.upper()
+                wide = min(float(width), metrics.horizontalAdvance(words) + 16)
+                box = QRectF(0.5, y + 3.5, wide - 1, FIELD_TAG - 6)
+                painter.setPen(QPen(holo.alpha(holo.AMBER, 0.7), 1.0))
+                painter.setBrush(holo.alpha(holo.AMBER, 0.12))
+                painter.drawRoundedRect(box, box.height() / 2, box.height() / 2)
+                painter.setFont(self._tag_font)
+                painter.setPen(QColor(holo.AMBER_HI))
+                painter.drawText(box.adjusted(8, 0, -8, 0), int(Qt.AlignmentFlag.AlignLeft
+                                                               | Qt.AlignmentFlag.AlignVCenter),
+                                 metrics.elidedText(words, Qt.TextElideMode.ElideRight, max(0.0, wide - 16)))
+        finally:
+            painter.end()
 
 
 class _OutputName(QWidget):
@@ -3171,6 +3277,7 @@ class TaskCard(ResultCard):
         self.body = _PlainBody(self._column)
         self._names: list[QWidget] = []
         self._row_notes: dict[int, _OutputName] = {}     # a row's plain words, by its place
+        self._fields: list[_FieldRow] = []               # a Send card's rows
         self._column_rows: list[list[QAbstractButton]] = []    # choices in the scrolling column, when the room is short
         self.scroll = QScrollArea(self)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -3194,10 +3301,13 @@ class TaskCard(ResultCard):
         for button in [*self._buttons.values(), *self._row_buttons.values()]:
             button.hide()
             button.deleteLater()
-        for name in [*self._names, *self._row_notes.values()]:
+        for name in [*self._names, *self._row_notes.values(), *self._fields]:
             name.hide()
             name.deleteLater()
         self._buttons, self._row_buttons, self._names, self._row_notes = {}, {}, [], {}
+        self._fields = [_FieldRow(item, self._column) for item in content.fields]
+        for row in self._fields:
+            row.show()
         for spec in content.buttons:
             self._buttons[spec.key] = self._new_button(spec.key, spec.text, spec.variant, holo.SIZE_MD, spec.text)
         for index, row in enumerate(content.rows):
@@ -3326,13 +3436,21 @@ class TaskCard(ResultCard):
 
     def _column_height(self, width: int) -> int:
         height = self.body.height_for(width)
+        height += sum(FIELD_GAP + row.height_for(width) for row in self._fields)
         height += 10 + TASK_ROW * len(self._names) + TASK_ROW_NOTE * len(self._row_notes) if self._names else 0
         return height + (14 + self._rows_height(self._column_rows) if self._column_rows else 0)
 
     def _place_column(self, width: int, height: int) -> None:
         self._column.setFixedSize(width, height)
         self.body.setGeometry(0, 0, width, self.body.height_for(width))
-        y = self.body.height() + 10
+        y = self.body.height()
+        for row in self._fields:
+            y += FIELD_GAP
+            high = row.height_for(width)
+            row.setGeometry(0, y, width, high)
+            y += high
+        fields_end = y
+        y += 10
         for index, (row, name) in enumerate(zip(self._task.rows, self._names)):
             right = width + holo.HoloButton.MARGIN
             for key in (row.folder_key, row.show_key):
@@ -3350,7 +3468,7 @@ class TaskCard(ResultCard):
                 note.show()
                 y += TASK_ROW_NOTE
         if self._column_rows:                            # (only a question's choices: it has no outputs)
-            y = self.body.height() + 14
+            y = fields_end + 14
             margin = holo.HoloButton.MARGIN
             for row in self._column_rows:
                 x = -margin
@@ -3359,6 +3477,10 @@ class TaskCard(ResultCard):
                     button.setGeometry(x, y - margin, hint.width(), hint.height())
                     x += hint.width() - 2 * margin + holo.BUTTON_GAP
                 y += holo.SIZE_MD + 6
+
+    def field_rows(self) -> list[tuple[str, str, str, bool]]:
+        """A Send card's rows as they show: (label, value, tag, amber) (tests and the harness)."""
+        return [(row.item.label, row.value_text(), row.item.tag, row.item.amber) for row in self._fields]
 
     def row_notes(self) -> list[str]:
         """The plain words under its rows, as they show (tests and the harness)."""

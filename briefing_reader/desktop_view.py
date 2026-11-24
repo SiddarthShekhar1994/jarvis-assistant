@@ -70,6 +70,9 @@ def consent_task_row(engine: str, others: str, *, local: bool) -> str:
     ([voice] engine; owner decision 2026-11-12): CONSENT_VOICE_LOCAL while it is made on this PC."""
     row = CONSENT_TASK_ROW.format(engine=engine, others=others)
     return row.replace(CONSENT_VOICE_ONLINE, CONSENT_VOICE_LOCAL) if local else row
+# Filling in pages (build plan item 7, decision 14): the row consent version 4 adds, while tasks and [agent] drive are on.
+CONSENT_DRIVE_ROW = ("He may fill in public pages in his own window; nothing typed leaves before your click on its "
+                     "card.")
 NEW_TAG_TEXT = "NEW"
 CONSENT_FOOT = "You can turn it off again in Settings \u203a Desktop."
 NOT_NOW_TEXT = "Not now"
@@ -233,6 +236,7 @@ class ConsentCard(QWidget):
         self._entry = ""
         self._opener: QWidget | None = None
         self._task_row: _Bullet | None = None
+        self._drive_row: _Bullet | None = None
         self.panel = _Panel(self)
         self.kicker = _Kicker(CONSENT_KICKER)
         self.title = body_label(CONSENT_TITLE, "screen_title", holo.AMBER_TX, wrap=False, name="desktopConsentTitle")
@@ -280,10 +284,12 @@ class ConsentCard(QWidget):
         """What the owner asked for when it opened (desktop_ui.ENTRIES)."""
         return self._entry
 
-    def open_card(self, entry: str, *, updated: bool = False, task_row: str = "", task_new: bool = False) -> None:
+    def open_card(self, entry: str, *, updated: bool = False, task_row: str = "", task_new: bool = False,
+                  drive_row: str = "", drive_new: bool = False) -> None:
         """Show the card for ``entry`` over the window's screen, the focus on Not now (the one before kept);
         ``updated``: Phase 1's card was turned on, so its new rows are marked "NEW". ``task_row``: the agent's row,
-        while [agent] is on ("": none, and the card is as it was), marked "NEW" with ``task_new``."""
+        while [agent] is on ("": none, and the card is as it was), marked "NEW" with ``task_new``. ``drive_row``:
+        filling in pages (version 4), after it, marked "NEW" with ``drive_new``."""
         if not self.isVisible():
             focus = self.window().focusWidget()
             self._opener = focus if focus is not None and not self.isAncestorOf(focus) else None
@@ -291,6 +297,7 @@ class ConsentCard(QWidget):
         for index, row in enumerate(self.rows):
             row.set_new(updated and index in CONSENT_NEW)
         self._set_task_row(task_row, task_new)
+        self._set_drive_row(drive_row if task_row else "", drive_new)
         self.set_problem("")
         self.setGeometry(self.parentWidget().rect())
         self._place_panel()
@@ -311,6 +318,19 @@ class ConsentCard(QWidget):
             self._task_row.setVisible(bool(text))
             self._task_row.set_new(bool(text) and new)
 
+    def _set_drive_row(self, text: str, new: bool) -> None:
+        """Filling in pages' row, right after the agent's: made when it first shows."""
+        if self._drive_row is None and text and self._task_row is not None:
+            self._drive_row = _Bullet(text)
+            column = self.panel.layout()
+            at = column.indexOf(self._task_row) + 1
+            column.insertSpacing(at, ROW_GAP)
+            column.insertWidget(at + 1, self._drive_row)
+        if self._drive_row is not None:
+            self._drive_row.label.setText(text)
+            self._drive_row.setVisible(bool(text))
+            self._drive_row.set_new(bool(text) and new)
+
     def close_card(self, restore_focus: bool = True) -> None:
         if not self.isVisible():
             return
@@ -330,8 +350,8 @@ class ConsentCard(QWidget):
         return [row.label.text() for row in self._all_rows() if row.is_new()]
 
     def _all_rows(self) -> list[_Bullet]:
-        shown = self._task_row is not None and not self._task_row.isHidden()
-        return [*self.rows, *([self._task_row] if shown else [])]
+        extra = [row for row in (self._task_row, self._drive_row) if row is not None and not row.isHidden()]
+        return [*self.rows, *extra]
 
     def texts(self) -> list[str]:
         """Every text the card shows (tests and the harness)."""
@@ -345,7 +365,8 @@ class ConsentCard(QWidget):
         self.panel.setFixedWidth(width)
         self.panel.adjustSize()
         height = self.panel.sizeHint().height()
-        if self._task_row is not None and not self._task_row.isHidden():    # a long row: its wrapped lines all show
+        if any(row is not None and not row.isHidden() for row in (self._task_row, self._drive_row)):
+            # a long row: its wrapped lines all show
             height = max(height, self.panel.layout().totalHeightForWidth(width))
         self.panel.setGeometry(int((self.width() - width) / 2), int(max(16, (self.height() - height) / 2)),
                                int(width), int(height))

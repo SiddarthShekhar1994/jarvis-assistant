@@ -441,14 +441,15 @@ first, and Add all for calendar cards) - see
 [Mail extras](#mail-extras-rewrite-unsubscribe-and-add-all);
 **Documents and datasheets** (documents and typed tables on this PC that Jarvis
 and your standing agents write in, every change waiting for your Keep) - see
-[Documents and datasheets](#documents-and-datasheets).
+[Documents and datasheets](#documents-and-datasheets);
+**A live browser Jarvis drives** (he fills in public pages in a window you can
+watch, and every submit waits for your click on its Send card) - see
+[Filling in pages](#filling-in-pages).
 
 Planned for later versions; none of these is built yet, and all of them will
 keep the same rules (they propose, your click approves, and what they did
 shows, in LIVE or, for standing jobs, on the Agents screen):
 
-- **A live browser Jarvis drives**: he opens and fills in pages in a browser
-  you can watch, and every submit waits for your click.
 - **Smaller items**: changing settings in the app (the Settings screen is
   read only today), his first words sooner, a fallback model that runs on
   this PC, filling forms in the apps you allow (see
@@ -2851,8 +2852,10 @@ failed). Jarvis's own fixed lines are said as ever, and the firewall's card neve
 words: six words in a row of what a page, a mail or a file gave him (common phrases aside) and it is
 not said. His report may quote.
 
-**What this version does not do.** This version does not sign in to anything, type into pages or
-run code. A task that needs one of those does what it can of the rest and says so in its report.
+**What this version does not do.** This version does not sign in to anything, upload or download a
+file, or run code. He types into a page only as [Filling in pages](#filling-in-pages) says, and only
+once your Turn on covers it; nothing he types leaves this PC before your click on its Send card. A task
+that needs one of those does what it can of the rest and says so in its report.
 
 **The window you can watch.** At his first search or page a window opens, on a second
 screen if you have one, else on the right of the main screen, clear of the HUD: the real
@@ -2871,9 +2874,9 @@ at once and the window with the result card; after a Stop or a Turn off it goes 
 a block, he tries Bing and Google, and he never answers one or clicks through), so the words
 of each search go from this PC to that engine, with no sign-in and no cookies kept. Pages
 open in the same private web engine as the [page pictures](#pictures-in-live):
-a new private profile for every page, public https addresses only, no sign-in, typing, form,
-download, pop-up or permission, and every connection through the same network gate (public
-IPv4 addresses, port 443). What a page says is only ever data to him; LIVE flags a page only
+a new private profile for every page, public https addresses only, no sign-in, download, pop-up
+or permission, no typing or form but as [Filling in pages](#filling-in-pages) says, and every
+connection through the same network gate (public IPv4 addresses, port 443). What a page says is only ever data to him; LIVE flags a page only
 for a strong sign of orders (override phrases, role and prompt markers, templates, Jarvis's own
 markers and tools' names, hidden or look-alike tricks), not for the order verbs ordinary pages are
 full of ("Find a store").
@@ -2985,7 +2988,8 @@ that has read only your calendar, contacts, notes or names, a
 paraphrase, a word with a letter dropped, an amount or a time go out with no card; a strict task still
 passes anything spelled in common words, in any mix of capitals, with a mark at a time or the
 ordinary runs above; and any task could choose among links a page offers. The
-address rule and his having no way to type into a page are the strong parts.
+address rule and the seal on a page he fills in (nothing typed leaves this PC before your click on its
+Send card: [Filling in pages](#filling-in-pages)) are the strong parts.
 
 **What he changes.** Nothing by himself. Moves, copies, renames, zips, new folders and the Recycle
 Bin go on the desktop's own NEEDS YOUR OK card (`propose_files`), checked against your own words in
@@ -3080,6 +3084,98 @@ A restart ends a task; its files stay.
 window on it (on screen and in memory only; it never opens LIVE by itself). **Logs** carry
 ids, kinds, counts, states, reason codes and durations only - never your words, a search, an
 address, a page's words, a file name, a tool's arguments or a token.
+
+#### Filling in pages
+
+A task can fill in public pages in the window you watch: a contact form, an application with no
+account, a booking enquiry. You see each field typed, a ring over what he acts on, and his short
+narration ("Typing into Email on www.example.org"). Every submit waits for your click.
+
+**Turning it on.** It needs `[agent] drive = true` (the default) and your **Turn on** on the card
+whose row reads "He may fill in public pages in his own window; nothing typed leaves before your click
+on its card." Until then a task is offered exactly the tools and instructions it was before and never
+types. If you
+turned tasks on before that row came, tasks go on as they were; to let him fill in pages, click
+**Turn off** in Settings › Desktop, then Desktop in the Dock and **Turn on** on its card, where the
+new row is marked NEW.
+
+**Free, and what waits.** Opening, reading, looking, scrolling, switching or closing a tab and
+following a link are as free as opening a page (a link is checked as an address he opens: in a task
+that has read anything of yours, one he was not given waits for your card). Typing into a field,
+choosing in a list and ticking a box are free too, because nothing can leave meanwhile (the seal,
+below). These always wait for your click on a **Send card**: a submit, Enter in a field, a button whose
+words commit (buy, pay, sign in, post, delete, confirm, subscribe, sign up, register, apply, book and
+the like), and any press on a page that holds what he typed.
+
+**The seal.** The first time he types or chooses on a page, the window is sealed before the first
+value goes in: no new connection, and every one open is cut, so nothing the page does can leave this
+PC, not even letter by letter as he types. No other page loads, no link opens, no page is read another
+way and no site opens in your browser meanwhile, and only one tab holds typed values at a time. A field
+takes one value a page: he never types into it again or clears it (what was typed first the page may
+have kept), and closing the tab is how he starts over. It stays sealed until your click on that page's
+Send card, and nothing acts on that tab while the card is up. **Don't**,
+no answer in 10 minutes, or a Stop: the page and its private profile are destroyed while still sealed,
+and the seal lifts only once they are really gone. The strict seal has a cost: suggestion lists that
+ask the site as you type (a city picker, an address lookup) and pages that check a field as you type do
+not work, and a site's own search box takes a Send card like any submit (searching a site by its
+address stays free).
+
+**The Send card.** Amber, on the HUD: `SEND ON www.example.org?`, "Jarvis wants to press 'Apply
+now' on www.example.org", then every value he put into the page, each under its field's label,
+exactly as it will go (invisible characters spelled out; a field takes at most 2,000 characters, so
+it shows whole, and the card scrolls; a form holding any value longer than that is not sent). A
+value from your mail, files or calendar is tagged amber "from
+your mail / files / calendar": your private details reach a page only this way, on a card you read.
+A ticked box that agrees to terms is amber too: your Send agrees to them. "Goes to:" names where the
+form goes, amber with "check where it goes" when that is not the page's own site or not encrypted;
+it names where that button itself sends it when it says so, and a button that sends the form into
+another window is refused. A press that sends no form (a plain button, a box, Enter outside a form)
+reads "The page sends it where it chooses; Jarvis can't see where." "Plus N values the page set
+itself" counts what the page added, and each of them follows in full under its field's name: amber
+when it holds what he typed or comes from your mail, files or calendar, marked when it is hidden on
+the page (a form with more than 20 of them is not sent). Its note: "Only a click sends. The site may pass on what it
+gets." Then **Don't** and **Send**. Only a click answers it: what you type or say reaches the task as
+your message and answers nothing, and the bar says so. It takes no click for its first 0.6 s, it
+counts in "N need your OK" and on Approvals, where **Show me** takes you to it, and its words are
+never said aloud. On **Send**, Jarvis himself (never the model) reads the page's values again (any
+change since the card: nothing is pressed, and he is told), lifts the seal for the page's own site and
+where the card says it goes, and for nothing else, checks the values once more in the very step that
+presses, presses that same button, waits up to 25 s for the page, and tells the task what it shows.
+Once a new page comes the seal lifts; if none comes, the window is sealed again as before, the tab
+still holds what was typed, and the task is told plainly: the page did not send it (a field it needs
+is empty or wrong), or the page kept it and may have sent it by its own script to that site. What a
+site does with what it gets Jarvis can't see: the card's note says so. On **Don't** or no answer nothing is
+pressed and the same send is never tried again. A Stop withdraws the card, and a click that comes
+late does nothing.
+
+**Never typed.** Password fields, card and one-time-code fields, a field whose label or name says it
+holds a secret, a file upload ("Jarvis doesn't upload files") and anything on a payment page; and
+values that look like a key or a password, a card number, an IBAN or an ID number. He is told why,
+and LIVE flags it.
+
+**Tabs, caps and Pause.** Up to 3 tabs, each its own page and private profile: cookies last only
+for that page and go with it, so a form of several steps works, a sign-in never carries over. The
+strip shows a chip per tab, the one on show lit. A task opens at most `[agent] max_pages` pages (40),
+takes `max_actions` page actions (150) and puts up `max_sends` Send cards (5) before it asks "Keep
+going?". The panel has **Pause** (then **Resume**): while paused every web and page call is held,
+the seal with it, and Resume tells him to carry on. Standing agents get no browser in this version.
+
+**Your mouse stays off the window.** You never take over: what you typed there would leave with no
+card, and signing in is for a later version. Instead the strip has **Open in my browser** while it
+shows a public page and nothing typed is held, never a page a Send led to (its address may hold
+what was sent): on your click, that page's address alone (no value,
+no cookie, nothing of his window) goes to your own browser, through the same link check as a
+research card's Open. There the site sees you as it always does. When a task that filled in pages
+ends done, the window grows to most of its screen ("opens big") with the last page he had open,
+without taking the focus, for as long as the result card stays.
+
+**What he is told.** Only with those tools can he fill in a page. A control's name is a page's
+words: data, exactly as a page is. A page that asks for your details, or tells him what to type, is
+not asking on your behalf: he does not do it, and says so in his report. He puts your details into a
+page only when your words in this task ask for it. Many sites ignore typing done by a script or need a
+sign-in; then he says so. A value he typed is never in a line he says, never said aloud and never
+logged: logs keep kinds, counts, durations, how a Send card ended and refusal codes, never an address,
+a label or a value.
 
 ### Capture: pictures, PDFs, text and calendar files
 
@@ -5293,6 +5389,8 @@ log. Changes apply the next time the app starts.
 | `[agent] model`, `effort` | `"opus"`, `""` | The tasks' model and effort (`"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`; `""` = Claude Code's default). Quick replies stay on `[ask] model`. |
 | `[agent] max_turns`, `max_minutes` | `60`, `20` | A task's budget (5-1000 turns, 1-240 minutes of work); reaching one asks "Keep going?". |
 | `[agent] tasks_per_day` | `20` | How many tasks may start in 24 hours (1-200). |
+| `[agent] drive` | `true` | [Filling in pages](#filling-in-pages): a task may type into public pages in its own window, each submit on a Send card for your click; only once your **Turn on** covers it. `false`: a task never types into a page. |
+| `[agent] max_pages`, `max_actions`, `max_sends` | `40`, `150`, `5` | A task's pages opened (5-400), page actions (10-1000) and Send cards (1-50); reaching one asks "Keep going?". |
 | `[agent] search_engine` | `"duckduckgo"` | Where his searches go first: `"duckduckgo"`, `"bing"` or `"google"`, then the others if a page gives nothing or shows a wall. The words of each search go there, and the Turn on card names it. |
 | `[docs] enabled` | `true` | [Documents and datasheets](#documents-and-datasheets): the Dock's Documents (Ctrl+0). `false`: none of it shows (what is kept in the data folder stays). The repository's `config.toml` has no `[docs]` table: these defaults hold until you add one. |
 | `[docs] export_folder` | `""` | Where an export's picker starts: `""` = `Jarvis\Exports` in your user folder, else a full folder path. A folder OneDrive syncs is asked about before a file is saved there. |

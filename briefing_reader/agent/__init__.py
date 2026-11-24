@@ -18,9 +18,13 @@ feed, whose windows are in hud_overlay and agent_feed, and A4, the owner's thing
 * ``web``: what a search and a page read are: the engines, the scripts Jarvis runs in an isolated world, the numbered
   addresses, a run's use of the window. ``firewall``: the rules for what may go out to the web (taint, strict, seen
   addresses).
+* ``drive``: filling in pages (build plan item 7): a page's controls by ref, what is never typed, the seal before the
+  first value, the Send card that alone lets typed values leave, tabs and the caps. Its tools (tools.DRIVE_TOOLS) are
+  offered only once the owner turned them on.
 * ``browser``: the window the owner watches, on the page snapshots' private web engine and network gate. Qt, GUI thread.
 * ``runner``: one run: the process, its stream checked event by event, messages over stdin, waits that end the turn.
-* ``assets``: ``agent_prompt.md`` and ``agent_settings.json``; ``fetch_prompt.md`` and ``fetch_settings.json``.
+* ``assets``: ``agent_prompt.md`` (``agent_prompt_drive.md``: the same with FILLING IN PAGES, for a task offered the
+  drive tools) and ``agent_settings.json``; ``fetch_prompt.md`` and ``fetch_settings.json``.
 
 Nothing in this package but ``browser`` imports Qt, nothing starts a process or a shell by itself
 (tests/test_agent_guard.py runs the desktop package's scan over it; the run's one process comes through ask.cli's runner

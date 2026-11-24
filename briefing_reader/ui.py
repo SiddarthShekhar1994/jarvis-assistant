@@ -11424,8 +11424,14 @@ class AppController(QObject):
 
             first, *others = (engine.name for engine in engine_order(self.config.agent.search_engine))
             task_row = consent_task_row(first, " and ".join(others), local=is_local(self.config))
+        drive_row = ""
+        if desktop.drive_on():                               # build plan item 7: filling in pages (version 4)
+            from .desktop_view import CONSENT_DRIVE_ROW
+
+            drive_row = CONSENT_DRIVE_ROW
         card.open_card(entry, updated=desktop.consent_given() and not desktop.consent_current(), task_row=task_row,
-                       task_new=desktop.consent_given() and not desktop.consent_for_tasks())
+                       task_new=desktop.consent_given() and not desktop.consent_for_tasks(), drive_row=drive_row,
+                       drive_new=desktop.consent_given() and not desktop.consent_for_drive())
         logger.info("Desktop: the first-run card shows (%s)", entry)
 
     def _show_desktop_consent_later(self) -> None:
@@ -11812,7 +11818,8 @@ class AppController(QObject):
         try:
             controller = (factory or agent_ui.AgentController)(self.config, planner, live=self.live,
                                                                consent=desktop.consent_given,
-                                                               tasks_consent=desktop.consent_for_tasks, parent=self,
+                                                               tasks_consent=desktop.consent_for_tasks,
+                                                               drive_consent=desktop.consent_for_drive, parent=self,
                                                                window_avoid=self._hud_reach, things=things)
         except Exception as exc:  # noqa: BLE001 - Jarvis works without tasks
             logger.warning("Could not set up tasks (%s)", type(exc).__name__)
@@ -11934,10 +11941,11 @@ class AppController(QObject):
         """A question for the owner: its card waits on the HUD (agent_feed); on the caption and in the conversation, in
         amber (a decision waits). What is typed next answers ask_owner's (AgentController.take_request). The firewall's
         (kind "web") is never said aloud or kept on this PC, and only a click on its card answers it: its words may be
-        private. ask_owner's (kind "task") is the model's, so it goes through the voice's gate and is not kept on this
+        private. The Send card's (kind "submit": a page's button words and host) is the same. ask_owner's (kind "task")
+        is the model's, so it goes through the voice's gate and is not kept on this
         PC either. Keep going is said, and answered by a click too. With the HUD away, those only a click answers say on
         screen how to reach the card: nothing else there shows that one waits for a click."""
-        web_card, asked = question.kind == "web", question.kind == "task"   # (a file card says only that it waits)
+        web_card, asked = question.kind in ("web", "submit"), question.kind == "task"   # (a file card: only that it waits)
         feed = getattr(self, "task_feed", None)
         reach = feed.reach_words() if feed is not None and not asked else ""
         shown = f"{question.text} {reach}" if reach else question.text

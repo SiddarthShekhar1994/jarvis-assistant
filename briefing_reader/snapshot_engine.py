@@ -58,8 +58,9 @@ starting the engine for the board (ensure_engine, warm_up) never opens a usable 
 agent page can be asked for in this run (set_network_use: [live] page pictures off and [agent] off), Chromium starts
 with the dead proxy, as on a test platform, and no gate is made at all. Otherwise the gate binds SEALED
 (ConnectGate.seal(True), before it listens: reason "start") and is unsealed only by the code that takes the first page
-picture or agent page (PageCamera.shoot -> _start_engine(page=True)); the agent's own seal (seal_gate: a page it wrote
-is open) is a second reason, and the gate is usable only with none. When the gate cannot bind, the board still starts,
+picture or agent page (PageCamera.shoot -> _start_engine(page=True)); the agent's own seals (seal_gate: a page it wrote
+is open; seal_drive: a page holds what Jarvis typed, with cut_gate ending every connection open then) are other
+reasons, and the gate is usable only with none. When the gate cannot bind, the board still starts,
 with the dead proxy (a page picture in that run says R_ENGINE_FAILED, as it did before).
 
 Logging: counts, kinds and times only ("Page snapshot: taken in 2.3 s (1 of 2 for this research,
@@ -113,13 +114,25 @@ _SETTINGS_ON = ("JavascriptEnabled", "WebRTCPublicInterfacesOnly", "PlaybackRequ
 # elsewhere (its own origin; this private profile's storage and cookies); "allow-popups" lets the
 # seed open the window at all (the page itself still gets none: no window is made for it).
 SANDBOX = "allow-scripts allow-same-origin allow-popups"
+# The one other sandbox there is: a page Jarvis fills in for the owner (agent.browser, drive tabs only; never a page
+# picture, a research page or a task's own file) may send a form, which "allow-forms" lets it do. Nothing typed goes:
+# the window is sealed from the first value until the owner's click on its Send card (agent.drive).
+DRIVE_SANDBOX = SANDBOX + " allow-forms"
+_SANDBOXES = frozenset({SANDBOX, DRIVE_SANDBOX})
 _SEED_PAGES = frozenset({"blank", "srcdoc"})   # all the seed page ever loads: about:blank, about:srcdoc
-# Run in the seed's about:blank (Jarvis's script world): the sandboxed inline frame whose script opens
-# the one pop-up (noopener: the page gets no handle on the seed).
-_SEED_SCRIPT = ("(function () { var frame = document.createElement('iframe');"
-                " frame.setAttribute('sandbox', '" + SANDBOX + "');"
-                " frame.srcdoc = '<script>window.open(\"about:blank\", \"_blank\", \"noopener\")<\\/script>';"
-                " document.documentElement.appendChild(frame); })();")
+
+
+def _seed_script(sandbox: str) -> str:
+    """Run in the seed's about:blank (Jarvis's script world): the sandboxed inline frame whose script opens the one
+    pop-up (noopener: the page gets no handle on the seed). Only the two sandboxes above; anything else is SANDBOX."""
+    sandbox = sandbox if sandbox in _SANDBOXES else SANDBOX
+    return ("(function () { var frame = document.createElement('iframe');"
+            " frame.setAttribute('sandbox', '" + sandbox + "');"
+            " frame.srcdoc = '<script>window.open(\"about:blank\", \"_blank\", \"noopener\")<\\/script>';"
+            " document.documentElement.appendChild(frame); })();")
+
+
+_SEED_SCRIPT = _seed_script(SANDBOX)
 # Run in the pop-up before the page is loaded: a sandboxed document may not set document.domain
 # ("... forbidden for sandboxed iframes"); any other answer and no page is opened.
 _SANDBOX_CHECK = ("(function () { try { document.domain = document.domain; return ''; }"
@@ -143,8 +156,12 @@ class _EngineState:
         self.no_gate = False          # Chromium started with the dead proxy though this is no test platform (nothing
                                       # could ask for a page, or the gate could not bind): no page picture in this run
         self.seals: set[str] = set()  # why the gate is sealed now: "start" (the board started the engine; the first
-                                      # page shot lifts it), "agent" (a page the agent wrote is open)
+                                      # page shot lifts it), "agent" (a page the agent wrote is open), "drive" (a
+                                      # page holds what Jarvis typed into it)
         self.gate_told = False        # what the gate was last told (sealed or not; a new gate is not sealed)
+        self.drive_hosts: frozenset[str] = frozenset()   # while the owner's Send presses: the hosts the drive seal
+                                      # lets through (only while it is the one reason: seal_drive_only)
+        self.hosts_told: frozenset[str] = frozenset()
         self.inherited_flags = ""     # QTWEBENGINE_CHROMIUM_FLAGS as inherited, before Jarvis merged his in
         self.written_flags: str | None = None   # what Jarvis wrote there (None: nothing yet)
 
@@ -157,6 +174,7 @@ _gate_factory: Callable[[], Any] = snapshot_gate.ConnectGate
 _network_use: Callable[[], bool] | None = None
 SEAL_START = "start"             # the gate bound for a page of Jarvis's own: sealed until the first page shot
 SEAL_AGENT = "agent"             # a page the agent wrote is open (agent.browser)
+SEAL_DRIVE = "drive"             # a page holds what Jarvis typed into it, until the owner's Send (agent.browser)
 
 
 def set_network_use(possible: Callable[[], bool] | bool | None) -> None:
@@ -343,9 +361,17 @@ def _apply_seals() -> None:
     never asked to unseal)."""
     gate = _ENGINE.gate
     want = bool(_ENGINE.seals)
+    hosts = _ENGINE.drive_hosts if _ENGINE.seals == {SEAL_DRIVE} else frozenset()
+    allow = getattr(gate, "allow", None)
+    if gate is not None and callable(allow) and hosts != _ENGINE.hosts_told and not hosts:
+        allow(())                     # narrower first: a host let through goes before anything else changes
+        _ENGINE.hosts_told = frozenset()
     if gate is not None and want != _ENGINE.gate_told:
         gate.seal(want)
         _ENGINE.gate_told = want
+    if gate is not None and callable(allow) and hosts != _ENGINE.hosts_told:
+        allow(tuple(sorted(hosts)))
+        _ENGINE.hosts_told = hosts
 
 
 def gate_sealed() -> bool:
@@ -409,6 +435,36 @@ def seal_gate(sealed: bool) -> None:
     else:
         _ENGINE.seals.discard(SEAL_AGENT)
     _apply_seals()
+
+
+def seal_drive(sealed: bool) -> None:
+    """The gate refuses every new connection while a page holds what Jarvis typed into it (agent.browser, SEAL_DRIVE):
+    a reason of its own, so a page the agent wrote going away (seal_gate) never lifts it, nor this one that."""
+    if sealed:
+        _ENGINE.seals.add(SEAL_DRIVE)
+    else:
+        _ENGINE.seals.discard(SEAL_DRIVE)
+    _apply_seals()
+
+
+def seal_drive_only(hosts: Any) -> None:
+    """The owner's Send (agent.browser.press_approved): while the drive seal is the gate's one reason, a CONNECT to
+    one of ``hosts`` goes through it and every other is refused as before (snapshot_gate.ConnectGate.allow). Empty:
+    none goes through again."""
+    _ENGINE.drive_hosts = frozenset(str(host).casefold().rstrip(".") for host in hosts or () if host)
+    _apply_seals()
+
+
+def cut_gate() -> int:
+    """Every connection open through the gate ends now (snapshot_gate.ConnectGate.cut); it keeps listening. How many
+    ended (0 too with no gate yet, or a gate that has no connections to cut: nothing is open then)."""
+    cut = getattr(_ENGINE.gate, "cut", None)
+    if not callable(cut):
+        return 0
+    try:
+        return int(cut() or 0)
+    except Exception:  # noqa: BLE001 - the seal holds either way
+        return 0
 
 
 def _judged_environ() -> Mapping[str, str]:
@@ -843,10 +899,14 @@ class PageCamera(QObject):
             return
         shot.seeded = True
         try:
-            shot.seed.runJavaScript(_SEED_SCRIPT, _ENGINE.classes.app_world)
+            shot.seed.runJavaScript(_seed_script(self._sandbox(shot)), _ENGINE.classes.app_world)
         except Exception as exc:  # noqa: BLE001
             logger.debug("Page snapshots: the private window was not opened (%s)", type(exc).__name__)
             self._end(shot, snapshots.R_ENGINE_FAILED)
+
+    def _sandbox(self, _shot: _Shot) -> str:
+        """The sandbox of this shot's window: SANDBOX (agent.browser's drive tabs get DRIVE_SANDBOX)."""
+        return SANDBOX
 
     def _adopt(self, shot: _Shot) -> Any:
         """The seed's sandboxed frame opened its pop-up: the shot's page takes it, once; anything

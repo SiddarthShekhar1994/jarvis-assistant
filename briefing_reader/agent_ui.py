@@ -21,6 +21,8 @@
                                coming back, where it is. The page goes on behind it
         worked_s(), tools_running(), live_task_id()   for the panel's clock and activity line, and Home's chip
         set_window_resting(r)  a file card waits (agent_feed): the watch window is off the screen meanwhile
+        can_pause(), paused(), pause(), resume()   the panel's Pause and Resume, only for a task that may fill in pages
+                               (agent.runner.AgentRun.pause_drive: every web and drive call is held, the seal with it)
         spoken(line, instead=), spoken_question(text), spoken_report(end, opening)
                                the one gate on the way to the voice for a line the model wrote (the module docs)
         outputs_for(end), show_output(name), output_path(name)   the result card's Show (the sealed window) and Folder
@@ -43,6 +45,7 @@
         windowHidden(bool)     the strip's Hide was clicked
         windowPlaced()         the watch window came or moved
         taskEnded(object)      a runner.AgentEnd, its {sir} filled in
+        pausedChanged(bool)    the owner's Pause (True) or Resume (False) took
 
 Events come from the run's threads through a queued signal; a Stop drops what is still on its way. Live: a TASK_AGENT
 task, with one step per tool call (the words in it stay on screen and in memory: D11), a web step with the picture of
@@ -65,6 +68,12 @@ run waits on tells it how it ended (DesktopController.tidyEnded). A Stop or a Tu
 cards at once: a card of file steps goes (one at work stops after the row on its way, with its stamp and Undo), and its
 Ask cards leave Approvals unless they were decided or are on their way. At a natural end its Ask cards stay: the report
 says what is waiting.
+
+Filling in pages (build plan item 7): only when the owner's Turn on covers it (``drive_consent``: consent version 4,
+desktop_ui) and [agent] drive is on does policy.offered give a run the drive tools. Only then is its session an
+agent.drive.DriveSession (with the [agent] caps), its firewall judges a click on a link as open_page (``link_of``), its
+browser client is made with ``drive=True`` (tabs, the seal, forms may be sent after the owner's Send), and at a done
+result the window "opens big". Before that, a task is exactly what it was: the same tools, session, window and end.
 
 The web (part A2): each run has its own browser client (agent.browser), session and firewall. The window comes only with
 the first web or show step; when a run ends its page goes at once and the window a little later, or when the result card
@@ -94,13 +103,14 @@ from . import pictures, snapshot_engine
 from .agent import fetch as agent_fetch
 from .agent import firewall as agent_firewall
 from .agent import owner as agent_owner
+from .agent import drive as agent_drive
 from .agent import policy
 from .agent import runner as agent_runner
 from .agent import web
 from .agent.browser import BrowserClient
 from .agent.fetch import Fetcher
 from .agent.runner import AgentEnd, AgentEngine, AgentEvent, AgentRun, OwnerQuestion, Timing
-from .agent.tools import ERROR_CODES, OUTCOME_DONE, OUTCOME_FAILED, OUTCOME_PARTIAL, Registry, Tool
+from .agent.tools import ERROR_CODES, OUTCOME_DONE, OUTCOME_FAILED, OUTCOME_PARTIAL, TIER_DRIVE, Registry, Tool
 from .agent.web import WebSession
 from .agent.workspace import TaskFolder, WorkspaceRefused, check_name, workspace_root
 from .ask.context import kept_lines
@@ -467,9 +477,11 @@ class AgentController(QObject):
     questionExpired = Signal(object)
     windowHidden = Signal(bool)
     windowPlaced = Signal()
+    pausedChanged = Signal(bool)
 
     def __init__(self, config: Any, planner: Any, *, live: Any = None, consent: Callable[[], bool] = lambda: False,
                  tasks_consent: Callable[[], bool] | None = None,
+                 drive_consent: Callable[[], bool] = lambda: False,
                  environ: Mapping[str, str] | None = None, clock: Callable[[], float] = time.monotonic,
                  now: Callable[[], datetime] = lambda: datetime.now().astimezone(), timing: Timing = Timing(),
                  tools: Sequence[Tool] | None = None, parent: QObject | None = None,
@@ -481,6 +493,8 @@ class AgentController(QObject):
         self.live = live
         self._consent = consent           # the owner's Turn on: a first planner run may offer a task
         self._tasks_consent = tasks_consent or consent   # ... the card that lists tasks: a task may start
+        self._drive_consent = drive_consent  # ... the card that lists filling in pages (version 4): the drive tools
+        self._drive_run = False           # this run was given the drive tools
         self._environ = environ
         self._clock = clock
         self._now = now
@@ -563,9 +577,13 @@ class AgentController(QObject):
         things = self._things
         connected = things.connected() if things is not None else frozenset()
         registry = Registry(self._tools if self._tools is not None
-                            else policy.offered(self.config, connected=connected))
-        session = self._new_session()
-        self.firewall = agent_firewall.WebFirewall(session.book)
+                            else policy.offered(self.config, connected=connected,
+                                                drive_consent=self._drive_allowed()))
+        drive = any(registry.tool(name).tier == TIER_DRIVE for name in registry.names())
+        self._drive_run = drive
+        session = self._new_session(drive)
+        self.firewall = agent_firewall.WebFirewall(
+            session.book, link_of=session.link_address if isinstance(session, agent_drive.DriveSession) else None)
         owner = None
         if things is not None:
             things.ready()
@@ -621,18 +639,30 @@ class AgentController(QObject):
     def spoken_report(self, end: AgentEnd, opening: str) -> str:
         return self.spoken(opening, REPORT_LINES.get(end.outcome, REPORT_LINES[OUTCOME_PARTIAL]))
 
-    def _new_session(self) -> WebSession:
+    def _drive_allowed(self) -> bool:
+        """The owner's Turn on covers filling in pages (fail-closed: anything odd is no)."""
+        try:
+            return self._drive_consent() is True
+        except Exception as exc:  # noqa: BLE001 - unknown: no
+            logger.warning("Agent: the OK for filling in pages could not be read (%s); taken as no", type(exc).__name__)
+            return False
+
+    def _new_session(self, drive: bool = False) -> WebSession:
         """This run's use of the window. One window at a time: what the last run left goes first. Nothing of the web
-        engine starts until the first web step."""
+        engine starts until the first web step. A run given the drive tools gets a DriveSession with the [agent] caps,
+        and a window that may hold tabs and send a form after the owner's Send."""
         self._close_browser()
-        self._browser = self._new_browser()
+        self._browser = self._new_browser(drive=drive)
+        if drive:
+            return agent_drive.DriveSession(self._browser, self.config.agent.search_engine, policy.drive_caps(self.config))
         return WebSession(self._browser, self.config.agent.search_engine)
 
-    def _new_browser(self) -> Any:
+    def _new_browser(self, *, drive: bool = False) -> Any:
         make = self._browser_factory or BrowserClient
         desktop = getattr(self.config, "desktop", None)
+        options: dict[str, Any] = {"drive": True} if drive else {}
         browser = make(self, avoid=self._window_avoid,
-                       hide_from_capture=bool(getattr(desktop, "hide_from_capture", True)))
+                       hide_from_capture=bool(getattr(desktop, "hide_from_capture", True)), **options)
         for name, slot in (("hideAsked", lambda: self.windowHidden.emit(True)),
                            ("windowPlaced", self.windowPlaced.emit)):
             signal = getattr(browser, name, None)
@@ -755,6 +785,33 @@ class AgentController(QObject):
     def close_window(self) -> None:
         """The result card went: the window that stayed with it goes."""
         self._close_browser()
+
+    # ---- the panel's Pause and Resume (a task that may fill in pages) -----------------------------------------
+
+    def can_pause(self) -> bool:
+        """The running task was given the drive tools: its panel has Pause (or Resume)."""
+        run = self._run
+        return run is not None and run.ended is None and self._drive_run and not self._stopping
+
+    def paused(self) -> bool:
+        run = self._run
+        return run is not None and bool(getattr(run, "owner_paused", False))
+
+    def pause(self) -> bool:
+        """The owner's Pause: every web and drive call is held from now (the seal holds). False: nothing changed."""
+        run = self._run
+        if not self.can_pause() or not run.pause_drive():
+            return False
+        self.pausedChanged.emit(True)
+        return True
+
+    def resume(self) -> bool:
+        """The owner's Resume: the calls go again and the model is told."""
+        run = self._run
+        if not self.can_pause() or not run.resume_drive():
+            return False
+        self.pausedChanged.emit(False)
+        return True
 
     def worked_s(self) -> float:
         """How long this task has worked (the clock rests while the owner is waited for)."""
@@ -910,7 +967,8 @@ class AgentController(QObject):
             self.limitPaused.emit(False)
         elif kind == agent_runner.E_QUESTION and event.question is not None:
             # The firewall's card shows the exact words or address, whatever they are.
-            question = (event.question if event.question.kind == agent_runner.Q_WEB
+            # So does the Send card: the button's words and every value exactly as they are.
+            question = (event.question if event.question.kind in (agent_runner.Q_WEB, agent_runner.Q_SUBMIT)
                         else replace(event.question, text=self._words(event.question.text)))
             feed.asked(question)
             self.questionAsked.emit(question)
@@ -932,7 +990,12 @@ class AgentController(QObject):
         self._withdraw(cards=end.outcome == agent_runner.OUTCOME_STOPPED or end.code.startswith(GUARD))
         self._owner = None
         if self._browser is not None:     # its page goes now; its window later, or with the result card: at once on a Stop
-            self._browser.end_run(linger=end.outcome != agent_runner.OUTCOME_STOPPED, hold=self.hold_window)
+            linger = end.outcome != agent_runner.OUTCOME_STOPPED
+            if self._drive_run and end.outcome == OUTCOME_DONE:   # the result's page "opens big" (item 7, decision 13)
+                self._browser.end_run(linger=linger, hold=self.hold_window, big=True)
+            else:
+                self._browser.end_run(linger=linger, hold=self.hold_window)
+        self._drive_run = False
         if self.last_folder is not None:
             self.last_folder.discard_if_empty()   # a task that wrote nothing leaves nothing
         feed, self._feed = self._feed, None

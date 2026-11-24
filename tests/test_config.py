@@ -303,6 +303,9 @@ clock = "24h"
 """
 
 
+AGENT_DRIVE_KEYS = ("drive", "max_pages", "max_actions", "max_sends")
+
+
 class ConfigFileTests(ProjectTestCase):
     def test_values_read_from_file(self) -> None:
         self.write_config(FULL_CONFIG)
@@ -375,7 +378,9 @@ class ConfigFileTests(ProjectTestCase):
             "ui": {f.name for f in dataclasses.fields(config.UiConfig)},
             "meetings": {f.name for f in dataclasses.fields(config.MeetingsConfig)},
             "desktop": {f.name for f in dataclasses.fields(config.DesktopConfig)},
-            "agent": {f.name for f in dataclasses.fields(config.AgentConfig)},
+            # Build plan item 7: [agent] drive, max_pages, max_actions and max_sends hold their config.py defaults
+            # until the shipped config.toml lists them (it is not changed by that build).
+            "agent": {f.name for f in dataclasses.fields(config.AgentConfig)} - set(AGENT_DRIVE_KEYS),
             "talk": {f.name for f in dataclasses.fields(config.TalkConfig)},
             "instant": {f.name for f in dataclasses.fields(config.InstantConfig)},
             "standing": {f.name for f in dataclasses.fields(config.StandingConfig)},

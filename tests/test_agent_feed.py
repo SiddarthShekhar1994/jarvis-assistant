@@ -999,6 +999,7 @@ class ConsentTests(FeedApp):
     # The card's row as the default voice (made on this PC: [voice] engine = "local") shows it; ONLINE_ROW on Ryan's.
     ROW = desktop_view.consent_task_row("DuckDuckGo", "Bing and Google", local=True)
     ONLINE_ROW = desktop_view.CONSENT_TASK_ROW.format(engine="DuckDuckGo", others="Bing and Google")
+    DRIVE_ROW = desktop_view.CONSENT_DRIVE_ROW
 
     def test_every_line_of_the_row_shows_and_it_says_what_a_task_may_read(self) -> None:
         for words in ("calendar", "mail", "contacts", "notes", "allowed folders", "waits for your click"):
@@ -1036,7 +1037,7 @@ class ConsentTests(FeedApp):
         engine = self.asked_in_the_window(2)
         self.assertFalse(self.c.agent.running)
         self.assertTrue(self.card().is_open())
-        self.assertEqual(self.card().new_rows(), [self.ROW])          # only its row is new
+        self.assertEqual(self.card().new_rows(), [self.ROW, self.DRIVE_ROW])   # only its row (and filling in) is new
         self.assertIn(self.ROW, self.card().texts())
         self.assertEqual(self.c.ask.bar.text(), TYPED)                # the words wait for Enter
         self.assertEqual(self.c.ask.bar.status(), "Tasks need your OK on the updated card first, sir - nothing was started.")
@@ -1044,8 +1045,9 @@ class ConsentTests(FeedApp):
         self.assertTrue(self.desktop.consent_current())               # what v2 allowed stays allowed
         self.card()._on_turn_on()
         settle()
-        self.assertEqual(self.desktop.consent_version(), 3)
-        self.assertEqual(self.stored().desktop_consent_version, 3)
+        # Item 7: with [agent] drive on (the default) Turn on stores the card that lists filling in pages too.
+        self.assertEqual(self.desktop.consent_version(), desktop_ui.DRIVE_CONSENT_VERSION)
+        self.assertEqual(self.stored().desktop_consent_version, desktop_ui.DRIVE_CONSENT_VERSION)
         self.assertFalse(self.card().is_open())
         self.c.ask.bar.submit()                                       # Enter: the words that waited
         self.assertTrue(wait_for(lambda: self.c.agent.running or self.c.agent.last_end is not None, timeout=10))
@@ -1056,8 +1058,8 @@ class ConsentTests(FeedApp):
         self.asked_in_the_window(1)
         self.assertTrue(self.card().is_open())
         new = self.card().new_rows()
-        self.assertEqual(len(new), 3)
-        self.assertEqual(new[-1], self.ROW)
+        self.assertEqual(len(new), 4)
+        self.assertEqual(new[-2:], [self.ROW, self.DRIVE_ROW])
         self.assertTrue(self.desktop.consent_given())
         self.assertFalse(self.desktop.consent_current())
         self.assertFalse(self.desktop.consent_for_tasks())
@@ -1071,7 +1073,7 @@ class ConsentTests(FeedApp):
         self.assertEqual(self.card().new_rows(), [])
         self.card()._on_turn_on()
         settle()
-        self.assertEqual(self.stored().desktop_consent_version, 3)
+        self.assertEqual(self.stored().desktop_consent_version, desktop_ui.DRIVE_CONSENT_VERSION)
 
     def test_on_the_hud_it_waits_for_the_window(self) -> None:
         engine = FakeEngine(whole)
@@ -1086,7 +1088,7 @@ class ConsentTests(FeedApp):
         self.back()
         settle()
         self.assertTrue(self.card().is_open())
-        self.assertEqual(self.card().new_rows(), [self.ROW])
+        self.assertEqual(self.card().new_rows(), [self.ROW, self.DRIVE_ROW])
 
     def test_turn_off_clears_it(self) -> None:
         self.make_agent(desktop_consent=3)
@@ -1312,8 +1314,9 @@ class CopyTests(unittest.TestCase):
 
         from briefing_reader.ask import cli
 
-        prompt = cli.AGENT_PROMPT_FILE.read_text(encoding="utf-8")
-        self.assertIsNone(re.search(r"\b(?:he|him|his|himself)\b", prompt, re.IGNORECASE))
+        for path in (cli.AGENT_PROMPT_FILE, cli.AGENT_DRIVE_PROMPT_FILE):
+            prompt = path.read_text(encoding="utf-8")
+            self.assertIsNone(re.search(r"\b(?:he|him|his|himself)\b", prompt, re.IGNORECASE), path.name)
         shown = [desktop_view.CONSENT_TASK_ROW, agent_feed.QUESTION_NOTE, agent_feed.CLICK_ONLY_NOTE, agent_feed.NOT_SHOWN_TEXT,
                  *agent_feed.EXPIRED_WORDS.values(), desktop_ui.TASK_UPDATE_TEXT, desktop_ui.TASK_UPDATE_HUD_TEXT,
                  settings_view.TURNED_ON_NO_TASKS]

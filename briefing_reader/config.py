@@ -469,7 +469,8 @@ class DesktopConfig:
 
 
 # Jarvis, a true agent ([agent]): a task worked out step by step by the owner's Claude Code over Jarvis's own tools.
-AGENT_RANGES = {"max_turns": (5, 1000), "max_minutes": (1, 240), "tasks_per_day": (1, 200)}
+AGENT_RANGES = {"max_turns": (5, 1000), "max_minutes": (1, 240), "tasks_per_day": (1, 200),
+                "max_pages": (5, 400), "max_actions": (10, 1000), "max_sends": (1, 50)}
 AGENT_EFFORTS = ("", "low", "medium", "high", "xhigh", "max")      # "" = Claude Code's default
 AGENT_SEARCH_ENGINES = ("duckduckgo", "bing", "google")
 # What a task may read of the owner's things ([agent] private): an entry that is none of these grants nothing.
@@ -493,6 +494,11 @@ class AgentConfig:
     workspace: str = field(default="", repr=False)   # "" = Jarvis\Workspace in your user folder; never under OneDrive
     private: tuple[str, ...] = AGENT_PRIVATE         # what a task may read of the owner's things (AGENT_PRIVATE)
     speak_private: bool = False    # true: a line that may hold something private is said too (agent_ui.spoken: off)
+    # Filling in pages (build plan item 7): only once the owner's Turn on covers it (consent version 4, desktop_ui).
+    drive: bool = True             # false: a task never types into a page, whatever the owner's OK
+    max_pages: int = 40            # pages a task opens before "Keep going?" (5..400)
+    max_actions: int = 150         # ... page actions: typing, choosing, clicking, scrolling, tabs (10..1000)
+    max_sends: int = 5             # ... Send cards (1..50)
 
 
 # Standing agents and rules ([standing], owner answers 2026-11-12): jobs that wake on their own and only propose.
@@ -1451,7 +1457,11 @@ def _parse_agent(doc: Mapping[str, Any], environ: Mapping[str, str] | None = Non
                        tasks_per_day=r.integer("tasks_per_day", d.tasks_per_day, *AGENT_RANGES["tasks_per_day"]),
                        search_engine=r.choice("search_engine", d.search_engine, AGENT_SEARCH_ENGINES),
                        workspace=workspace, private=private,
-                       speak_private=r.boolean("speak_private", d.speak_private))
+                       speak_private=r.boolean("speak_private", d.speak_private),
+                       drive=r.boolean("drive", d.drive),
+                       max_pages=r.integer("max_pages", d.max_pages, *AGENT_RANGES["max_pages"]),
+                       max_actions=r.integer("max_actions", d.max_actions, *AGENT_RANGES["max_actions"]),
+                       max_sends=r.integer("max_sends", d.max_sends, *AGENT_RANGES["max_sends"]))
 
 
 TALK_ENABLED_ENV = "JARVIS_TALK_ENABLED"

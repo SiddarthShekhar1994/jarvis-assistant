@@ -20,7 +20,26 @@ one file of this package that imports Qt; BrowserClient is how the endpoint's th
                           come leaves words on its dark page, not emptiness: a refusal (HTTP 401, 403, 429) says the
                           site keeps automated browsers out
     BrowserClient         agent.web's Browser seam, for any thread: hands work to the GUI thread and waits, with a
-                          timeout; a Stop or Turn off releases a waiter at once and a late result is dropped (R8)
+                          timeout; a Stop or Turn off releases a waiter at once and a late result is dropped (R8). It
+                          is agent.drive's DriveBrowser too: tabs, act, the seal and the owner's approved press
+
+Filling in pages (build plan item 7; AgentBrowser(drive=True), only for a task the owner let fill in pages). Up to
+TAB_LIMIT tabs, each its own page and off-the-record profile (a new page in a tab is a new profile, as ever), one view
+on the window showing the active one; the strip names them as chips, the active one lit. Only a drive tab's window gets
+snapshot_engine.DRIVE_SANDBOX (forms may be sent); research pictures and a task's own files keep SANDBOX. act() runs a
+drive script in that tab's isolated world and then waits for a navigation it started, or a moment; a ring drawn by Qt
+over the view (never put into the page) shows the element acted on. seal(cut) seals the network gate for its own
+reason (snapshot_engine.seal_drive) and ends every connection open then (cut_gate); from then every request and
+navigation of every page of the window is refused here too ("held" in hook_counts), and no web page loads, until the
+owner's click on the Send card (press_approved: the seal lifts, then the same element is pressed) or until the page is
+destroyed (close_tab with unseal, a Stop, the run's end, Jarvis closing): its page and profile go first, and the seal
+lifts only once they are really deleted. At the run's end with a result to show, the window may "open big" (end_run
+with big): ~80% of its screen, never activated, nothing of the page loading meanwhile, then its still as ever.
+The owner's mouse and keyboard stay off the window (no take-over); instead a filling-in window's strip has "Open in my
+browser" while a public page is shown and nothing typed is held: on a click, that page's address alone (no value, no
+cookie, nothing of the profile) goes to the owner's own browser, through the same link check as a research card's Open
+(actions.web_link_problem, a strict https address on the host it names). It is ``open_url`` (tests fake it; under the
+test guard the real one opens nothing).
 
 A page the agent wrote (show_file) opens on Jarvis's scheme with a profile of its own and may reach nothing outside this
 task's folder. Only there is the scheme's handler installed, with this run's token in every address; its interceptor
@@ -47,7 +66,9 @@ Logs: counts, kinds and times only, never an address, a host, a title, a name or
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import secrets
 import threading
 import time
@@ -60,9 +81,10 @@ from PySide6.QtGui import QColor, QFontMetricsF, QGuiApplication, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
 from .. import holo, hud, hud_overlay, snapshot_engine, snapshots
-from ..actions import link_host
+from ..actions import link_host, web_link_problem
 from ..snapshot_engine import PageCamera, encode_picture
 from ..snapshots import ShotResult
+from .drive import MAX_TABS, STORE, ActResult
 from .web import NO_PAGE, SCHEME, workspace_address, workspace_name
 from .workspace import TaskFolder, WorkspaceRefused
 
@@ -89,6 +111,8 @@ FINISHED_TAG = "Jarvis has finished reading"
 SHOWING_TAG = "Your file"
 OTHER_WAY_TAG = "Reading another way - not shown here"
 HIDE_TEXT = "Hide"
+OPEN_TEXT = "Open in my browser"   # a filling-in window's strip: the page's address in the owner's browser, on a click
+OPEN_GUARD_S = 1.0                # a second Open this soon after the first does nothing
 HIDE_SIZE = 26                    # the strip's Hide (its drawn height: the strip is 36 high)
 REFUSED_WORDS = "{host} keeps automated browsers out"
 REFUSED_NOTE = "Jarvis doesn't try to get past that. It will look elsewhere."
@@ -117,6 +141,34 @@ OLDER_PAGES = 3
 HOST_CAP = 80
 WHEEL_STEP = 100                  # px the owner's wheel scrolls a task's file, a notch
 _SEPARATOR = "  \u00b7  "
+
+# Filling in pages (drive tabs).
+TAB_LIMIT = MAX_TABS              # tabs at once, each its own page and profile
+ACT_POLL_MS = 25                  # how often a drive script's wait looks at its page
+ACT_MARGIN_S = 1.0                # a waiter allows the GUI thread this long past an act's own time limit
+NAV_SETTLE_S = SETTLE_MS / 1000   # after a navigation an act started finished, before it counts as arrived
+EMPTY_TAB_WORDS = "A new tab"
+NEW_TAB_CHIP = "New tab"
+CHIP_HEIGHT = 22
+CHIP_PAD = 10
+CHIP_GAP = 6
+CHIP_MAX = 200
+RING_MS = 1600                    # the ring stays this long over the element acted on
+RING_PAD = 4
+RING_RADIUS = 6
+BIG_SHARE = 0.8                   # "opens big": of its screen's work area
+BIG_SETTLE_MS = 600               # the page draws itself at the new size before its still is taken
+_RING_OPS = frozenset({"type", "choose", "click", "press", "scroll"})
+_DRIVE_MARK = re.compile(r"/\*drive:(\w+)\*/\nvar ARGS = (.*);\n")
+_LOCAL_SCHEMES = frozenset({"about", "data", "blob"})
+_PAGE_OPS = frozenset({"load", "load_file", "script", "picture"})
+_ACT_OPS = frozenset({"act", "press_approved"})
+# The element a drive script acted on, read in Jarvis's own world (the page's scripts can't see or change it).
+_RING_SCRIPT = ("(function () { var store = window[STORE]; if (!store || store.gen !== GEN) { return null; }"
+                " var el = store.els[N - 1]; if (!el || !el.isConnected) { return null; }"
+                " var box = Element.prototype.getBoundingClientRect.call(el);"
+                " return JSON.stringify([box.left, box.top, box.width, box.height]); })()"
+                ).replace("STORE", json.dumps(STORE))
 
 
 # --------------------------------------------------------------------------
@@ -223,6 +275,47 @@ def watch_rect(area: QRect, avoid: QRect | None, whole: bool) -> QRect:
     return QRect(x, top, width, max(1, bottom - top))
 
 
+def big_rect(area: QRect, now: QRect | None = None) -> QRect:
+    """"Opens big": BIG_SHARE of the work area ``area`` in its middle, never smaller in either way than the window is
+    ``now`` (on a screen of its own it nearly fills it already); always inside the area."""
+    width = round(area.width() * BIG_SHARE)
+    height = round(area.height() * BIG_SHARE)
+    if now is not None and now.isValid():
+        width, height = max(width, now.width()), max(height, now.height())
+    width, height = max(1, min(area.width(), width)), max(1, min(area.height(), height))
+    return QRect(area.x() + (area.width() - width) // 2, area.y() + (area.height() - height) // 2, width, height)
+
+
+class _Ring(QWidget):
+    """The ring over the element Jarvis acts on: drawn here, over the view, never put into the page."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self._rect: QRectF | None = None
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.hide()
+
+    def set_ring(self, rect: QRectF | None) -> None:
+        self._rect = QRectF(rect) if rect is not None and rect.isValid() and not rect.isEmpty() else None
+        self.setVisible(self._rect is not None)
+        if self._rect is not None:
+            self.raise_()
+            self.update()
+
+    def ring_rect(self) -> QRectF | None:
+        return QRectF(self._rect) if self._rect is not None else None
+
+    def paintEvent(self, _event: Any) -> None:  # noqa: N802 - Qt override
+        if self._rect is None:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(QColor(holo.HOLO), 2.0))
+        painter.setBrush(holo.alpha(holo.HOLO, 0.08))
+        painter.drawRoundedRect(self._rect.adjusted(-RING_PAD, -RING_PAD, RING_PAD, RING_PAD), RING_RADIUS, RING_RADIUS)
+
+
 class _Cover(QWidget):
     """A still of the last page over the view: between two pages, and when the run has ended."""
 
@@ -289,10 +382,24 @@ class _Notice(QWidget):
         painter.drawText(QRect(MARGIN, middle + 16, wide, 40), flags, self._note)
 
 
+def owner_browser(url: str) -> None:
+    """The owner's own browser opens ``url`` ("Open in my browser"; the address is checked before this). Under the test
+    guard it opens nothing: no test ever reaches a real browser."""
+    from ..desktop.backend import real_backend_blocked
+
+    if real_backend_blocked():
+        logger.info("Agent browser: no browser under the test guard")
+        return
+    from PySide6.QtGui import QDesktopServices
+
+    QDesktopServices.openUrl(QUrl(url, QUrl.ParsingMode.StrictMode))
+
+
 class WatchWindow(hud_overlay._OverlayWindow):  # noqa: SLF001 - the HUD's own window behaviour, on purpose
     """See the module docs. Holds the view (``page_area``); knows nothing of what the page is."""
 
     hideClicked = Signal()             # the strip's Hide (the task carries on behind it)
+    openClicked = Signal()             # the strip's "Open in my browser" (a filling-in window's, when it shows)
     wheeled = Signal(int)              # the mouse wheel over it (angle delta): only a task's file shown to the owner
 
     def __init__(self, *, native: Any = None, hide_from_capture: bool = False) -> None:
@@ -307,14 +414,22 @@ class WatchWindow(hud_overlay._OverlayWindow):  # noqa: SLF001 - the HUD's own w
         self._tag_font = hud.mono_font(10, 500, 0.12)
         self._host_font = hud.body_font(13)
         self._older_font = hud.body_font(12)
+        self._chip_font = hud.body_font(12)
+        self._tabs: tuple[tuple[str, bool], ...] = ()
         self.page_area = QWidget(self)
         self.page_area.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._view: QWidget | None = None
+        self._ring = _Ring(self.page_area)
         self._cover = _Cover(self.page_area)
         self._notice = _Notice(self.page_area)
         self.hide_button = holo.HoloButton(HIDE_TEXT, holo.GHOST, size=HIDE_SIZE, parent=self)
         self.hide_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.hide_button.clicked.connect(self.hideClicked)
+        self.open_button = holo.HoloButton(OPEN_TEXT, holo.GHOST, size=HIDE_SIZE, parent=self)
+        self.open_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.open_button.setAccessibleName("Open this page in your own browser")
+        self.open_button.clicked.connect(self.openClicked)
+        self.open_button.hide()
         self.resize(MIN_WIDTH, MIN_HEIGHT)
 
     # ---- what it shows -------------------------------------------------------------------------------
@@ -322,8 +437,36 @@ class WatchWindow(hud_overlay._OverlayWindow):  # noqa: SLF001 - the HUD's own w
     def set_view(self, view: QWidget) -> None:
         self._view = view
         view.setGeometry(self.page_area.rect())
+        self._ring.raise_()
         self._cover.raise_()
         self._notice.raise_()
+
+    def set_tabs(self, chips: Sequence[tuple[str, bool]]) -> None:
+        """The tabs as (host, shown) chips, in their order (with one tab or none the strip names the page as ever)."""
+        tabs = tuple((" ".join((host or "").split())[:HOST_CAP], bool(shown)) for host, shown in chips)
+        if tabs != self._tabs:
+            self._tabs = tabs
+            self.update()
+
+    def tab_chips(self) -> tuple[tuple[str, bool], ...]:
+        return self._tabs
+
+    def set_open_shown(self, shown: bool) -> None:
+        """"Open in my browser" on the strip, or not (only while there is a page it can hand over)."""
+        if bool(shown) == self.open_button.isHidden():
+            self.open_button.setVisible(bool(shown))
+            self._place_buttons()
+            self.update()
+
+    def open_shown(self) -> bool:
+        return not self.open_button.isHidden()
+
+    def ring(self, rect: QRectF | None) -> None:
+        """The ring over an element of the page area (its own px), or none."""
+        self._ring.set_ring(rect)
+
+    def ring_rect(self) -> QRectF | None:
+        return self._ring.ring_rect()
 
     def set_notice(self, title: str = "", note: str = "") -> None:
         """Words over the page area ("": none): a page that did not come."""
@@ -372,8 +515,19 @@ class WatchWindow(hud_overlay._OverlayWindow):  # noqa: SLF001 - the HUD's own w
         return [self._tag] if QFontMetricsF(self._tag_font).horizontalAdvance(self._tag) > room else []
 
     def _strip_right(self) -> int:
-        """Where the strip's words end: before the Hide."""
-        return self.width() - PAD // 2 - self.hide_button.sizeHint().width() - TAG_GAP // 2
+        """Where the strip's words end: before the Hide (and the Open when it shows)."""
+        right = self.width() - PAD // 2 - self.hide_button.sizeHint().width() - TAG_GAP // 2
+        if not self.open_button.isHidden():
+            right -= self.open_button.sizeHint().width() - 2 * holo.HoloButton.MARGIN + holo.BUTTON_GAP
+        return right
+
+    def _place_buttons(self) -> None:
+        hint = self.hide_button.sizeHint()
+        self.hide_button.setGeometry(self.width() - PAD // 2 - hint.width(), (STRIP_HEIGHT - 1 - hint.height()) // 2,
+                                     hint.width(), hint.height())
+        wide = self.open_button.sizeHint()
+        self.open_button.setGeometry(self.hide_button.x() - wide.width() + 2 * holo.HoloButton.MARGIN - holo.BUTTON_GAP,
+                                     (STRIP_HEIGHT - 1 - wide.height()) // 2, wide.width(), wide.height())
 
     # ---- where it goes -----------------------------------------------------------------------------------
 
@@ -404,11 +558,10 @@ class WatchWindow(hud_overlay._OverlayWindow):  # noqa: SLF001 - the HUD's own w
                                    max(1, self.height() - STRIP_HEIGHT - PAGE_INSET))
         if self._view is not None:
             self._view.setGeometry(self.page_area.rect())
+        self._ring.setGeometry(self.page_area.rect())
         self._cover.setGeometry(self.page_area.rect())
         self._notice.setGeometry(self.page_area.rect())
-        hint = self.hide_button.sizeHint()
-        self.hide_button.setGeometry(self.width() - PAD // 2 - hint.width(), (STRIP_HEIGHT - 1 - hint.height()) // 2,
-                                     hint.width(), hint.height())
+        self._place_buttons()
 
     def wheelEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         self.wheeled.emit(int(event.angleDelta().y()))
@@ -435,6 +588,9 @@ class WatchWindow(hud_overlay._OverlayWindow):  # noqa: SLF001 - the HUD's own w
         tag = QFontMetricsF(self._tag_font).horizontalAdvance(self._tag)
         painter.drawText(QRectF(x, 0, tag + 2, STRIP_HEIGHT - 1), strip, self._tag)
         x += tag + TAG_GAP
+        if len(self._tabs) > 1:
+            self._paint_chips(painter, x, right)
+            return
         older = _SEPARATOR.join(self._older)
         host = self._host
         if older:
@@ -452,6 +608,32 @@ class WatchWindow(hud_overlay._OverlayWindow):  # noqa: SLF001 - the HUD's own w
             painter.setPen(QColor(holo.INK_1))
             painter.drawText(QRectF(x, 0, right - x, STRIP_HEIGHT - 1), strip,
                              metrics.elidedText(host, Qt.TextElideMode.ElideRight, right - x))
+
+    def _paint_chips(self, painter: QPainter, x: float, right: float) -> None:
+        """A chip per tab with its host (cut with an ellipsis), the one shown lit. Words only: the owner's mouse stays
+        off the window, so a chip is no control."""
+        count = len(self._tabs)
+        each = min(float(CHIP_MAX), max(0.0, right - x - CHIP_GAP * (count - 1)) / count)
+        if each < 2 * CHIP_PAD + 12:
+            return
+        metrics = QFontMetricsF(self._chip_font)
+        top = (STRIP_HEIGHT - 1 - CHIP_HEIGHT) / 2
+        painter.setFont(self._chip_font)
+        for host, shown in self._tabs:
+            words = host or NEW_TAB_CHIP
+            wide = min(each, metrics.horizontalAdvance(words) + 2 * CHIP_PAD + 2)
+            box = QRectF(x, top, wide, CHIP_HEIGHT)
+            painter.setPen(QPen(holo.alpha(holo.HOLO, 0.7) if shown else holo.LINE, 1.0))
+            if shown:
+                painter.setBrush(holo.alpha(holo.HOLO, 0.10))
+            else:
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(box.adjusted(0.5, 0.5, -0.5, -0.5), CHIP_HEIGHT / 2, CHIP_HEIGHT / 2)
+            painter.setPen(QColor(holo.INK_1 if shown else holo.INK_3))
+            painter.drawText(box.adjusted(CHIP_PAD, 0, -CHIP_PAD, 0),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                             metrics.elidedText(words, Qt.TextElideMode.ElideRight, max(0.0, wide - 2 * CHIP_PAD)))
+            x += wide + CHIP_GAP
 
 
 # --------------------------------------------------------------------------
@@ -498,6 +680,48 @@ def gate_held() -> bool:
     return _HELD[0] > 0
 
 
+class _Act:
+    """One drive script in a tab and the wait after it (GUI thread)."""
+
+    __slots__ = ("tab", "shot", "done", "settle_s", "deadline", "starts", "good", "url", "ring", "answered", "answer",
+                 "answered_at", "arrived_at", "finished")
+
+    def __init__(self, tab: int, shot: Any, done: Callable[[Any], None], settle_s: float, deadline: float,
+                 loads: Sequence[int], url: str, ring: tuple[str, int] | None) -> None:
+        self.tab = tab
+        self.shot = shot
+        self.done = done
+        self.settle_s = settle_s
+        self.deadline = deadline
+        self.starts, self.good = int(loads[0]), int(loads[2])
+        self.url = url
+        self.ring = ring
+        self.answered = False
+        self.answer: Any = None
+        self.answered_at = 0.0
+        self.arrived_at: float | None = None
+        self.finished = False
+
+    def __repr__(self) -> str:        # never its script, answer or address
+        return f"_Act(tab={self.tab}, answered={self.answered}, finished={self.finished})"
+
+
+def _ring_target(source: str) -> tuple[str, int] | None:
+    """(the list's gen, the element's number) a drive script acts on, from its op mark and ARGS line (agent.drive's
+    scripts); None for one that acts on no element."""
+    found = _DRIVE_MARK.search(source or "")
+    if found is None or found.group(1) not in _RING_OPS:
+        return None
+    try:
+        args = json.loads(found.group(2))
+    except ValueError:
+        return None
+    n, gen = args.get("n") if isinstance(args, dict) else None, args.get("gen") if isinstance(args, dict) else None
+    if isinstance(n, int) and not isinstance(n, bool) and n > 0 and isinstance(gen, str):
+        return gen, n
+    return None
+
+
 class AgentBrowser(PageCamera):
     """See the module docs. GUI thread only. ``done`` callables get their answer once, never inside a Qt signal of a
     page that is going away; a request that is replaced or stopped gets R_CANCELLED."""
@@ -509,8 +733,35 @@ class AgentBrowser(PageCamera):
                  avoid: Callable[[], QRect | None] | None = None, native: Any = None, hide_from_capture: bool = False,
                  screens: Callable[[], Sequence[QScreen]] | None = None,
                  decide: Callable[..., str] = snapshots.request_problem, settle_ms: int = SETTLE_MS,
-                 linger_s: float = LINGER_S) -> None:
+                 linger_s: float = LINGER_S, drive: bool = False,
+                 open_url: Callable[[str], None] | None = None) -> None:
         super().__init__(parent, decide=decide, settle_ms=settle_ms)
+        self._drive = bool(drive)          # this task may fill in pages: its web pages get DRIVE_SANDBOX
+        self._open_url = open_url if open_url is not None else owner_browser   # "Open in my browser" (tests fake it)
+        self._addresses: dict[int, str] = {}   # each tab's public page as it last arrived (for "Open in my browser")
+        self._opened_at = -1e9
+        self._tab = 1                      # the tab shown (0: none, until the session opens or shows one)
+        self._tabs: list[int] = [1]        # the tabs, in the order they opened (the session's ids)
+        self._parked: dict[int, Any] = {}  # the shots of the tabs not shown
+        self._dead: set[int] = set()       # tabs whose page crashed
+        self._hosts: dict[int, str] = {}   # each tab's host, for its chip
+        self._loads: dict[int, list[int]] = {}         # a shot's loads: [started, finished, finished well]
+        self._shot_request: dict[int, _Request] = {}   # what each shot was asked for (a tab's, shown or not)
+        self._acts: list[_Act] = []
+        self._act_timer = self._timer(self._on_act_poll)
+        self._sealed_drive = False         # a page of this window holds what Jarvis typed: sealed (seal())
+        self._send_hosts: frozenset[str] = frozenset()   # while the owner's Send presses: the only hosts it may reach
+        self._no_open: set[int] = set()    # tabs an approved press took to a page: never "Open in my browser" (its
+        #                                    address may hold what was sent) until Jarvis loads another page there
+        self._seal_gen = 0
+        self._sealed_doomed: list[Any] = []   # pages and profiles that went while sealed, until really deleted
+        self._unsealing: list[tuple[int, Callable[[Any], None] | None]] = []
+        self._unseal_tries = 0
+        self._unseal_timer = self._timer(self._check_unseal)
+        self._frozen = False               # "opens big": the run is over, nothing of the page may load meanwhile
+        self._big_hold = False
+        self._big_timer = self._timer(self._on_big)
+        self._ring_timer = self._timer(self._ring_off)
         self._html_for = html_for
         self._avoid = avoid
         self._native = native
@@ -557,6 +808,445 @@ class AgentBrowser(PageCamera):
 
     def sealed(self) -> bool:
         return gate_held()
+
+    def drive_sealed(self) -> bool:
+        """A page of this window holds what Jarvis typed: the gate is sealed for it (seal())."""
+        return self._sealed_drive
+
+    def tabs(self) -> tuple[int, ...]:
+        return tuple(self._tabs)
+
+    def tab_shown(self) -> int:
+        return self._tab
+
+    # ---- tabs, acts and the seal (agent.drive's DriveBrowser, through the client; GUI thread) -------------
+
+    def new_tab(self, tab: int, done: Callable[[Any], None]) -> None:
+        """A fresh, empty tab with the session's id ``tab``, now the one shown (its page comes with the next load, a
+        profile of its own as every page). False: that id is in use, TAB_LIMIT tabs are open, or Jarvis closes."""
+        if self._shut or not isinstance(tab, int) or tab <= 0 or tab in self._tabs or len(self._tabs) >= TAB_LIMIT:
+            logger.info("Agent browser: no new tab (%d open)", len(self._tabs))
+            _answer(done, False)
+            return
+        self._park()
+        self._tabs.append(tab)
+        self._tab = tab
+        self._empty_view()
+        self._show_tabs()
+        logger.info("Agent browser: a new tab (%d open)", len(self._tabs))
+        _answer(done, True)
+
+    def switch_tab(self, tab: int, done: Callable[[Any], None]) -> None:
+        """That tab is the one shown now (its page as it was). False: there is no such tab."""
+        if tab not in self._tabs:
+            _answer(done, False)
+            return
+        if tab != self._tab:
+            self._park()
+            self._show(tab)
+        _answer(done, True)
+
+    def close_tab(self, tab: int, unseal: bool, done: Callable[[Any], None]) -> None:
+        """That tab's page and profile go. With ``unseal``, the seal lifts once they are really deleted (the answer
+        comes then: False when they never went, and the window stays sealed). The last tab left is shown."""
+        gen = self._seal_gen
+        if tab in self._tabs:
+            if tab == self._tab:
+                self._cancel_request()
+                self.abort()
+            else:
+                shot = self._parked.pop(tab, None)
+                if shot is not None:
+                    self._end_parked(shot)
+            self._tabs.remove(tab)
+            self._hosts.pop(tab, None)
+            self._addresses.pop(tab, None)
+            self._no_open.discard(tab)
+            self._dead.discard(tab)
+            if tab == self._tab:
+                self._tab = 0
+                if self._tabs:
+                    self._show(self._tabs[-1])
+                else:
+                    self._empty_view(words="")
+            self._show_tabs()
+            logger.info("Agent browser: a tab closed (%d open)", len(self._tabs))
+        if unseal:
+            self._unseal_when_gone(done, gen)
+        else:
+            _answer(done, True)
+
+    def seal(self, cut: bool, done: Callable[[Any], None]) -> None:
+        """The gate refuses every new connection (its own reason), with ``cut`` every one open now ends, and every
+        request and navigation of this window's pages is refused here; no web page loads. True once that holds."""
+        if self._shut:
+            _answer(done, False)
+            return
+        self._seal_gen += 1
+        self._sealed_drive = True
+        snapshot_engine.seal_drive(True)
+        ended = snapshot_engine.cut_gate() if cut else 0
+        logger.info("Agent browser: the window is sealed (%d connection(s) cut)", ended)
+        self._sync_open()
+        _answer(done, snapshot_engine.gate_sealed())
+
+    def act(self, tab: int, source: str, settle_s: float, timeout_s: float, done: Callable[[Any], None]) -> None:
+        """``source`` in that tab's isolated world; then a navigation it started is waited for (until it arrived), or
+        ``settle_s``; an ActResult within ``timeout_s``. NO_PAGE: the tab has no page; ok False: there is no such tab,
+        its page crashed, or it went (a page that never answers in time goes, as script()'s does)."""
+        shot = self._shot if tab == self._tab else self._parked.get(tab)
+        if tab not in self._tabs or tab in self._dead:
+            _answer(done, ActResult(ok=False))
+            return
+        request = self._request if shot is self._shot else None
+        if shot is None or shot.done or shot.page is None or not shot.opened \
+                or (request is not None and not request.delivered):
+            _answer(done, ActResult(NO_PAGE))
+            return
+        loads = self._loads.setdefault(shot.serial, [0, 0, 0])
+        act = _Act(tab, shot, done, max(0.0, float(settle_s)), time.monotonic() + max(0.1, float(timeout_s)), loads,
+                   snapshot_engine._encoded(shot.page.url()), _ring_target(source))
+        self._acts.append(act)
+        try:
+            shot.page.runJavaScript(source, snapshot_engine._classes().app_world,
+                                    lambda value, act=act: self._on_act_answer(act, value))
+        except Exception as exc:  # noqa: BLE001 - a plain answer, never a waiter left hanging
+            logger.debug("Agent browser: a drive script did not run (%s)", type(exc).__name__)
+            self._finish_act(act, ActResult(ok=False))
+            return
+        if not self._act_timer.isActive():
+            self._act_timer.start(ACT_POLL_MS)
+
+    def press_approved(self, tab: int, source: str, hosts: Any, settle_s: float, timeout_s: float,
+                       done: Callable[[Any], None]) -> None:
+        """Only after the owner's click on the Send card (agent.drive): the seal lifts for ``hosts`` alone (the gate and
+        this window's own check refuse every other host meanwhile), then ``source`` (the press) runs in that tab as
+        act() runs it. A new page arrived: the seal lifts whole (the page that held the values is gone). None did: the
+        window is sealed again as before, every connection cut."""
+        self._seal_gen += 1
+        self._no_open.add(tab)
+        sealed = self._sealed_drive
+        if sealed:
+            self._send_hosts = frozenset(str(host).casefold() for host in hosts or () if host)
+            snapshot_engine.seal_drive_only(self._send_hosts)
+        logger.info("Agent browser: the owner's Send; the window is unsealed for %d host(s)", len(self._send_hosts))
+
+        def pressed(result: Any) -> None:
+            self._send_hosts = frozenset()
+            if sealed:
+                snapshot_engine.seal_drive_only(())
+                if isinstance(result, ActResult) and result.ok and result.navigated:
+                    self._lift_seal()
+                elif self._sealed_drive:
+                    ended = snapshot_engine.cut_gate()
+                    logger.info("Agent browser: no new page after the Send; sealed again (%d connection(s) cut)", ended)
+            self._sync_open()
+            _answer(done, result)
+
+        self.act(tab, source, settle_s, timeout_s, pressed)
+
+    # ---- the tabs' pages ------------------------------------------------------------------------------------
+
+    def _park(self) -> None:
+        """The tab shown goes behind: its page stays as it is, off the view. A page still on its way, and a task's own
+        file (a page the agent wrote: it is shown, never kept), go instead."""
+        shot = self._shot
+        request = self._request
+        if self._waiting is not None or (request is not None and not request.delivered) or (
+                shot is not None and self._request_of(shot) is not None and self._request_of(shot).folder is not None):
+            self._cancel_request()
+            self.abort()
+            shot = None
+        self._request = None
+        self._ring_off()
+        if shot is None:
+            return
+        for timer in (self._timeout, self._settle, self._fail_check):
+            timer.stop()
+        page, view = shot.page, self._view
+        if page is not None:
+            # The view deletes a page that is its own child when it lets go of it (Qt): this one is the browser's now.
+            _quietly(lambda: page.setParent(self))
+            if shot.on_view and view is not None:
+                _quietly(lambda: view.setPage(None))
+        shot.on_view = False
+        self._parked[self._tab] = shot
+        self._shot = None
+
+    def _show(self, tab: int) -> None:
+        """``tab`` (parked, or empty) is the one on the view now."""
+        self._tab = tab
+        shot = self._parked.pop(tab, None)
+        view, window = self._view, self._window
+        if shot is None or shot.done or shot.page is None or view is None:
+            self._empty_view()
+            self._show_tabs()
+            return
+        self._shot = shot
+        try:
+            view.setPage(shot.page)
+            shot.on_view = True
+            if not view.isVisible():
+                view.show()
+        except Exception as exc:  # noqa: BLE001 - the tab is there; its page may be shown again
+            logger.debug("Agent browser: a tab was not shown (%s)", type(exc).__name__)
+        if window is not None:
+            window.set_notice()
+            window.cover(None)
+        self._no_focus_inside()
+        self._show_tabs()
+
+    def _empty_view(self, words: str = EMPTY_TAB_WORDS) -> None:
+        view, window = self._view, self._window
+        if view is not None:
+            _quietly(view.hide)
+        if window is not None:
+            window.cover(None)
+            window.ring(None)
+            window.set_notice(words)
+
+    def _show_tabs(self) -> None:
+        window = self._window
+        if window is not None:
+            window.set_tabs([(self._hosts.get(tab, ""), tab == self._tab) for tab in self._tabs])
+        self._sync_open()
+
+    # ---- "Open in my browser" (a filling-in window's strip) -------------------------------------------------
+
+    def open_address(self) -> str:
+        """The address "Open in my browser" would hand over now, "" when none: only in a filling-in window, a public
+        page of the tab shown (never a task's file, never an empty tab), never while the window is sealed (a page that
+        holds what Jarvis typed may have put it into its own address)."""
+        if not self._drive or self._shut or self._sealed_drive or self._tab in self._no_open:
+            return ""
+        address = self._addresses.get(self._tab, "")
+        return address if address and not web_link_problem(address) else ""
+
+    def _sync_open(self) -> None:
+        window = self._window
+        if window is not None:
+            window.set_open_shown(bool(self.open_address()))
+
+    def _on_open_clicked(self) -> None:
+        """The owner's click: the page's address, and only that, in their own browser (never twice within a moment)."""
+        address = self.open_address()
+        now = time.monotonic()
+        if not address or now - self._opened_at < OPEN_GUARD_S:
+            return
+        url = QUrl(address, QUrl.ParsingMode.StrictMode)
+        host = url.host(QUrl.ComponentFormattingOption.FullyEncoded).rstrip(".").casefold()
+        if not url.isValid() or url.scheme() != "https" or host != link_host(address):
+            logger.info("Agent browser: not handed to the owner's browser (not a plain https address)")
+            return
+        self._opened_at = now
+        logger.info("Agent browser: the page's address goes to the owner's browser")
+        try:
+            self._open_url(address)
+        except Exception as exc:  # noqa: BLE001 - only a nicety
+            logger.warning("Agent browser: the owner's browser could not be asked (%s)", type(exc).__name__)
+
+    def _request_of(self, shot: Any) -> _Request | None:
+        found = self._shot_request.get(shot.serial) if shot is not None else None
+        return found if found is not None else (self._request if shot is self._shot else None)
+
+    def _tab_of(self, shot: Any) -> int:
+        if shot is self._shot:
+            return self._tab
+        return next((tab for tab, parked in self._parked.items() if parked is shot), 0)
+
+    def _end_parked(self, shot: Any) -> None:
+        """A tab not shown: its page and profile go (no answer is owed: its load was answered long ago)."""
+        if not shot.done:
+            shot.done = True
+            try:
+                self._teardown(shot)
+            except Exception as exc:  # noqa: BLE001 - it ends all the same
+                logger.debug("Agent browser: a tab's teardown failed (%s)", type(exc).__name__)
+
+    def _end_tabs(self) -> None:
+        """Every tab not shown goes; the window is one tab again."""
+        for shot in list(self._parked.values()):
+            self._end_parked(shot)
+        self._parked.clear()
+        shown = "" if self._tab in self._no_open else self._addresses.get(self._tab, "")
+        self._no_open.clear()
+        self._tabs, self._tab = [1], 1
+        self._addresses = {1: shown} if shown else {}    # the still shown is that page's: its Open stays
+        self._dead.clear()
+        self._hosts.clear()
+        self._ring_off()
+        if self._window is not None:
+            self._window.set_tabs(())
+
+    # ---- the seal's end ---------------------------------------------------------------------------------------
+
+    def _unseal_when_gone(self, done: Callable[[Any], None] | None, gen: int) -> None:
+        """The seal lifts once every page and profile that went while sealed is really deleted (their renderer can ask
+        for nothing then) and no newer seal came; ``done`` hears whether they went."""
+        self._unsealing.append((gen, done))
+        self._unseal_tries = 0
+        self._check_unseal()
+
+    def _check_unseal(self) -> None:
+        self._prune()
+        self._sealed_doomed = [item for item in self._sealed_doomed if snapshot_engine._alive(item)]
+        if self._sealed_doomed and self._unseal_tries < CLEAR_TRIES:
+            self._unseal_tries += 1
+            self._unseal_timer.start(CLEAR_MS)
+            return
+        waiting, self._unsealing = self._unsealing, []
+        gone = not self._sealed_doomed
+        if not gone:
+            logger.warning("Agent browser: a filled-in page did not go in time; the window stays sealed")
+        elif self._sealed_drive and any(gen == self._seal_gen for gen, _done in waiting):
+            self._lift_seal()
+        for _gen, done in waiting:
+            if done is not None:
+                _answer(done, gone)
+
+    def _lift_seal(self) -> None:
+        self._sealed_drive = False
+        snapshot_engine.seal_drive(False)
+        logger.info("Agent browser: the window is unsealed")
+        self._sync_open()
+
+    def _pages_gone(self) -> None:
+        """Every page went (the run's end, a Stop, Jarvis closing): a seal lifts once they are really deleted."""
+        if self._sealed_drive:
+            self._unseal_when_gone(None, self._seal_gen)
+
+    # ---- an act's wait ----------------------------------------------------------------------------------------
+
+    def _on_act_answer(self, act: _Act, value: Any) -> None:
+        if act.finished or act.answered:
+            return
+        act.answered, act.answer, act.answered_at = True, value, time.monotonic()
+        self._ring_for(act)
+
+    def _on_act_poll(self) -> None:
+        now = time.monotonic()
+        for act in list(self._acts):
+            if act.finished:
+                continue
+            shot = act.shot
+            if shot.done or shot.page is None:
+                self._finish_act(act, ActResult(act.answer, ok=False))
+                continue
+            started, finished, good = self._loads.get(shot.serial, [0, 0, 0])
+            if not act.answered:
+                if now >= act.deadline:
+                    self._hung(act)
+                    self._finish_act(act, ActResult(ok=False))
+                continue
+            if started > act.starts:
+                if finished >= started:
+                    act.arrived_at = act.arrived_at if act.arrived_at is not None else now
+                    if now - act.arrived_at >= NAV_SETTLE_S or now >= act.deadline:
+                        url = snapshot_engine._encoded(shot.page.url())
+                        self._arrived(act, good > act.good or url != act.url)
+                elif now >= act.deadline:
+                    act.arrived_at = None
+                    self._arrived(act, True)
+                else:
+                    act.arrived_at = None
+            elif now - act.answered_at >= act.settle_s or now >= act.deadline:
+                self._finish_act(act, ActResult(act.answer, False, self._url_of(shot, False)))
+        self._acts = [act for act in self._acts if not act.finished]
+        if self._acts:
+            self._act_timer.start(ACT_POLL_MS)
+
+    def _arrived(self, act: _Act, navigated: bool) -> None:
+        shot = act.shot
+        final = self._url_of(shot, navigated)
+        if navigated:
+            host = link_host(final) if final.casefold().startswith(("https://", "http://")) else ""
+            self._hosts[act.tab] = host
+            self._addresses[act.tab] = final if host else ""
+            if act.tab == self._tab and self._window is not None:
+                self._window.update_host(host)
+                self._window.ring(None)
+            self._show_tabs()
+        self._finish_act(act, ActResult(act.answer, navigated, final))
+
+    def _url_of(self, shot: Any, navigated: bool) -> str:
+        if shot is None or shot.page is None:
+            return ""
+        if navigated or not shot.local:
+            return snapshot_engine._encoded(shot.page.url()) or shot.url
+        return shot.final_hint or shot.url
+
+    def _finish_act(self, act: _Act, result: ActResult) -> None:
+        if not act.finished:
+            act.finished = True
+            _answer(act.done, result)
+
+    def _hung(self, act: _Act) -> None:
+        """A page that never answered a drive script in time goes (a hung renderer spins no longer)."""
+        logger.info("Agent browser: a page did not answer in time; it was closed")
+        if act.shot is self._shot:
+            self._cancel_request()
+            self.abort()
+        elif self._parked.get(act.tab) is act.shot:
+            self._parked.pop(act.tab, None)
+            self._end_parked(act.shot)
+
+    def _cancel_acts(self) -> None:
+        acts, self._acts = self._acts, []
+        self._act_timer.stop()
+        for act in acts:
+            self._finish_act(act, ActResult(ok=False))
+
+    # ---- the ring --------------------------------------------------------------------------------------------
+
+    def _ring_for(self, act: _Act) -> None:
+        """Where the element the script acted on is now, read in Jarvis's world: the ring goes over it."""
+        shot, window = act.shot, self._window
+        if act.ring is None or act.tab != self._tab or shot is not self._shot or window is None or shot.page is None:
+            return
+        gen, n = act.ring
+        source = _RING_SCRIPT.replace("GEN", json.dumps(gen)).replace("N - 1", f"{int(n)} - 1")
+        try:
+            shot.page.runJavaScript(source, snapshot_engine._classes().app_world,
+                                    lambda value, shot=shot: self._on_ring(shot, value))
+        except Exception as exc:  # noqa: BLE001 - only a nicety
+            logger.debug("Agent browser: no ring (%s)", type(exc).__name__)
+
+    def _on_ring(self, shot: Any, value: Any) -> None:
+        window = self._window
+        if window is None or shot is not self._shot or shot.done or shot.page is None:
+            return
+        try:
+            value = json.loads(value) if isinstance(value, str) else None
+        except ValueError:
+            value = None
+        if not (isinstance(value, list) and len(value) == 4
+                and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value)):
+            return
+        try:
+            zoom = float(shot.page.zoomFactor()) or 1.0
+        except Exception:  # noqa: BLE001
+            zoom = 1.0
+        left, top, wide, tall = (float(v) * zoom for v in value)
+        window.ring(QRectF(left, top, wide, tall))
+        self._ring_timer.start(RING_MS)
+
+    def _ring_off(self) -> None:
+        self._ring_timer.stop()
+        if self._window is not None:
+            self._window.ring(None)
+
+    # ---- "opens big" -----------------------------------------------------------------------------------------
+
+    def _grow(self, window: WatchWindow) -> None:
+        """~80% of the screen the window is on, in its middle (never smaller than it is); never activated."""
+        screen = window.screen() or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        window.setGeometry(big_rect(screen.availableGeometry(), window.geometry()))
+        self.windowPlaced.emit()
+
+    def _on_big(self) -> None:
+        self.end_run(True, self._big_hold)
 
     # ---- asked for by the client ------------------------------------------------------------------------
 
@@ -671,14 +1361,28 @@ class AgentBrowser(PageCamera):
         self._cancel_request()
         self.abort()
 
-    def end_run(self, linger: bool, hold: bool = False) -> None:
+    def end_run(self, linger: bool, hold: bool = False, big: bool = False) -> None:
         """The run ended: no page after this. ``linger``: the window keeps a still of it for a while, then goes; with
-        ``hold`` until close_all (it stays while the result card stays)."""
+        ``hold`` until close_all (it stays while the result card stays). ``big``: it "opens big" first (BIG_SHARE of its
+        screen, never activated), and the still is taken once the page drew itself at that size; meanwhile nothing of
+        the page loads or goes."""
         self._linger.stop()
+        self._big_timer.stop()
         window = self._window
-        still = self._still() if linger else None
         self._cancel_request()
+        self._cancel_acts()
+        if big and linger and window is not None and window.isVisible() and self.has_page() and not self._shut:
+            self._frozen = True
+            self._big_hold = bool(hold)
+            self._ring_off()
+            self._grow(window)
+            self._big_timer.start(BIG_SETTLE_MS)
+            return
+        still = self._still() if linger else None
         self.abort()
+        self._end_tabs()
+        self._frozen = False
+        self._pages_gone()
         self._other_way.clear()
         if window is not None and linger and window.isVisible() and (hold or self._linger_s > 0):
             self._tag = FINISHED_TAG
@@ -694,9 +1398,14 @@ class AgentBrowser(PageCamera):
         """Nothing is left: no page, no renderer, no window, and the gate open again once they are deleted. Also with no
         event loop left (Jarvis closing), when everything is deleted now."""
         self._linger.stop()
+        self._big_timer.stop()
         self._cancel_request()
+        self._cancel_acts()
+        self._end_tabs()
         window, self._window = self._window, None
         self.close_view()
+        self._frozen = False
+        self._pages_gone()
         if window is not None:
             _quietly(window.hide)
             if snapshot_engine._event_loop_running():
@@ -734,6 +1443,12 @@ class AgentBrowser(PageCamera):
         if self._shut:
             _answer(request.done, ShotResult(False, snapshots.R_SHUTDOWN))
             return
+        if request.folder is None and (self._sealed_drive or self._frozen):
+            # A page holds what Jarvis typed (agent.drive refuses loads then too): no web page opens, the page stays.
+            self._count("held")
+            logger.info("Agent browser: no page while the window is sealed")
+            _answer(request.done, ShotResult(False, snapshots.R_LOAD_FAILED))
+            return
         self._linger.stop()
         self._cancel_request()
         still = self._still()
@@ -755,13 +1470,20 @@ class AgentBrowser(PageCamera):
         self._timeout_ms = max(100, request.timeout_ms)
         self._http_status, self._status_address = 0, ""
         self._turned_away = False
+        self._dead.discard(self._tab)
+        self._hosts[self._tab] = request.label
+        self._addresses.pop(self._tab, None)
+        self._no_open.discard(self._tab)
         if self._window is not None:
             self._window.set_notice()
             self._window.set_page(request.label)
+            self._show_tabs()
         if request.html is None:
             self.shoot(request.url)
         else:
             self.shoot(request.url, request.html, final_url=request.final)
+        if self._shot is not None:
+            self._shot_request[self._shot.serial] = request
 
     def _on_clear(self) -> None:
         """A web page waits while the gate is sealed. If the page the agent wrote never goes, it stays sealed and what
@@ -793,14 +1515,7 @@ class AgentBrowser(PageCamera):
 
     def _new_view(self, classes: Any) -> Any:
         """The view, in a window that shows it: never the focus, no mouse, no keyboard, nothing dropped on it."""
-        window = self._window
-        if window is None:
-            window = self._window = WatchWindow(native=self._native, hide_from_capture=self._hide_from_capture)
-            window.hideClicked.connect(self._on_hide_clicked)
-            window.wheeled.connect(self._on_wheel)
-            window.set_tag(self._tag)
-            if self._request is not None:
-                window.set_page(self._request.label)
+        window = self._window if self._window is not None else self._make_window()
         view = classes.QWebEngineView(window.page_area)
         view.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         view.setEnabled(False)             # also its inner widgets, whenever they come: no focus can land there
@@ -810,6 +1525,18 @@ class AgentBrowser(PageCamera):
         view.setAccessibleName("")
         window.set_view(view)
         return view
+
+    def _make_window(self) -> WatchWindow:
+        """The window, wired: its Hide, its Open (a filling-in window's) and the wheel."""
+        window = self._window = WatchWindow(native=self._native, hide_from_capture=self._hide_from_capture)
+        window.hideClicked.connect(self._on_hide_clicked)
+        window.openClicked.connect(self._on_open_clicked)
+        window.wheeled.connect(self._on_wheel)
+        window.set_tag(self._tag)
+        if self._request is not None:
+            window.set_page(self._request.label)
+        self._show_tabs()
+        return window
 
     def _on_hide_clicked(self) -> None:
         self.set_hidden(owner=True)
@@ -826,6 +1553,80 @@ class AgentBrowser(PageCamera):
     def _connect(self, page: Any, shot: Any) -> None:
         super()._connect(page, shot)
         page.loadingChanged.connect(lambda info: self._on_loading(shot, info))
+        self._loads[shot.serial] = [0, 0, 0]
+        page.loadStarted.connect(lambda: self._count_load(shot, 0))
+        page.loadFinished.connect(lambda ok: self._count_load(shot, 1, ok))
+
+    def _count_load(self, shot: Any, which: int, ok: bool = False) -> None:
+        """A shot's main-frame loads once its page was asked for (an act waits for the one it started)."""
+        loads = self._loads.get(shot.serial)
+        if loads is None or not shot.opened or shot.done:
+            return
+        loads[which] += 1
+        if which == 1 and ok:
+            loads[2] += 1
+
+    def _sandbox(self, shot: Any) -> str:
+        """A web page of a task that may fill in pages: DRIVE_SANDBOX (forms may be sent; nothing typed leaves before
+        the owner's Send). Anything else, a task's own file included: SANDBOX."""
+        request = self._request_of(shot)
+        if self._drive and (request is None or request.folder is None):
+            return snapshot_engine.DRIVE_SANDBOX
+        return snapshot_engine.SANDBOX
+
+    def _held_out(self, url: Any) -> bool:
+        """While sealed (or the run's last page opens big) nothing of the window's pages goes: only about:, data: and
+        blob:, which reach no network."""
+        if not (self._sealed_drive or self._frozen):
+            return False
+        try:
+            scheme = url.scheme().casefold()
+            if scheme in _LOCAL_SCHEMES:
+                return False
+            # The owner's Send: the card's hosts alone (the gate passes only https to them in any case).
+            return not (self._send_hosts and not self._frozen and scheme in ("https", "http")
+                        and url.host().casefold().rstrip(".") in self._send_hosts)
+        except Exception:  # noqa: BLE001 - unsure: refused
+            return True
+
+    def _judge(self, shot: Any, info: Any) -> bool:
+        if not shot.done and shot.opened and self._held_out(info.requestUrl()):
+            shot.blocked += 1
+            self._count("held")
+            return True
+        return super()._judge(shot, info)
+
+    def _on_navigation(self, shot: Any, request: Any) -> None:
+        try:
+            if not shot.done and shot.opened and self._held_out(request.url()):
+                shot.blocked += 1
+                self._count("held")
+                request.reject()
+                return
+        except Exception:  # noqa: BLE001 - unsure: refuse
+            _quietly(request.reject)
+            return
+        super()._on_navigation(shot, request)
+
+    def _on_crash(self, shot: Any) -> None:
+        tab = self._tab_of(shot)
+        if tab:
+            self._dead.add(tab)
+        if shot is not self._shot:
+            if tab and self._parked.get(tab) is shot:
+                self._parked.pop(tab, None)
+                self._end_parked(shot)
+            return
+        super()._on_crash(shot)
+
+    def _teardown(self, shot: Any) -> None:
+        """As the camera's; what goes while sealed is waited for before the seal lifts."""
+        items = [item for item in (shot.page, shot.profile) if item is not None]
+        self._loads.pop(shot.serial, None)
+        self._shot_request.pop(shot.serial, None)
+        super()._teardown(shot)
+        if self._sealed_drive:
+            self._sealed_doomed.extend(items)
 
     def _on_loading(self, shot: Any, info: Any) -> None:
         """The main frame's load: its HTTP status when it answered with an error. It stands through what the engine loads
@@ -871,7 +1672,7 @@ class AgentBrowser(PageCamera):
         job.reply(file_kind(name).encode("ascii"), buffer)
 
     def _problem(self, shot: Any, url: QUrl, main_frame: bool) -> str:
-        request = self._request
+        request = self._request_of(shot)       # that shot's own, also for a tab not shown
         if request is None or request.folder is None:
             return super()._problem(shot, url, main_frame)
         scheme = url.scheme().casefold()
@@ -1008,10 +1809,16 @@ class AgentBrowser(PageCamera):
         final_url = self._final_url(shot)
         self._no_focus_inside()
         window = self._window
+        if request.folder is None:
+            self._hosts[self._tab] = link_host(final_url)
+            self._addresses[self._tab] = final_url
+        else:
+            self._addresses.pop(self._tab, None)
         if window is not None:
             window.cover(None)
             if request.folder is None:
                 window.update_host(link_host(final_url))
+            self._show_tabs()
         took = int((time.monotonic() - shot.started) * 1000)
         logger.info("Agent browser: a page is up in %.1f s (%d request(s) blocked%s)", took / 1000, shot.blocked,
                     ", still loading" if still_loading else "")
@@ -1163,6 +1970,33 @@ class BrowserClient(QObject):
         value = self._ask("picture", (max_width, max_bytes), timeout_s, cancelled)
         return value if isinstance(value, ShotResult) else ShotResult(False, snapshots.R_LOAD_FAILED)
 
+    # agent.drive's DriveBrowser: tabs, acts, the seal and the owner's approved press (any thread; each waits)
+
+    def new_tab(self, tab: int, *, timeout_s: float, cancelled: Callable[[], bool]) -> bool:
+        return self._ask("new_tab", (int(tab),), timeout_s, cancelled) is True
+
+    def switch_tab(self, tab: int, *, timeout_s: float, cancelled: Callable[[], bool]) -> bool:
+        return self._ask("switch_tab", (int(tab),), timeout_s, cancelled) is True
+
+    def close_tab(self, tab: int, *, unseal: bool, timeout_s: float, cancelled: Callable[[], bool]) -> bool:
+        return self._ask("close_tab", (int(tab), bool(unseal)), timeout_s, cancelled) is True
+
+    def seal(self, cut: bool, *, timeout_s: float, cancelled: Callable[[], bool]) -> bool:
+        return self._ask("seal", (bool(cut),), timeout_s, cancelled) is True
+
+    def act(self, tab: int, source: str, *, settle_s: float, timeout_s: float,
+            cancelled: Callable[[], bool]) -> ActResult:
+        value = self._ask("act", (int(tab), source, float(settle_s), float(timeout_s)), timeout_s + ACT_MARGIN_S,
+                          cancelled)
+        return value if isinstance(value, ActResult) else ActResult(ok=False)
+
+    def press_approved(self, tab: int, source: str, hosts: Any = (), *, settle_s: float, timeout_s: float,
+                       cancelled: Callable[[], bool]) -> ActResult:
+        value = self._ask("press_approved", (int(tab), source, tuple(str(host) for host in hosts), float(settle_s),
+                                             float(timeout_s)),
+                          timeout_s + ACT_MARGIN_S, cancelled)
+        return value if isinstance(value, ActResult) else ActResult(ok=False)
+
     @staticmethod
     def _loaded(value: Any) -> ShotResult:
         if isinstance(value, ShotResult):
@@ -1274,11 +2108,15 @@ class BrowserClient(QObject):
         except Exception as exc:  # noqa: BLE001 - a broken step is a plain answer, never a waiter left hanging
             logger.warning("Agent browser: a step failed (%s)", type(exc).__name__)
             shot_op = job.op in ("load", "load_file", "picture")
-            job.finish(ShotResult(False, snapshots.R_ENGINE_FAILED) if shot_op else None)
+            if shot_op:
+                job.finish(ShotResult(False, snapshots.R_ENGINE_FAILED))
+            else:
+                job.finish(ActResult(ok=False) if job.op in _ACT_OPS else None)
 
     def _dropped(self, job: _Job) -> None:
-        """Nobody waits for that any more: a page that kept it waiting goes (a hung renderer spins no longer)."""
-        if self._browser is not None and not self._ended.is_set() and not job.done.is_set():
+        """Nobody waits for that any more: a page that kept it waiting goes (a hung renderer spins no longer). A drive
+        step's own time limit already ends a page that never answers (AgentBrowser.act)."""
+        if self._browser is not None and not self._ended.is_set() and not job.done.is_set() and job.op in _PAGE_OPS:
             self._browser.stop_now()
 
     def stop(self) -> None:
@@ -1287,14 +2125,18 @@ class BrowserClient(QObject):
         if self._browser is not None:
             self._browser.end_run(False)
 
-    def end_run(self, *, linger: bool = True, hold: bool = False) -> None:
+    def end_run(self, *, linger: bool = True, hold: bool = False, big: bool = False) -> None:
         """The run ended: waiters are released, no page after this. Once: what came first stands. ``hold``: a window
-        that lingers stays until close_now (the result card's)."""
+        that lingers stays until close_now (the result card's). ``big``: the result's page "opens big" first
+        (AgentBrowser.end_run)."""
         if self._ended.is_set():
             return
         self._ended.set()
         if self._browser is not None:
-            self._browser.end_run(linger, hold)
+            if big:
+                self._browser.end_run(linger, hold, True)
+            else:
+                self._browser.end_run(linger, hold)
 
     def close_now(self) -> None:
         """A new run starts: the last run's window, if it still lingers, goes first (one window)."""
@@ -1311,5 +2153,5 @@ class BrowserClient(QObject):
             browser.shutdown()
 
 
-__all__ = ["AgentBrowser", "BrowserClient", "FINISHED_TAG", "READING_TAG", "WatchWindow", "file_kind", "gate_held",
-           "register_scheme", "scheme_ready", "watch_rect"]
+__all__ = ["AgentBrowser", "BrowserClient", "FINISHED_TAG", "READING_TAG", "TAB_LIMIT", "WatchWindow", "big_rect",
+           "file_kind", "gate_held", "register_scheme", "scheme_ready", "watch_rect"]

@@ -96,6 +96,8 @@ DESKTOP_SCHEMA_FILE = ASSETS / "desktop_schema.json"
 # prompt files are the same bytes as ever); tests/test_agent_router.py holds them to that.
 AGENT_ASSETS = ASSETS.parent.parent / "agent" / "assets"
 AGENT_PROMPT_FILE = AGENT_ASSETS / "agent_prompt.md"
+AGENT_DRIVE_PROMPT_FILE = AGENT_ASSETS / "agent_prompt_drive.md"   # the same, with FILLING IN PAGES: only for a task
+#                                                 offered the drive tools (agent.runner)
 AGENT_SETTINGS_FILE = AGENT_ASSETS / "agent_settings.json"
 AGENT_WORK_FOLDER = "agent"                 # where a task's Claude Code runs: empty, like the others
 AGENT_RUNS_FOLDER = "agent-runs"            # each run's own folder: its MCP config, deleted when the run ends

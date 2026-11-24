@@ -221,6 +221,10 @@ CONSENT_VERSION = 2
 # The agent's card (part A3): tasks need version 3, which adds their row. It is what Turn on stores while [agent] is on;
 # anything allowed on 1 or 2 stays allowed, and with [agent] off nothing of this shows and 2 is stored as before.
 AGENT_CONSENT_VERSION = 3
+# Filling in pages (build plan item 7, decision 14): version 4 adds the row that a task may type into public pages in
+# its own window, nothing typed leaving before the owner's click on its Send card. It is what Turn on stores while tasks
+# and [agent] drive are on. A task works on 3 as before; only the drive tools wait for 4 (agent.policy.offered).
+DRIVE_CONSENT_VERSION = 4
 TASK_UPDATE_TEXT = "Tasks need your OK on the updated card first, {sir} - nothing was started."
 TASK_UPDATE_HUD_TEXT = "Tasks need your OK on the updated card first, {sir} - Bring Jarvis back to read it."
 REVEAL_FAILED_TEXT = "Windows couldn't show that file in its folder, {sir}."
@@ -854,6 +858,14 @@ class DesktopController(QObject):
         """The owner's OK covers a task (version 3; fail-closed)."""
         return self.consent_version() >= AGENT_CONSENT_VERSION
 
+    def drive_on(self) -> bool:
+        """Tasks are on and [agent] drive is True: the card has the filling-in row (fail-closed)."""
+        return self.tasks_on() and getattr(getattr(self.config, "agent", None), "drive", False) is True
+
+    def consent_for_drive(self) -> bool:
+        """The owner's OK covers filling in pages (version 4; fail-closed). Before it no drive tool is offered."""
+        return self.consent_version() >= DRIVE_CONSENT_VERSION
+
     def needs_task_update(self) -> bool:
         """Turned on, on a card that did not list tasks, while tasks are on: the updated card is offered at the first
         task request."""
@@ -921,7 +933,8 @@ class DesktopController(QObject):
         store = None
         try:
             store = self._consent_store() if self._consent_store is not None else None
-            version = (AGENT_CONSENT_VERSION if self.tasks_on() else CONSENT_VERSION) if on else 0
+            version = ((DRIVE_CONSENT_VERSION if self.drive_on() else AGENT_CONSENT_VERSION) if self.tasks_on()
+                       else CONSENT_VERSION) if on else 0
             saved = bool(store.set_desktop_turned_on(bool(on), version=version)) if store is not None else False
         except Exception as exc:  # noqa: BLE001 - not saved: fail-closed
             logger.warning("Desktop: the owner's OK could not be saved (%s)", type(exc).__name__)

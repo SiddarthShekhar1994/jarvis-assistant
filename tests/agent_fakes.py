@@ -9,9 +9,11 @@ no path, no id). Nothing here starts claude.exe. Every value is invented.
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import queue
+import re
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -289,15 +291,55 @@ class FakeEngine(FakeProcess):
         return "\n".join(block.get("text", "") for block in result.get("content", ()) if isinstance(block, Mapping))
 
 
+class FakeControl:
+    """A control of a FakePage, as agent.drive's controls script would list it. ``hid``: the owner can't see it (it is
+    counted, never listed). ``field``: its name in its form (what a press would send). ``goes_to``: the address a click
+    on it (a free button) or an approved press of it loads. A submit's ``formaction`` / ``formtarget`` win over its
+    form's, as in a real press. ``press``: what an approved press of it meets ("invalid": the form's checks stop it,
+    no submit event; "prevent": a script of the page takes the submit over; both stay on the page)."""
+
+    def __init__(self, role: str, name: str = "", *, kind: str = "", value: str = "", options: Sequence[str] = (),
+                 checked: bool = False, form: int = 0, href: str = "", blank: bool = False, hints: str = "",
+                 auto: str = "", required: bool = False, sr: bool = False, hid: bool = False, field: str = "",
+                 goes_to: str = "", formaction: str = "", formtarget: str = "", press: str = "") -> None:
+        self.role, self.name, self.kind, self.value, self.options = role, name, kind, value, list(options)
+        self.checked, self.form, self.href, self.blank, self.hints = checked, form, href, blank, hints
+        self.auto, self.required, self.sr, self.hid, self.field, self.goes_to = auto, required, sr, hid, field, goes_to
+        self.formaction, self.formtarget, self.press = formaction, formtarget, press
+
+    def how(self) -> str:
+        """What a press of it does (agent.drive's howOf)."""
+        if self.role == "submit":
+            return "submit" if self.form else "click"
+        if self.role in ("textbox", "textarea"):
+            return "enter" if self.form else "key"
+        return "click"
+
+    def sent_value(self) -> str:
+        if self.role in ("checkbox", "radio"):
+            return (self.value or "on") if self.checked else ""
+        return self.value
+
+
 class FakePage:
-    """A page FakeBrowser "opens": what its scripts would read. ``fails``: the load's reason (snapshots.R_*)."""
+    """A page FakeBrowser "opens": what its scripts would read. ``fails``: the load's reason (snapshots.R_*). For the
+    drive: ``controls`` (FakeControl), ``forms`` ((method, action) or (method, action, target) by number from 1),
+    ``extra`` (form, name, value, hidden): fields the page set itself, and ``on_type(page, control)``: a page script
+    that runs after each typing. ``mine``: the elements Jarvis set, by their keys (agent.drive's MINE store: a load
+    empties it, a new list never does)."""
 
     def __init__(self, title: str = "A page", text: str = "Its words.", links: Sequence[tuple[str, str]] = (),
                  results: Sequence[tuple[str, str, str]] = (), final: str = "", fails: str = "",
-                 still_loading: bool = False, reads: Sequence[str] = ()) -> None:
+                 still_loading: bool = False, reads: Sequence[str] = (), controls: Sequence[FakeControl] = (),
+                 forms: Sequence[tuple[str, str]] = (), extra: Sequence[list[Any]] = (),
+                 on_type: Callable[[FakePage, FakeControl], None] | None = None) -> None:
         self.title, self.text, self.links, self.results = title, text, list(links), list(results)
         self.final, self.fails, self.still_loading = final, fails, still_loading
         self.reads = list(reads)              # later reads of it see these texts in turn (a page that grows)
+        self.controls, self.forms, self.extra = list(controls), list(forms), [list(item) for item in extra]
+        self.on_type = on_type
+        self.gen = ""                         # the controls script's last gen: its refs (a load empties it)
+        self.mine: dict[int, FakeControl] = {}
 
 
 class FakeBrowser:
@@ -327,6 +369,7 @@ class FakeBrowser:
         self.rect: Any = None                 # window_rect(): where the window is (None: not showing)
         self.other_ways: list[tuple[str, bool]] = []
         self.shown: list[str] = []            # what the owner's Show asked for
+        self.bigs: list[bool] = []            # end_run's "opens big" (a task that filled in pages, done)
 
     # ---- the Browser seam -----------------------------------------------------------------------------
 
@@ -386,10 +429,11 @@ class FakeBrowser:
     def stop(self) -> None:
         self.stopped += 1
 
-    def end_run(self, *, linger: bool = True, hold: bool = False) -> None:
+    def end_run(self, *, linger: bool = True, hold: bool = False, big: bool = False) -> None:
         self.ended += 1
         self.lingers.append(linger)
         self.holds.append(hold)
+        self.bigs.append(big)
 
     def set_hidden(self, *, owner: bool | None = None, away: bool | None = None) -> None:
         if owner is not None:
@@ -428,6 +472,229 @@ class FakeBrowser:
         pass
 
 
+class FakeDriveBrowser(FakeBrowser):
+    """FakeBrowser with agent.drive's seam: tabs, the seal, the drive scripts answered as the real ones would be (each
+    read by its op mark and its ARGS line), and an approved press. Records every call: ``seals``, ``typed_sealed`` (was
+    the window sealed when each value went in), ``presses`` (tab, ref, the values its form held then), ``unapproved``
+    (a press run any other way: must stay empty), ``closed_tabs`` (tab, sealed while it went, unseal)."""
+
+    _DRIVE_RE = re.compile(r"/\*drive:(\w+)\*/\nvar ARGS = (.*);\n")
+
+    def __init__(self, pages: Mapping[str, FakePage] | None = None, *, seal_ok: bool = True, **options: Any) -> None:
+        super().__init__(pages, **options)
+        self.tabs: dict[int, FakePage | None] = {1: None}
+        self.active = 1
+        self.sealed = False
+        self.seal_ok = seal_ok
+        self.seals: list[bool] = []
+        self.typed_sealed: list[bool] = []
+        self.acts: list[tuple[int, str]] = []
+        self.clicks: list[tuple[int, int]] = []
+        self.presses: list[tuple[int, int, dict[str, str]]] = []
+        self.unapproved: list[tuple[int, str]] = []
+        self.closed_tabs: list[tuple[int, bool, bool]] = []
+        self.new_tabs: list[int] = []
+        self.press_hosts: list[tuple[str, ...]] = []   # the hosts each approved press could reach
+        self.sealed_after: list[bool] = []             # sealed again after each approved press (no new page came)
+        self.close_ok = True                           # close_tab's answer (False: the page did not go)
+        self.before_press: Callable[[FakePage], None] | None = None   # a page script that runs just before a press
+
+    # ---- tabs -------------------------------------------------------------------------------------------
+
+    def load(self, url: str, *, timeout_s: float, cancelled: Callable[[], bool]) -> snapshots.ShotResult:
+        result = super().load(url, timeout_s=timeout_s, cancelled=cancelled)
+        if self.current is not None:
+            self.current.gen, self.current.mine = "", {}
+        self.tabs[self.active] = self.current
+        return result
+
+    def new_tab(self, tab: int, *, timeout_s: float, cancelled: Callable[[], bool]) -> bool:
+        self.new_tabs.append(tab)
+        self.tabs[tab] = None
+        self.active = tab
+        self.current = None
+        return True
+
+    def switch_tab(self, tab: int, *, timeout_s: float, cancelled: Callable[[], bool]) -> bool:
+        if tab not in self.tabs:
+            return False
+        self.active = tab
+        self.current = self.tabs[tab]
+        return True
+
+    def close_tab(self, tab: int, *, unseal: bool, timeout_s: float, cancelled: Callable[[], bool]) -> bool:
+        self.closed_tabs.append((tab, self.sealed, unseal))
+        if not self.close_ok:
+            return False
+        self.tabs.pop(tab, None)
+        if self.active == tab:
+            self.current = None
+        if unseal:
+            self.sealed = False
+        return True
+
+    def seal(self, cut: bool, *, timeout_s: float, cancelled: Callable[[], bool]) -> bool:
+        self.seals.append(cut)
+        if self.seal_ok:
+            self.sealed = True
+        return self.seal_ok
+
+    # ---- the drive scripts ----------------------------------------------------------------------------------
+
+    @staticmethod
+    def seen(page: FakePage) -> list[FakeControl]:
+        return [control for control in page.controls if not control.hid]
+
+    def _address(self, page: FakePage) -> str:
+        return page.final or next((url for url, known in self.pages.items() if known is page), "")
+
+    def _page_json(self, page: FakePage) -> str:
+        return json.dumps({"title": page.title, "url": self._address(page), "length": len(page.text), "text": page.text,
+                           "links": [list(row) for row in page.links]})
+
+    def act(self, tab: int, source: str, *, settle_s: float, timeout_s: float, cancelled: Callable[[], bool]) -> Any:
+        from briefing_reader.agent import drive
+
+        if tab not in self.tabs:
+            return drive.ActResult(ok=False)
+        page = self.tabs[tab]
+        found = self._DRIVE_RE.search(source)
+        op = found.group(1) if found else "read"
+        self.acts.append((tab, op))
+        if page is None:
+            return drive.ActResult(web.NO_PAGE)
+        if found is None:
+            return drive.ActResult(self._page_json(page))
+        args = json.loads(found.group(2))
+        if op == "controls":
+            page.gen = args["gen"]
+            seen = self.seen(page)
+            rows = [{"role": c.role, "kind": c.kind, "name": c.name, "sr": int(c.sr), "hints": c.hints, "auto": c.auto,
+                     "required": c.required, "form": c.form, "value": c.value, "options": c.options,
+                     "checked": c.checked, "href": c.href, "blank": c.blank} for c in seen[:args["max"]]]
+            return drive.ActResult(json.dumps({"gen": args["gen"], "url": self._address(page), "title": page.title,
+                                               "controls": rows, "forms": [list(form[:2]) for form in page.forms],
+                                               "left": len(page.controls) - len(seen), "more": len(seen) > args["max"]}))
+        seen = self.seen(page)
+        n = args.get("n") or 0
+        if args.get("gen") != page.gen or (n and not 1 <= n <= len(seen)):
+            return drive.ActResult(json.dumps({"stale": 1}))
+        control = seen[n - 1] if n else None
+        if op == "type":
+            if any(known is control for known in page.mine.values()):
+                return drive.ActResult(json.dumps({"again": 1}))
+            page.mine[args["key"]] = control
+            self.typed_sealed.append(self.sealed)
+            control.value = args["text"]
+            if page.on_type is not None:
+                page.on_type(page, control)
+            return drive.ActResult(json.dumps({"ok": 1, "ms": args["ms"]}))
+        if op == "choose":
+            key = next((k for k, known in page.mine.items() if known is control), args["key"])
+            if control.role == "select":
+                match = next((o for o in control.options if o.casefold() == str(args["option"]).strip().casefold()), None)
+                if match is None:
+                    return drive.ActResult(json.dumps({"missing": 1}))
+                control.value = match
+            else:
+                control.checked = bool(args["checked"])
+            page.mine[key] = control
+            return drive.ActResult(json.dumps({"ok": 1, "value": control.sent_value(), "key": key}))
+        if op == "click":
+            self.clicks.append((tab, n))
+            if control.goes_to:
+                return self._go(tab, control.goes_to, {"ok": 1})
+            return drive.ActResult(json.dumps({"ok": 1}))
+        if op == "scroll":
+            return drive.ActResult(json.dumps({"top": 120, "height": 2400}))
+        if op == "form":
+            return drive.ActResult(json.dumps(self._form(page, control, args["mine"])))
+        self.unapproved.append((tab, op))
+        return drive.ActResult(json.dumps({"ok": 1}))
+
+    @staticmethod
+    def whole(value: str) -> dict[str, Any]:
+        """A value as agent.drive's form script gives it: its first 2,001 characters, its length and a hash."""
+        return {"value": value[:2001], "len": len(value), "hash": hashlib.sha256(value.encode("utf-8")).hexdigest()[:8]}
+
+    def _form(self, page: FakePage, control: FakeControl, mine: list[int]) -> dict[str, Any]:
+        values = {str(k): self.whole(page.mine[k].sent_value()) for k in mine if k in page.mine}
+        missing = [k for k in mine if k not in page.mine or page.mine[k] not in page.controls]
+        form = control.form
+        fields = []
+        if form:
+            for c in page.controls:
+                if c.form != form or not c.field or c.role in ("submit", "button", "link"):
+                    continue
+                if c.role in ("checkbox", "radio") and not c.checked:
+                    continue
+                key = next((k for k, known in page.mine.items() if known is c), 0)
+                fields.append({**self.whole(c.sent_value()), "k": key, "name": c.field, "hidden": c.hid})
+            fields += [{**self.whole(value), "k": 0, "name": name, "hidden": hidden}
+                       for number, name, value, hidden in page.extra if number == form]
+        method, action, target = (list(page.forms[form - 1]) + [""])[:3] if form and form <= len(page.forms) \
+            else ("", "", "")
+        how = control.how()
+        if how == "submit":
+            action = control.formaction or action
+            target = control.formtarget or target
+        return {"words": control.name, "form": bool(form), "how": how, "method": method, "action": action,
+                "target": target, "fields": fields, "mine": values, "missing": missing, "url": self._address(page),
+                "title": page.title}
+
+    def _go(self, tab: int, address: str, answer: dict[str, Any]) -> Any:
+        from briefing_reader.agent import drive
+
+        page = self.pages.get(address)
+        self.loads.append(address)
+        if page is not None:
+            page.gen, page.mine = "", {}
+        self.tabs[tab] = page
+        if tab == self.active:
+            self.current = page
+        return drive.ActResult(json.dumps(answer), navigated=True, final_url=address)
+
+    def press_approved(self, tab: int, source: str, hosts: Sequence[str], *, settle_s: float, timeout_s: float,
+                       cancelled: Callable[[], bool]) -> Any:
+        """The seal lifts for ``hosts`` only (recorded); a new page lifts it whole, none puts it back."""
+        from briefing_reader.agent import drive
+
+        self.press_hosts.append(tuple(hosts))
+        was = self.sealed
+        result = self._press(tab, source)
+        self.sealed = was and not result.navigated
+        self.sealed_after.append(self.sealed)
+        return result
+
+    def _press(self, tab: int, source: str) -> Any:
+        from briefing_reader.agent import drive
+
+        page = self.tabs.get(tab)
+        found = self._DRIVE_RE.search(source)
+        if page is None or found is None or found.group(1) != "press":
+            return drive.ActResult(ok=False)
+        args = json.loads(found.group(2))
+        if self.before_press is not None:
+            self.before_press(page)
+        seen = self.seen(page)
+        if args["gen"] != page.gen or not 1 <= args["n"] <= len(seen):
+            return drive.ActResult(json.dumps({"stale": 1}))
+        control = seen[args["n"] - 1]
+        if json.dumps(self._form(page, control, args["mine"])) != args["expect"]:
+            return drive.ActResult(json.dumps({"changed": 1}))
+        how = control.how()
+        if control.press == "invalid":
+            return drive.ActResult(json.dumps({"ok": 1, "how": how, "fired": False, "prevented": False}))
+        held = {c.field or c.name: c.sent_value() for c in page.controls
+                if control.form and c.form == control.form and c.role not in ("submit", "button")}
+        held.update({name: value for number, name, value, _hidden in page.extra if number == control.form})
+        self.presses.append((tab, args["n"], held))
+        answer = {"ok": 1, "how": how, "fired": how in ("submit", "enter"), "prevented": control.press == "prevent"}
+        if control.goes_to and control.press != "prevent":
+            return self._go(tab, control.goes_to, answer)
+        return drive.ActResult(json.dumps(answer))
+
+
 class FakeEngineRunner(FakeRunner):
     """FakeRunner with its queue holding FakeEngines too (its start() hands them what they were started with): Claude
     Code's quick commands answer like 2.1.293's."""
@@ -446,5 +713,6 @@ def agent_engine(root: Path, runner: Any, **agent: Any) -> AgentEngine:
     return AgentEngine(replace(AgentConfig(enabled=True), **agent), base_engine(root, runner))
 
 
-__all__ = ["AUTH_OK", "FAST", "FIXTURES", "FakeBrowser", "FakeEngine", "FakeEngineRunner", "FakePage", "Killed",
+__all__ = ["AUTH_OK", "FAST", "FIXTURES", "FakeBrowser", "FakeControl", "FakeDriveBrowser", "FakeEngine",
+           "FakeEngineRunner", "FakePage", "Killed",
            "agent_engine", "base_engine", "init_event", "rate_limit_event", "result_event"]
