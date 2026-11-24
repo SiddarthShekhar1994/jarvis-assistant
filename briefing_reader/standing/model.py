@@ -275,6 +275,7 @@ class Agent:
     lands: tuple[str, str] = ()
     lands_name: str = ""
     lands_columns: tuple[tuple[str, str, tuple[str, ...]], ...] = ()
+    lands_keys: int = 1                          # a new sheet's key columns: its first 1..3 (build plan item 6)
 
     kind = KIND_AGENT
 
@@ -347,16 +348,23 @@ def _lands(value: Any) -> dict[str, Any]:
         raise DefinitionError("where it writes has no name")
     if not item_id and kind == docs_model.KIND_SHEET and not columns:
         raise DefinitionError("a new sheet needs its columns")
-    return {"lands": (kind, item_id), "lands_name": name, "lands_columns": tuple(columns)}
+    # A new sheet's key columns (build plan item 6): its first 1..3 columns; an older file has none (1).
+    keys = _integer(value.get("keys", 1), "the key columns", 1, docs_model.MAX_KEY_COLUMNS)
+    if keys > 1 and (kind == docs_model.KIND_DOC or (columns and keys > len(columns))):
+        raise DefinitionError("the key columns are more than its columns")
+    return {"lands": (kind, item_id), "lands_name": name, "lands_columns": tuple(columns), "lands_keys": keys}
 
 
 def lands_data(agent: Agent) -> dict[str, Any] | None:
     if not agent.lands:
         return None
     kind, item_id = agent.lands
-    return {"kind": kind, "id": item_id, "name": agent.lands_name,
-            "columns": [{"name": name, "type": type_, "choices": list(choices)}
-                        for name, type_, choices in agent.lands_columns]}
+    data: dict[str, Any] = {"kind": kind, "id": item_id, "name": agent.lands_name,
+                            "columns": [{"name": name, "type": type_, "choices": list(choices)}
+                                        for name, type_, choices in agent.lands_columns]}
+    if agent.lands_keys != 1:                    # written only when not 1: an older file reads the same
+        data["keys"] = agent.lands_keys
+    return data
 
 
 # --------------------------------------------------------------------------

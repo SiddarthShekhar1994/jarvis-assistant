@@ -145,6 +145,12 @@ your own scheduled routine (see
   plan: at most 30 runs a day for all of them. Off until you turn it on, and
   nothing runs before your yes on its consent card. See
   [Standing agents and rules](#standing-agents-and-rules).
+- **Radar.** Four ready-made standing agents on the Agents screen:
+  internships, hackathons, deadlines and subscriptions (renewals and free
+  trials that end). One click adds one as a draft, made on this PC without
+  any Claude run; it reads only the mail its filter matches, fills a sheet of
+  its own with rows that wait for your Keep, and is off until you turn it on.
+  See [Radar (ready-made agents)](#radar-ready-made-agents).
 - **Always at hand.** **Ctrl+Alt+J** opens Jarvis from anywhere, and so does a
   Start menu shortcut. Minimize him to his taskbar button; while a scheduled
   run waits for the briefing, only his tray icon shows. See
@@ -441,9 +447,6 @@ Planned for later versions; none of these is built yet, and all of them will
 keep the same rules (they propose, your click approves, and what they did
 shows, in LIVE or, for standing jobs, on the Agents screen):
 
-- **Radar**: ready-made standing agents for internships, hackathons,
-  deadlines and subscriptions (renewals, trials that end) worth your
-  attention.
 - **A live browser Jarvis drives**: he opens and fills in pages in a browser
   you can watch, and every submit waits for your click.
 - **Smaller items**: changing settings in the app (the Settings screen is
@@ -3494,6 +3497,49 @@ receipts (a matched mail's sender and subject, the values found) and cards
 stay on this PC for 7 days (`keep_days`), and **Clear** deletes them. See
 also [Privacy and cost](#privacy-and-cost).
 
+#### Radar (ready-made agents)
+
+While Documents are on, the Agents screen has a **Radar** card with four
+ready-made agents: **Internships**, **Hackathons**, **Deadlines** and
+**Subscriptions**. Each button adds that agent as a draft, made on this PC
+from fixed words and filters: no Claude run, nothing counted against your
+runs, nothing leaves the PC. The card offers only the ones you have not added
+yet, steps aside while Jarvis is setting another job up, and **Hide** puts it
+away (kept in `standing_app.json`); the line **Show them** on the Agents
+screen brings it back.
+
+| Agent | Wakes | Reads (each account) | Lines up | Its sheet (columns) |
+|---|---|---|---|---|
+| Internships radar | on new mail | mail matching `internship`, `internships` | to-dos | Internships: Company, Role, Deadline, Link, Status |
+| Hackathons radar | on new mail | mail matching `hackathon`, `hackathons` | to-dos | Hackathons: Hackathon, Organizer, Deadline, Link, Status |
+| Deadlines radar | every day at 8:00 AM | mail matching `deadline`, `"due date"`; your calendar for 14 days when an account has the `calendar` feature | to-dos | Deadlines: What, Due, From, Link, Status |
+| Subscriptions radar | on new mail | mail matching `subscription`, `trial` | calendar reminders, 3 days before the date | Subscriptions: Service, Amount, Renews on, Kind, Link |
+
+Each reads the signed-in accounts that can read mail (`gmail_read`), the
+first two by name; when none is signed in yet, the ones that can read mail,
+each with its **Sign in** button on the card. Each reports only when
+something needs you and runs at most `agent_runs_per_day` times a day. None
+drafts a reply.
+
+The setup card shows its exact words first ("Does: ..."), then what it reads,
+what it may line up and where it writes, as for any draft. It is **off** until
+you turn it on: **Turn on** waits for your yes on the consent card and for its
+accounts' sign-in, then makes its sheet (or uses a sheet of the same name you
+already have, which it never writes to before then). What a run finds waits
+in the sheet for your **Keep**; a row whose first columns (its keys: Company
+and Role, What and Due, Service and Amount, or the hackathon's name) match a
+kept row's becomes changes to that row; a sheet you already had keeps its own
+keys. Subscriptions' reminders are events
+that wait on Approvals like any other. **Edit** puts its words in the bar to
+reword and set up as your own agent; **Discard** removes the draft, and the
+card offers it again. **Pause all** stops these as it stops every job.
+
+These agents read mail only. An agent's run has no tools and no web, and the
+consent card says so: a search built from what a mail says would leave the PC
+without a click and could be steered by that mail. For web research, ask
+Jarvis yourself in the bar (Ask). A web option for a ready-made agent would
+need a new consent card first, in a later version.
+
 ## TODAY and DEADLINES
 
 The **Day view** (click the header clock; Esc closes it) shows your day.
@@ -5662,7 +5708,7 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `memory.json` | The productivity bundle's memory ([Memory](#memory-the-memory-tab)): **the only file with your own text** - your notes, typed or suggestions you kept, each with an id, TOLD or SUGGESTED and when it was made or changed; and, for suggestions you dismissed, a short hash of each word (not the sentence; a common word or a name could be guessed from its hash). Written only by the app (the command line reads it without changing it). Delete it (also while Jarvis runs: the next Ask, MEMORY and any change take the file as it is), or delete the notes in MEMORY, to forget everything. If it can't be read, Jarvis never overwrites it (MEMORY says so). |
 | `standing.json` | The [standing agents and rules](#standing-agents-and-rules) as you set them up: each one's name, your own words or sentence, its filters, when it runs, what it may line up, its tidy-up (and its label's id and name), its status and cap, its dry run's counts and the Google account ids Turn on recorded. Written only by the app, on your clicks. A damaged file, or one a newer version wrote, is kept read only: nothing runs and nothing is saved over it (the Agents screen says so). Delete it to remove every agent and rule. |
 | `captures.json`, `captures\<id>\source.<ext>` | [Capture](#capture-pictures-pdfs-text-and-calendar-files): each capture's label, counts and cards (titles, times, places, where it came from) and the kept copy of what you dropped in. Written only by the app. A capture goes 30 days after it was made, or 7 days after its last card was decided; **Clear capture** removes one at once. A damaged file, or one a newer version wrote, is kept read only. |
-| `standing_app.json` | The app's side of them: your yes on their consent card (and on each account's tidy-up card), Pause all, the cards you withdrew, the receipts you undid, when you last cleared and which runs were told. Ids and times only. |
+| `standing_app.json` | The app's side of them: your yes on their consent card (and on each account's tidy-up card), Pause all, the cards you withdrew, the receipts you undid, when you last cleared, which runs were told and whether the Radar card is hidden. Ids, times and that switch only. |
 | `standing_state.json` | The background check's own state: per job its last run and its last time slot, per job and account the Gmail ids it saw and how far it has read, what it proposed (stable keys, so nothing is proposed twice), a hold after a plan limit, the last check (and the last one the scheduled task started), the runs not told yet and an account it could not read. Written only by the check; no subject, sender or text. |
 | `standing_runs\` | One file per run (`<date>-<time>-<id>.json`), written once: an agent's report, the run's cards (with a draft and its recipients) and its receipts (each matched mail's sender, subject and Gmail ids, the values a rule found, each tidy-up with the labels before and after). Private: they hold what was written from your mail. Kept `[standing] keep_days` (7) days, then deleted by the check; **Clear** on the Agents screen deletes them at once (a run with a card still waiting keeps its file until you decide that card). |
 | `standing_requests\` | A **Run now** request (`<job id>.json`), taken and deleted by the next check. |
@@ -6050,7 +6096,8 @@ Jarvis builds of their answers, the tidy-up holds and the dry run;
 `test_standing_app.py` for the Agents screen, the spoken line and a Reply
 checked again at the click; `test_standing_setup.py` for setting jobs up from
 the chat; `test_standing_tidy.py` for the tidy-up's gates, its journal and its
-exact Undo; and `standing_fakes.py`, their invented jobs, run files and Gmail)
+exact Undo; `test_standing_radar.py` for Radar's ready-made agents, their
+drafts made without a run and the Radar card; and `standing_fakes.py`, their invented jobs, run files and Gmail)
 use invented mail only and fakes for Gmail, the Google sign-ins and Claude
 Code, keep every file in a temporary folder, and check that no subject,
 address, report or sentence of yours reaches a log. The lock and cap tests

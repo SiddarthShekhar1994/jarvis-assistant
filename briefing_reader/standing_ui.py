@@ -62,6 +62,12 @@ The spoken line
     records, during focus mode, or while Windows says the owner is busy (presentation mode, a full-screen program);
     the conversation shows it at once. Each run is told once (AppState "announced"), never older than 12 hours.
 
+Radar (build plan item 6)
+    While Documents are on, the Radar card offers the ready-made agents not added yet (standing.radar) and Hide
+    (AppState "radar_hidden"; the line's link "standing:radar" brings it back); it steps aside while a setup card shows
+    or a setup or dry run runs. A button adds that preset's draft (standing_setup.add_preset: no run, no usage) on the setup card, whose
+    first line is "Does: <its words>"; Turn on, Edit and Discard are a setup's.
+
 Logs: run ids, job ids, kinds, counts, statuses and problem codes only; never a name, sentence, report, subject or
 address.
 """
@@ -86,7 +92,7 @@ from .board.resting import AgentLine
 from .actions import CALENDAR, REPLY, SOURCE_STANDING, STANDING_MODES, STATUS_DENIED, TODO, ProposedAction
 from .google_auth import PROBLEM_DENIED, logged_alias
 from .standing import cards as standing_cards
-from .standing import schedule
+from .standing import radar, schedule
 from .standing import tidy as tidy_mod
 from .standing.model import (KIND_AGENT, KIND_RULE, STATUS_DRAFT, STATUS_LIVE, STATUS_PAUSED, STATUS_TRIED,
                              TRIGGER_EVERY, TRIGGER_MAIL, TRIGGER_TIME, WEEKDAYS, Agent,
@@ -118,8 +124,7 @@ CONSENT_LINK = "standing:consent"     # the consent card back after its Not now
 TIDY_LINK = "standing:tidy:"          # + the alias: a tidy-up's sign-in card back after its Not now
 DOCS_LINK = "standing:docs:"          # + an item's id: its Open (build plan item 5: an agent's rows wait there)
 DOCS_OPEN_TEXT = "Open"
-DOCS_OFF_TEXT = ("Documents are off on this PC ([docs] enabled = false), so Jarvis can't make where this agent "
-                 "writes; turn them on, or set it up without it")
+DOCS_OFF_TEXT = standing_setup.DOCS_OFF_TEXT
 DOCS_NOT_MADE_TEXT = "Jarvis couldn't make the document or sheet this agent writes to; nothing was turned on"
 ANNOUNCE_KEY = "standing:"        # + the run id: the spoken line's key (KIND_NOTICE)
 
@@ -143,6 +148,18 @@ SETUP_FAILED_TEXT = "Jarvis couldn't set that up just now; try again."
 INSTALLER_TEXT = ("Background runs: run install-schedule.ps1 again (README, step 6). It adds the \"Briefing agents\" "
                   "task, which checks every 5 minutes, also while Jarvis is closed.")
 CONSENT_CARD, SETUP_CARD, START_CARD = "consent", "setup", "start"
+# Radar (build plan item 6): ready-made agents, each added as a draft by a click (no run: standing.radar).
+RADAR_CARD = "radar"
+RADAR_LINK = "standing:radar"     # the Radar card back after its Hide
+RADAR_KICKER = "Radar · ready-made agents"
+RADAR_TITLE = "Keep an eye on internships, hackathons, deadlines and subscriptions"
+RADAR_LINES = (
+    "Each is an agent set up for you: it reads only the mail its filter matches and lines up rows in a sheet of its "
+    "own for your Keep.",
+    "Add one and it is a draft to check first: nothing runs and nothing leaves this PC until you Turn it on.",
+)
+RADAR_HIDDEN_TEXT = "Radar's ready-made agents are hidden."
+RADAR_SHOW_TEXT = "Show them"
 SIGN_IN_ACTION = "signin:"        # + the alias: the setup card's Sign in <alias>
 SIGN_IN_RUNNING = "Finish the sign-in in your browser..."
 SIGNED_IN_TEXT = "The {alias} account is signed in."
@@ -904,6 +921,8 @@ class StandingController(QObject):
             for alias in sorted(self._tidy_later & set(self._tidy_wanted(later=True))):
                 notes.append((f"Your rules' tidy-up on the {alias} account waits for its own sign-in.",
                               "Show the card", TIDY_LINK + alias))
+        if self.app_state.radar_hidden and self._docs_on() and radar.missing(self.agents):
+            notes.append((RADAR_HIDDEN_TEXT, RADAR_SHOW_TEXT, RADAR_LINK))
         return dot.join(parts), notes
 
     def _next_run(self, now: datetime, state: Mapping[str, Any]) -> datetime | None:
@@ -1422,6 +1441,10 @@ class StandingController(QObject):
         elif link_id == CONSENT_LINK:
             self._consent_later = False
             self._show()
+        elif link_id == RADAR_LINK:
+            if not self.app_state.set_radar_hidden(False):
+                self._note("Jarvis couldn't save that (standing_app.json); nothing changed.")
+            self._show()
         elif link_id.startswith(TIDY_LINK):
             self._tidy_later.discard(link_id[len(TIDY_LINK):])
             self._show()
@@ -1805,10 +1828,14 @@ class StandingController(QObject):
         docs = getattr(self.host, "docs", None)
         if docs is None:
             return DOCS_OFF_TEXT
-        item_id = docs.make_for_agent(job.lands[0], job.lands_name, job.lands_columns)
+        # One of that name made since the setup (or the Radar Add): used as it is, nothing written to it.
+        found = docs.store.find_by_name(job.lands_name, job.lands[0])
+        if found is not None:
+            return replace(job, lands=(job.lands[0], found.id), lands_columns=(), lands_keys=1)
+        item_id = docs.make_for_agent(job.lands[0], job.lands_name, job.lands_columns, keys=job.lands_keys)
         if not item_id:
             return DOCS_NOT_MADE_TEXT
-        return replace(job, lands=(job.lands[0], item_id), lands_columns=())
+        return replace(job, lands=(job.lands[0], item_id), lands_columns=(), lands_keys=1)
 
     def discard_setup(self) -> None:
         draft, self._setup = self._setup, None
@@ -1847,9 +1874,54 @@ class StandingController(QObject):
         self.discard_setup()
         self._to_bar(f"{kind}: {draft.words}")
 
+    # ---- Radar: ready-made agents (build plan item 6) -------------------------------------------------------------
+
+    def _docs_on(self) -> bool:
+        return (getattr(getattr(self.config, "docs", None), "enabled", True)
+                and getattr(self.host, "docs", None) is not None)
+
+    def add_preset_card(self, key: str) -> None:
+        """The Radar card's Internships / Hackathons / Deadlines / Subscriptions: that preset's draft, made here from
+        fixed data (no run, no usage, nothing leaves the PC), saved as a setup's draft is and shown on the setup card
+        to check, Turn on, Edit or Discard."""
+        if self._closed:
+            return
+        if self._busy:
+            self._note(SETUP_BUSY_TEXT)
+            return
+        preset = radar.preset_of(key)
+        if preset is None:
+            return
+        outcome = standing_setup.add_preset(key, self.config, self._accounts(), now=self._now())
+        if outcome.job is None:
+            self._note(outcome.refusal or SETUP_FAILED_TEXT)
+            return
+        if not self._save([*self.agents, outcome.job], list(self.rules)):
+            return
+        self._setup = standing_setup.SetupDraft(preset.words, KIND_AGENT, job=outcome.job, preset=preset.key)
+        self.reload(announce=False)
+        self._open_screen()
+
+    def _radar_cards(self) -> list[NoticeCard]:
+        offered = radar.missing(self.agents)
+        if (not offered or self.app_state.radar_hidden or self._busy or self._setup is not None
+                or not self._docs_on()):
+            return []
+        buttons = [CardButton(preset.key, preset.label, LOOK_GO) for preset in offered]
+        buttons.append(CardButton("hide", "Hide", LOOK_GHOST))
+        return [NoticeCard(RADAR_CARD, RADAR_KICKER, RADAR_TITLE, RADAR_LINES, tuple(buttons), tone=holo.TONE_CYAN)]
+
     def _on_card(self, card_id: str, action: str) -> None:
         if card_id == START_CARD and action in (KIND_RULE, KIND_AGENT):
             self.prefill(action)
+            return
+        if card_id == RADAR_CARD:
+            if action == "hide":
+                if not self.app_state.set_radar_hidden(True):
+                    self._note("Jarvis couldn't save that (standing_app.json); nothing changed.")
+                self._show()
+            else:
+                self.add_preset_card(action)
             return
         if card_id.startswith(TIDY_CARD):
             alias = card_id[len(TIDY_CARD):]
@@ -1884,6 +1956,12 @@ class StandingController(QObject):
             self.discard_setup()
 
     def _notice_cards(self) -> list[NoticeCard]:
+        """The cards at the top of the Agents screen: the start, consent and tidy-up cards, the setup card, then the
+        Radar card (while Documents are on, it is not hidden, no setup card shows, nothing runs and a preset is
+        left)."""
+        return self._job_cards() + self._radar_cards()
+
+    def _job_cards(self) -> list[NoticeCard]:
         cards: list[NoticeCard] = []
         consented = self.app_state.consented()
         if not self.agents and not self.rules and self._setup is None:
@@ -1911,7 +1989,8 @@ class StandingController(QObject):
                                     (CardButton("edit", "Edit", LOOK_GO), CardButton("dismiss", "Dismiss", LOOK_GHOST)),
                                     tone=holo.TONE_STEEL))
             return cards
-        lines = list(standing_setup.job_lines(job, self.config, self._hour24()))
+        lines = list(standing_setup.job_lines(job, self.config, self._hour24(),
+                                              does=job.words if draft.preset and isinstance(job, Agent) else ""))
         if draft.say:
             lines.append(f"Jarvis's note: {draft.say}")
         if draft.dry is not None:

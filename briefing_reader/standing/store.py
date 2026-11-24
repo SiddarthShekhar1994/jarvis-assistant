@@ -265,7 +265,8 @@ CONSENT_VERSION = 1
 
 class AppState:
     """standing_app.json: {"consent": {"version", "at"} | null, "paused_all", "withdrawn": {card id: at},
-    "undone": {receipt id: at}, "cleared_before": at, "announced": {run id: at}}. Written only by the app; the
+    "undone": {receipt id: at}, "cleared_before": at, "announced": {run id: at}, "radar_hidden"}. Written only by
+    the app; the
     runner reads it (consent, Pause all, withdrawn cards, undone receipts)."""
 
     def __init__(self, files: StandingFiles) -> None:
@@ -322,6 +323,16 @@ class AppState:
     def set_paused_all(self, paused: bool) -> bool:
         with self._lock:
             self.data["paused_all"] = bool(paused)
+            return self._save()
+
+    @property
+    def radar_hidden(self) -> bool:
+        """The Agents screen's Radar card put away with Hide (build plan item 6); its line brings it back."""
+        return self.data.get("radar_hidden") is True
+
+    def set_radar_hidden(self, hidden: bool) -> bool:
+        with self._lock:
+            self.data["radar_hidden"] = bool(hidden)
             return self._save()
 
     def mark(self, key: str, ids: Iterable[str], now: datetime | None = None) -> bool:

@@ -18,7 +18,12 @@ Turn on's checks, and the words of the setup and consent cards.
                                  its Sign in <alias> button on the job's row and setup card
     sign_in_first(aliases, *, edit=True) -> str  what to do while those accounts are not signed in to Jarvis
     bindings_of(job, accounts) -> tuple    the (alias, Google account id) pairs Turn on records
-    job_lines(job, config, hour24) / dry_lines(rule, outcome)    what a setup card says (plain text)
+    job_lines(job, config, hour24, *, does) / dry_lines(rule, outcome)    what a setup card says (plain text;
+                                 ``does``: a ready-made agent's words, first as "Does: <words>")
+    add_preset(key, config, accounts, *, now) -> SetupOutcome
+        a Radar preset's draft (standing.radar), made without any run: no engine, no usage, nothing leaves the PC.
+        Its accounts: the signed-in accounts that read mail, the first two by name (none signed in: the ones that
+        read mail, whose Sign in shows on the card); Documents must be on (DOCS_OFF_TEXT)
     CONSENT_*                    the one-time consent card's words
 
 Nothing of a sentence, a filter, a mail or an answer is logged: kinds, counts and outcomes only.
@@ -34,7 +39,7 @@ from datetime import datetime
 from typing import Any
 
 from .google_auth import PROBLEM_EXPIRED, PROBLEM_SIGNED_OUT
-from .standing import dryrun, rules, setup
+from .standing import dryrun, radar, rules, setup
 from .standing.engine import KIND_RULE, KIND_SETUP, StandingEngine
 from .standing.model import (ACTION_EVENT, ACTION_REPLY, ACTION_TELL, ACTION_TODO, PROPOSE_CALENDAR,
                              PROPOSE_REPLY, PROPOSE_TODO, REPORT_EVERY, STATUS_DRAFT, STATUS_TRIED, TIDY_ARCHIVE,
@@ -73,6 +78,8 @@ CONSENT_YES = "Yes, let them run"
 CONSENT_LATER = "Not now"
 PRIVACY_LINE = ("When it runs, the text of the mail its filter matches goes to your Claude plan without a click; "
                 "anything it lines up waits for yours.")
+DOCS_OFF_TEXT = ("Documents are off on this PC ([docs] enabled = false), so Jarvis can't make where this agent "
+                 "writes; turn them on, or set it up without it")
 
 
 @dataclass(frozen=True)
@@ -180,6 +187,32 @@ def run_setup(engine: Any, words: str, config: Any, usage: Any, *, now: datetime
         job = preferred
     logger.info("Standing: set up a draft %s %s", job.kind, job.id)
     return SetupOutcome(job=job, say=say)
+
+
+def add_preset(key: str, config: Any, accounts: Mapping[str, Any] | None, *, now: datetime) -> SetupOutcome:
+    """A Radar preset's draft (see the module docstring): fixed data, no run. Runs on the UI thread (files only)."""
+    preset = radar.preset_of(key)
+    if preset is None:
+        return SetupOutcome(refusal="Jarvis has no ready-made agent of that name")
+    if not getattr(getattr(config, "docs", None), "enabled", True):
+        return SetupOutcome(refusal=DOCS_OFF_TEXT)
+    caps = accounts_caps(config)
+    can_read = [alias for alias, can in caps.items() if "read" in can]
+    if not can_read:
+        first = next(iter(caps), "")
+        return SetupOutcome(refusal=(f'The {first} account can\'t read mail yet (config.toml features "gmail_read")'
+                                     if first else 'No account can read mail yet (config.toml features "gmail_read")'))
+    ready = [alias for alias in can_read if signed_in((accounts or {}).get(alias))]
+    picked = (ready or can_read)[:radar.MAX_ACCOUNTS]
+    settings = config.standing
+    try:
+        job = radar.preset_agent(preset, picked, calendar_ok=any("calendar" in can for can in caps.values()),
+                                 docs_dir=getattr(config, "data_dir", None), now=now,
+                                 runs_per_day=settings.agent_runs_per_day, min_every=settings.min_every_minutes)
+    except setup.SetupRefused as refused:
+        return SetupOutcome(refusal=str(refused))
+    logger.info("Standing: ready-made %s added as draft %s", preset.key, job.id)
+    return SetupOutcome(job=job)
 
 
 def run_dry(engine: Any, rule: Rule, reader: Any, config: Any, usage: Any, *, now: datetime, time_zone_name: str,
@@ -362,10 +395,11 @@ def writes_to(job: Agent) -> str:
     return f"Writes to: {job.lands_name} (a new document)"
 
 
-def job_lines(job: Agent | Rule, config: Any, hour24: bool = False) -> tuple[str, ...]:
-    """What a setup card says a draft does (plain text; the filters and words as the definition holds them)."""
+def job_lines(job: Agent | Rule, config: Any, hour24: bool = False, *, does: str = "") -> tuple[str, ...]:
+    """What a setup card says a draft does (plain text; the filters and words as the definition holds them).
+    ``does``: a ready-made agent's exact words, its first line (the owner did not type them)."""
     if isinstance(job, Agent):
-        lines = [f"When: {_trigger(job, hour24)}"]
+        lines = ([f"Does: {does}"] if does else []) + [f"When: {_trigger(job, hour24)}"]
         reads = [f"{source.account} mail matching {source.query}" for source in job.mail]
         if job.calendar_days:
             reads.append("your calendar" if job.calendar_days == 1 else f"your calendar, {job.calendar_days} days")
@@ -435,3 +469,4 @@ class SetupDraft:
     dry: DryOutcome | None = None
     note: str = ""
     busy: str = ""                    # "setup" while its setup runs, "dry" while its dry run runs
+    preset: str = ""                  # a Radar preset's key: the card's first line is "Does: <its words>"

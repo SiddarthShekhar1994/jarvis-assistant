@@ -981,9 +981,10 @@ class DocsController(QObject):
 
     # ---- standing agents' runs (part 4) ------------------------------------------------------------------------
 
-    def make_for_agent(self, kind: str, name: str, columns: Any = ()) -> str:
+    def make_for_agent(self, kind: str, name: str, columns: Any = (), keys: int = 1) -> str:
         """Turn on of an agent that writes to a new document or sheet: it is made now, empty (a sheet with its
-        columns; the first is the key a later run's duplicates are matched by). "" when it can't be."""
+        columns; the first ``keys`` (1..3) are the keys a later run's duplicates are matched by). "" when it can't
+        be."""
         if kind == model.KIND_DOC:
             item_id, reason = self.store.create_doc(name or NEW_DOC_NAME)
         else:
@@ -994,7 +995,10 @@ class DocsController(QObject):
                     made.append(column)
             if not made:
                 return ""
-            item_id, reason = self.store.create_sheet(name or NEW_SHEET_NAME, made, keys=[made[0].id])
+            count = max(1, min(keys if isinstance(keys, int) and not isinstance(keys, bool) else 1,
+                               model.MAX_KEY_COLUMNS))
+            item_id, reason = self.store.create_sheet(name or NEW_SHEET_NAME, made,
+                                                      keys=[column.id for column in made[:count]])
         if not item_id:
             logger.info("Docs: an agent's %s not made (%s)", kind, reason)
             return ""
