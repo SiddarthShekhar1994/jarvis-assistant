@@ -959,6 +959,89 @@ class ClientTests(unittest.TestCase):
         for word in ("Ana", "Lima", "Ivy", "Dinner"):
             self.assertNotIn(word, joined)
 
+    def test_his_line_never_waits_a_minute_for_the_unknown_word_model(self) -> None:
+        speaker = WordWaitSpeaker()
+        with self.assertLogs("briefing_reader.local_voice", level="INFO") as captured:
+            client, _procs = self.client(load=lambda: speaker)
+            with self.assertRaises(lv.LocalVoiceError) as caught:
+                client.synthesize("an unknown word", self.audio / "a.wav", urgent=True)
+        self.assertEqual(caught.exception.code, lv.ERR_WORD)          # the Windows voice says this line
+        self.assertIn(lv.ERR_WORD, lv.LINE_ERRORS)                     # ... and the next one asks again
+        self.assertEqual(client.synthesize("an unknown word", self.audio / "b.wav").duration_ms, 300)   # a briefing's
+        self.assertEqual(client.synthesize("hello", self.audio / "c.wav", urgent=True).duration_ms, 100)
+        self.assertEqual(speaker.urgent_seen, [True, False, True])
+        self.assertTrue(any("unknown-word model is ready after 1.2 s" in line for line in captured.output))
+
+
+class WordWaitSpeaker(FakeSpeaker):
+    """The unknown-word model ends loading while the voice warms; "unknown" is a word only it knows, not loaded yet."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.urgent_seen: list[bool] = []
+
+    def prepare(self, voice: str) -> None:
+        super().prepare(voice)
+        lw._tell({"word_helper": "ready", "ms": 1234})
+
+    def speak(self, text: str, voice: str, speed: float):
+        self.urgent_seen.append(lw._Line.urgent)
+        if "unknown" in text and lw._Line.urgent:
+            raise lw.WordNotReady
+        return super().speak(text, voice, speed)
+
+
+class WordWaitTests(unittest.TestCase):
+    CONFIG = WordFallbackTests.CONFIG
+
+    def slow(self) -> tuple[lw.WordFallback, threading.Event]:
+        release = threading.Event()
+
+        def loader(folder):
+            release.wait(5)
+            return self.CONFIG, lambda ids: [0, 4, 5, 2], 62
+
+        self.addCleanup(release.set)
+        return lw.WordFallback(Path("g2p"), loader=loader), release
+
+    def test_his_own_line_waits_only_briefly(self) -> None:
+        fallback, release = self.slow()
+        with mock.patch.object(lw, "URGENT_WORD_WAIT_S", 0.05), mock.patch.object(lw._Line, "urgent", True):
+            began = time.monotonic()
+            with self.assertRaises(lw.WordNotReady):
+                fallback(token("ab", None))
+            self.assertLess(time.monotonic() - began, 1.0)
+        with mock.patch.object(lw, "FALLBACK_WAIT_S", 0.05):
+            self.assertEqual(fallback(token("ab", None)), ("", 1))       # a briefing's: left unsaid, as before
+        release.set()
+        with mock.patch.object(lw._Line, "urgent", True):
+            self.assertEqual(fallback(token("ab", None)), ("xy", 1))    # loaded: his line says it
+
+    def test_the_load_time_is_told_once(self) -> None:
+        told: list[dict] = []
+        with mock.patch.object(lw, "_notice", told.append):
+            fast = lw.WordFallback(Path("g2p"), loader=lambda folder: (self.CONFIG, lambda ids: [0, 2], 62))
+            self.assertEqual(fast(token("ab", None)), ("", 1))
+
+            def broken(folder):
+                raise OSError("no torch")
+
+            lw.WordFallback(Path("g2p"), loader=broken)(token("ab", None))
+        self.assertEqual([item["word_helper"] for item in told], ["ready", "failed"])
+        self.assertTrue(all(isinstance(item["ms"], int) and set(item) == {"word_helper", "ms"} for item in told))
+
+    @unittest.skipUnless(HAVE_NUMPY, "numpy is not installed")
+    def test_handle_answers_word_wait_and_forgets_the_mark(self) -> None:
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        root, speaker = Path(tmp.name), WordWaitSpeaker()
+        request = {"id": 3, "text": "an unknown word", "voice": "bm_george", "out": str(root / "a.wav"), "urgent": True}
+        self.assertEqual(lw.handle(request, speaker, root), {"id": 3, "ok": False, "error": lv.ERR_WORD})
+        self.assertFalse(lw._Line.urgent)
+        request.pop("urgent")
+        self.assertTrue(lw.handle(request, speaker, root)["ok"])
+        self.assertEqual(speaker.urgent_seen, [True, False])
+
 
 if __name__ == "__main__":
     unittest.main()

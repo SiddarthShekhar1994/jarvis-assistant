@@ -56,6 +56,15 @@ WM_SYSCOMMAND = 0x0112
 WM_MOUSEMOVE = 0x0200
 WM_NCMOUSELEAVE = 0x02A2
 VK_SPACE = 0x20
+# Remote Desktop (2026-11-24): there a layered window shows nothing (Windows sends a layered window's picture as a
+# layered picture, and Qt draws this window through its GPU swap chain, not into that picture), so the window is drawn
+# solid while the session is remote.
+GWL_EXSTYLE = -20
+WS_EX_LAYERED = 0x00080000
+SM_REMOTESESSION = 0x1000
+WM_DISPLAYCHANGE = 0x007E
+WM_WTSSESSION_CHANGE = 0x02B1
+REMOTE_CHECK_MS = 2000   # how often a shown window looks again (a fade or a new flag makes Qt layer it again)
 
 HTCLIENT, HTCAPTION, HTMAXBUTTON = 1, 2, 9
 HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT = 10, 11, 12, 13, 14, 15, 16, 17
@@ -208,6 +217,14 @@ def _signed16(value: int) -> int:
     return value - 0x10000 if value & 0x8000 else value
 
 
+def solid_ex_style(ex_style: int, remote: bool) -> int | None:
+    """The window's extended style in a Remote Desktop session: without WS_EX_LAYERED (layered, it shows nothing
+    there). None when nothing changes: not remote, or not layered."""
+    if not remote or not ex_style & WS_EX_LAYERED:
+        return None
+    return ex_style & ~WS_EX_LAYERED
+
+
 def point_of(lparam: int) -> tuple[int, int]:
     """A message's screen point (GET_X_LPARAM, GET_Y_LPARAM: signed, for monitors left of or above the main one)."""
     return _signed16(int(lparam)), _signed16(int(lparam) >> 16)
@@ -243,7 +260,22 @@ class Win32:
                                           wintypes.HWND, ctypes.c_void_p]
         user32.TrackPopupMenu.restype = ctypes.c_int
         user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+        user32.RedrawWindow.argtypes = [wintypes.HWND, ctypes.c_void_p, wintypes.HANDLE, wintypes.UINT]
         self._user32 = user32
+
+    def remote_session(self) -> bool:
+        """This app's session is a Remote Desktop one."""
+        return bool(self._user32.GetSystemMetrics(SM_REMOTESESSION))
+
+    def ex_style(self, hwnd: int) -> int:
+        return int(self._user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)) & 0xFFFFFFFF
+
+    def set_ex_style(self, hwnd: int, ex_style: int) -> None:
+        """The new extended style, and the window drawn again at once."""
+        self._user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style & 0x7FFFFFFF)
+        rdw_invalidate, rdw_erase, rdw_allchildren, rdw_updatenow = 0x0001, 0x0004, 0x0080, 0x0100
+        self._user32.RedrawWindow(hwnd, None, None, rdw_invalidate | rdw_erase | rdw_allchildren | rdw_updatenow)
 
     def style(self, hwnd: int) -> int:
         return int(self._user32.GetWindowLongPtrW(hwnd, GWL_STYLE)) & 0xFFFFFFFF
@@ -377,6 +409,18 @@ class NativeChrome:
 
     def wanted(self) -> bool:
         return self._wanted
+
+    def keep_solid(self, hwnd: int) -> bool:
+        """In a Remote Desktop session the window ``hwnd`` is drawn solid (solid_ex_style). True when its style
+        changed."""
+        if not hwnd:
+            return False
+        api = self.api()
+        new = solid_ex_style(api.ex_style(hwnd), api.remote_session())
+        if new is None:
+            return False
+        api.set_ex_style(hwnd, new)
+        return True
 
     def active(self, hwnd: int) -> bool:
         """Windows' answers are the app's now: wanted, and the window has the styles (not full screen)."""

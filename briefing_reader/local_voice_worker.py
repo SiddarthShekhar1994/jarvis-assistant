@@ -7,11 +7,13 @@ made when first needed) with our own unknown-word model from --g2p-gb / --g2p-us
 --voice is warmed before "ready", so the first line needs no wait. The process ends on its own after --idle-s seconds
 without a request (0: never), when its input closes, or on ``{"quit": true}``.
 
-Protocol. stdin takes JSON lines ``{"id", "text", "voice", "speed", "gain", "out"}``; stdout answers JSON lines: first
-``{"ready": true, "load_ms": N}`` (or ``{"ready": false, "error": CODE}``, and the process ends), then one per request:
-``{"id", "ok": true, "ms", "duration_ms", "words": [[start_ms, word], ...]}`` or ``{"id", "ok": false, "error":
-CODE}``. Each WAV (24 kHz mono 16-bit) goes to "out" as "<out>.part" and is then renamed; "out" must be a .wav inside
---out-root. A word's start comes from the model's own durations (600 samples a unit, scaled to the audio's length).
+Protocol. stdin takes JSON lines ``{"id", "text", "voice", "speed", "gain", "out", "urgent"}``; stdout answers JSON
+lines: first ``{"ready": true, "load_ms": N}`` (or ``{"ready": false, "error": CODE}``, and the process ends), then one
+per request: ``{"id", "ok": true, "ms", "duration_ms", "words": [[start_ms, word], ...]}`` or ``{"id", "ok": false,
+"error": CODE}``; once, whenever it ends loading, ``{"word_helper": "ready" | "failed", "ms": N}`` (the unknown-word
+model; it may come before "ready"). An urgent request (his own line) waits at most URGENT_WORD_WAIT_S for that model and
+is otherwise answered ERR_WORD. Each WAV (24 kHz mono 16-bit) goes to "out" as "<out>.part" and is then renamed; "out"
+must be a .wav inside --out-root. A word's start comes from the model's own durations (600 samples a unit, scaled to the audio's length).
 
 Privacy. The words travel only on these pipes. The process logs nothing, writes nothing else and never uses the
 network: HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE are set before anything loads, the unknown-word model loads from our own
@@ -38,9 +40,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any, Protocol
 
-from .local_voice import (ERR_ADDON, ERR_FAILED, ERR_MODEL, ERR_PATH, ERR_TOO_LONG, ERR_VOICE, MAX_TEXT_CHARS,
-                          MODEL_FILE, OFFLINE_ENV, SAMPLE_RATE, SAMPLE_WIDTH, THREADS, VOCAB_FILE, VOICE_NAMES,
-                          british)
+from .local_voice import (ERR_ADDON, ERR_FAILED, ERR_MODEL, ERR_PATH, ERR_TOO_LONG, ERR_VOICE, ERR_WORD,
+                          MAX_TEXT_CHARS, MODEL_FILE, OFFLINE_ENV, SAMPLE_RATE, SAMPLE_WIDTH, THREADS, VOCAB_FILE,
+                          VOICE_NAMES, british)
 
 MAX_TOKENS = 510                       # Kokoro's longest input (phonemes, without the two pads)
 SAMPLES_PER_UNIT = 600                 # one unit of the model's durations (25 ms at 24 kHz)
@@ -203,6 +205,33 @@ def refuse_spacy_download() -> None:
 # --------------------------------------------------------------------------
 
 FALLBACK_WAIT_S = 60.0                 # a word that needs the unknown-word model waits this long for it to load
+# ... but in one of his own lines (a request marked urgent) only this long: then the line is answered ERR_WORD and the
+# Windows voice says it (2026-11-24: the model once took over a minute to load, and his first line waited 61 s).
+URGENT_WORD_WAIT_S = 2.0
+
+
+class WordNotReady(Exception):
+    """One of his own lines has a word only the unknown-word model knows, and the model has not loaded yet."""
+
+
+class _Line:
+    """The request in hand (the loop answers one at a time): whether it is one of his own lines."""
+
+    urgent = False
+
+
+_notice_lock = threading.Lock()
+_notice: Callable[[dict], None] | None = None   # serve() sets it: a line of its own on the answers' stream
+
+
+def _tell(payload: dict) -> None:
+    with _notice_lock:
+        notice = _notice
+    if notice is not None:
+        try:
+            notice(payload)
+        except (OSError, ValueError):
+            pass
 
 
 class WordFallback:
@@ -236,6 +265,7 @@ class WordFallback:
         return model.config, run, max(1, int(getattr(model.config, "max_position_embeddings", 64)) - 2)
 
     def _load(self) -> None:
+        began = time.monotonic()
         try:
             config, self._run, self._longest = self._loader(self._folder)
             self._graphemes = {char: index for index, char in enumerate(config.grapheme_chars)}
@@ -243,11 +273,19 @@ class WordFallback:
         except Exception:  # noqa: BLE001 - no unknown-word model: such words are left unsaid
             self._run = None
         finally:
+            _tell({"word_helper": "ready" if self._run is not None else "failed",
+                   "ms": int((time.monotonic() - began) * 1000)})
             self._ready.set()
 
     def __call__(self, token: Any) -> tuple[str, int]:
         text = str(getattr(token, "text", "") or "")
-        if not text or not self._ready.wait(FALLBACK_WAIT_S) or self._run is None:
+        if not text:
+            return "", 1
+        if not self._ready.wait(URGENT_WORD_WAIT_S if _Line.urgent else FALLBACK_WAIT_S):
+            if _Line.urgent:
+                raise WordNotReady
+            return "", 1
+        if self._run is None:
             return "", 1
         ids = [1] + [self._graphemes.get(char, 3) for char in text[: self._longest]] + [2]
         return "".join(self._phonemes.get(index, "") for index in self._run(ids) if index > 3), 1
@@ -361,9 +399,13 @@ class KokoroSpeaker:
 _EOF = object()
 
 
+_write_lock = threading.Lock()
+
+
 def _write(out: IO[str], payload: dict) -> None:
-    out.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    out.flush()
+    with _write_lock:                      # the unknown-word model's notice comes from its own thread
+        out.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        out.flush()
 
 
 def _reader(stream: IO[bytes], requests: queue.Queue) -> None:
@@ -405,12 +447,17 @@ def handle(request: dict, speaker: Speaker, out_root: Path, clock: Callable[[], 
     speed = _number(request.get("speed"), 1.0, 0.5, 2.0)
     gain = _number(request.get("gain"), 1.0, 0.0, 2.0)
     began = clock()
+    _Line.urgent = bool(request.get("urgent"))
     try:
         samples, words = speaker.speak(text, voice, speed)
         pcm = pcm16(samples, gain)
         write_wav(path, pcm)
+    except WordNotReady:                  # his own line: the Windows voice says it now, not a minute from now
+        return {"id": rid, "ok": False, "error": ERR_WORD}
     except Exception:  # noqa: BLE001 - one line that fails never ends the process; its code only, never its text
         return {"id": rid, "ok": False, "error": ERR_FAILED}
+    finally:
+        _Line.urgent = False
     frames = len(pcm) // SAMPLE_WIDTH
     return {"id": rid, "ok": True, "ms": int((clock() - began) * 1000),
             "duration_ms": round(frames * 1000 / SAMPLE_RATE),
@@ -420,7 +467,10 @@ def handle(request: dict, speaker: Speaker, out_root: Path, clock: Callable[[], 
 def serve(inp: IO[bytes], out: IO[str], load: Callable[[], Speaker], *, out_root: Path, idle_s: float = 0.0,
           warm_voice: str = "", clock: Callable[[], float] = time.monotonic) -> int:
     """The process's loop (see the module docstring); returns its exit code."""
+    global _notice
     began = clock()
+    with _notice_lock:
+        _notice = lambda payload: _write(out, payload)   # noqa: E731 - the unknown-word model's own line
     try:
         speaker = load()
         if warm_voice in VOICE_NAMES:
