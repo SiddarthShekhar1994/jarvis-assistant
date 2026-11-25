@@ -4490,6 +4490,12 @@ class BriefingWindow(hud.HudWindowFrame):
         # The window brief: in canvas mode on real Windows the window behaves as any Windows window (window_chrome).
         self._chrome = window_chrome.NativeChrome(self)
         self._page_chrome: Any = None         # the page's top band (board.protocol "chrome"), for Windows' hit-test
+        # Remote Desktop: the window is drawn solid there, or it shows nothing (window_chrome.solid_ex_style). A shown
+        # window looks again now and then: a fade or a flag change makes Qt layer it again.
+        self._solid_timer = QTimer(self)
+        self._solid_timer.setInterval(window_chrome.REMOTE_CHECK_MS)
+        self._solid_timer.timeout.connect(self._keep_solid)
+        self._solid_logged = False
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt override
         event.ignore()   # the controller decides what closing means
@@ -4501,17 +4507,35 @@ class BriefingWindow(hud.HudWindowFrame):
         if handle is not None:
             orb_mod.watch_input(handle)    # the owner's keys and mouse here end the orbs' deep idle
         self._sync_chrome()                   # (a flag change made Qt set its own style again)
+        self._keep_solid()
+        if _native_windows():
+            self._solid_timer.start()
         self.visibilityChanged.emit()
 
     def hideEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
         super().hideEvent(event)
+        self._solid_timer.stop()
         self.visibilityChanged.emit()
+
+    def _keep_solid(self) -> None:
+        """In a Remote Desktop session the window is drawn solid (window_chrome.solid_ex_style): layered, it shows
+        nothing there. On real Windows only, while it is shown."""
+        if (not _native_windows() or not self.isVisible()
+                or not self.testAttribute(Qt.WidgetAttribute.WA_WState_Created)):
+            return
+        try:
+            if self._chrome.keep_solid(int(self.winId())) and not self._solid_logged:
+                self._solid_logged = True
+                logger.info("Window: drawn solid for a remote session")
+        except Exception as exc:  # noqa: BLE001 - the window stays as Qt has it
+            logger.debug("Window: not drawn solid (%s)", type(exc).__name__)
 
     def changeEvent(self, event: QEvent) -> None:  # noqa: N802 - Qt override
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange:
             self._sync_frame()                # maximised or full screen: no margins, no cut corners
             self._sync_chrome()               # out of full screen: Windows' own behaviour again
+            self._keep_solid()
             self.visibilityChanged.emit()
         elif event.type() == QEvent.Type.ActivationChange:
             if self.isActiveWindow():
@@ -4528,6 +4552,8 @@ class BriefingWindow(hud.HudWindowFrame):
                 msg = wintypes.MSG.from_address(int(message))
                 if msg.message == _WM_SETTINGCHANGE:
                     QTimer.singleShot(0, holo.refresh_reduced_motion)
+                elif msg.message in (window_chrome.WM_DISPLAYCHANGE, window_chrome.WM_WTSSESSION_CHANGE):
+                    QTimer.singleShot(0, self._keep_solid)   # Remote Desktop may have just connected
                 answer = self._chrome.handle(msg)
                 if answer is not None:
                     return answer

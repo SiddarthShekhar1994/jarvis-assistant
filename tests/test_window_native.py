@@ -36,6 +36,7 @@ from tests.ui_fakes import settle
 APP = QApplication.instance() or QApplication(["test_window_native", "-platform", "offscreen"])
 STEAM = "Microphone (Steam Streaming Microphone)"
 QT_FRAMELESS = wc.WS_POPUP | wc.WS_MINIMIZEBOX | 0x10000000 | 0x02000000 | 0x04000000   # + VISIBLE, CLIPCHILDREN, ...
+QT_LAYERED = wc.WS_EX_LAYERED | 0x00000100                         # Qt's see-through window (+ WS_EX_WINDOWEDGE)
 
 
 # --------------------------------------------------------------------------
@@ -58,6 +59,11 @@ class StyleTests(unittest.TestCase):
 
     def test_full_screens_style_is_not_the_chromes(self) -> None:
         self.assertFalse(wc.has_chrome(wc.WS_POPUP | wc.WS_SYSMENU | 0x10000000))
+
+    def test_remote_desktop_draws_the_window_solid(self) -> None:
+        self.assertEqual(wc.solid_ex_style(QT_LAYERED, True), 0x00000100)    # layered off, the rest kept
+        self.assertIsNone(wc.solid_ex_style(QT_LAYERED, False))              # at the PC: as Qt has it
+        self.assertIsNone(wc.solid_ex_style(0x00000100, True))               # not layered: nothing to change
 
     def test_the_system_menu_follows_the_state(self) -> None:
         self.assertEqual(wc.menu_items(False), {wc.SC_RESTORE: False, wc.SC_MOVE: True, wc.SC_SIZE: True,
@@ -170,9 +176,22 @@ class FakeApi:
         self.menus: list[tuple[int, int, bool]] = []
         self.pick = wc.SC_MAXIMIZE
         self.posted: list[int] = []
+        self.remote = False
+        self.ex_styles: dict[int, int] = {}
+        self.set_ex: list[tuple[int, int]] = []
 
     def style(self, hwnd):
-        return self.styles[hwnd]
+        return self.styles.get(hwnd, QT_FRAMELESS)
+
+    def remote_session(self):
+        return self.remote
+
+    def ex_style(self, hwnd):
+        return self.ex_styles.get(hwnd, QT_LAYERED)
+
+    def set_ex_style(self, hwnd, ex_style):
+        self.ex_styles[hwnd] = ex_style
+        self.set_ex.append((hwnd, ex_style))
 
     def set_style(self, hwnd, style):
         self.styles[hwnd] = style
@@ -337,6 +356,17 @@ class NativeChromeTests(unittest.TestCase):
         self.assertIsNone(native.handle(msg(wc.WM_SYSCOMMAND, wc.SC_KEYMENU, ord(" "))))
         self.assertIsNone(native.handle(msg(wc.WM_SYSCOMMAND, wc.SC_MAXIMIZE)))   # Win+Up and the rest: Windows'
 
+    def test_keep_solid_only_in_a_remote_session_and_once(self) -> None:
+        native, api, _window = self.make(wanted=False)
+        self.assertFalse(native.keep_solid(7))                            # at the PC: never touched
+        api.remote = True
+        self.assertTrue(native.keep_solid(7))
+        self.assertEqual(api.set_ex, [(7, 0x00000100)])
+        self.assertFalse(native.keep_solid(7))                            # solid already: nothing asked again
+        api.ex_styles[7] = QT_LAYERED                                      # a fade layered it again
+        self.assertTrue(native.keep_solid(7))
+        self.assertFalse(native.keep_solid(0))                            # no window yet
+
     def test_other_messages_are_qts(self) -> None:
         native, _api, _window = self.make()
         self.assertIsNone(native.handle(msg(0x0005)))                      # WM_SIZE
@@ -427,6 +457,37 @@ class WindowAppTests(test_canvas.CanvasApp):
             self.window.setWindowState(Qt.WindowState.WindowMaximized)
             settle(4)
         self.assertFalse(self.window.native_chrome().wanted())            # (never asked: not native here)
+
+    def test_remote_desktop_the_shown_window_is_drawn_solid(self) -> None:
+        self.make()
+        api = FakeApi()
+        api.remote = True
+        self.window.native_chrome()._api = api
+        with mock.patch.object(ui, "_native_windows", return_value=True), \
+                self.assertLogs("briefing_reader.ui", level="INFO") as logs:
+            self.window.hide()
+            self.window.show()
+            settle(2)
+            hwnd = int(self.window.winId())
+            self.assertEqual(api.set_ex, [(hwnd, 0x00000100)])
+            self.assertTrue(self.window._solid_timer.isActive())          # it looks again now and then
+            api.ex_styles[hwnd] = QT_LAYERED                                # a fade layered it again
+            self.window._solid_timer.timeout.emit()
+            self.assertEqual(api.ex_styles[hwnd], 0x00000100)
+            self.window.hide()
+            self.assertFalse(self.window._solid_timer.isActive())
+        self.assertEqual(sum("drawn solid for a remote session" in line for line in logs.output), 1)
+
+    def test_at_the_pc_the_window_is_never_touched(self) -> None:
+        self.make()
+        api = FakeApi()
+        self.window.native_chrome()._api = api
+        with mock.patch.object(ui, "_native_windows", return_value=True):
+            self.window.hide()
+            self.window.show()
+            settle(2)
+            self.window._solid_timer.timeout.emit()
+        self.assertEqual(api.set_ex, [])
 
     def test_without_the_canvas_the_window_is_as_before(self) -> None:
         self.make(extra="\n[look]\nboard = false\n")
