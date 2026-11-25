@@ -5314,6 +5314,7 @@
       syncHead(group);
       var over = cellBox(cell, m);
       putAt(head.el, {x: over.x, y: over.y - (cell.top || 0), w: over.w, h: HEAD_H}, fresh);
+      fitHead(head);                           // its counts against the width it has now
       if (fresh && K > 0 && head.el.animate) {
         head.el.animate([{opacity: 0}, {opacity: 1}], {duration: 220 * K, easing: easeOut});
       }
@@ -5513,7 +5514,30 @@
     if (head.took) {
       parts.push(clockWords(head.took));
     }
-    head.counts.textContent = parts.join(' ' + WORDS.dot + ' ');
+    head.counts.textContent = '';              // one span a count, so a narrow head drops whole counts (fitHead)
+    parts.forEach(function (part, index) {
+      var span = make('span', '');
+      span.textContent = (index ? ' ' + WORDS.dot + ' ' : '') + part;
+      head.counts.appendChild(span);
+    });
+    fitHead(head);
+  }
+
+  function fitHead(head) {                     // the title before the counts: on a narrow head the time it took goes
+    var box = placed.get(head.el);             // first, then the sources; the frames' count always stays
+    var spans = head.counts.children;
+    Array.prototype.forEach.call(spans, function (span) { span.hidden = false; });
+    if (!box || !box.w || !head.el.classList.contains('head') || head.el.classList.contains('away')) {
+      return;
+    }
+    var look = getComputedStyle(head.el), top = getComputedStyle(head.title.parentNode);
+    var room = box.w - (parseFloat(look.paddingLeft) || 0) - (parseFloat(look.paddingRight) || 0)
+      - (parseFloat(look.borderLeftWidth) || 0) - (parseFloat(look.borderRightWidth) || 0)
+      - (parseFloat(look.columnGap) || 0) - (parseFloat(top.columnGap) || 0) - head.time.offsetWidth;
+    var title = head.title.scrollWidth;        // whole widths, whatever the box is doing now (it may still shrink)
+    for (var last = spans.length - 1; last > 0 && title + head.counts.scrollWidth > room; last -= 1) {
+      spans[last].hidden = true;
+    }
   }
 
   function dropHead(group) {
@@ -5807,7 +5831,11 @@
     groups.forEach(function (group) {
       if (group.head && group.head.el.isConnected && !group.head.el.classList.contains('away')) {
         heads.push({group: group.id, box: box(group.head.el), title: group.head.title.textContent,
-                    counts: group.head.counts.textContent, time: group.head.time.textContent});
+                    counts: group.head.counts.textContent, time: group.head.time.textContent,
+                    shown: Array.prototype.filter.call(group.head.counts.children, function (span) {
+                      return !span.hidden;
+                    }).map(function (span) { return span.textContent; }).join(''),
+                    title_cut: group.head.title.scrollWidth > group.head.title.clientWidth + 1});
       }
     });
     var places = orbPlaces();
