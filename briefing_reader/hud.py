@@ -735,6 +735,26 @@ class SpeechLabel(QLabel):
             self._render()
 
 
+def _line_count(text: str, font: QFont, width: int) -> int:
+    """How many word-wrapped lines of ``width`` px ``text`` takes (as _elide_to_lines wraps it; 1 for no width)."""
+    if width <= 0 or not text:
+        return 1
+    layout = QTextLayout(text.replace("\n", " "), font)
+    option = QTextOption()
+    option.setWrapMode(QTextOption.WrapMode.WordWrap)
+    layout.setTextOption(option)
+    count = 0
+    layout.beginLayout()
+    while True:
+        line = layout.createLine()
+        if not line.isValid():
+            break
+        line.setLineWidth(width)
+        count += 1
+    layout.endLayout()
+    return max(1, count)
+
+
 def _elide_to_lines(text: str, font: QFont, width: int, max_lines: int) -> str:
     """``text`` cut to ``max_lines`` word-wrapped lines of ``width`` px, ending in an ellipsis."""
     if width <= 0 or not text or max_lines <= 0:
@@ -8291,6 +8311,7 @@ class CommandBar(QWidget):
     trayRemoved = Signal()             # the capture tray's Remove: nothing was read
 
     _STATUS_LINES = 2
+    _CANVAS_STATUS_LINES = 2     # the canvas's status line: an answer may take two lines over the ask line
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -8482,12 +8503,58 @@ class CommandBar(QWidget):
             layout.removeWidget(self.tray)
             layout.insertWidget(1 if on else 0, self.tray)
         self._status_row.setContentsMargins(*((2, 0, 2, 0) if on else (16, 0, 16, 0)))
+        # The canvas: an answer gets two lines over the ask line (one line cut it mid-word), its last line right over
+        # the line; the box is only as tall as the lines it shows, so a one-line answer looks as before.
+        self.status_label._max_lines = self._CANVAS_STATUS_LINES if on else 1
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignHCenter
+                                       | (Qt.AlignmentFlag.AlignBottom if on else Qt.AlignmentFlag.AlignTop))
+        if on:
+            self.status_label.installEventFilter(self)
+        else:
+            self.status_label.removeEventFilter(self)
+            self.status_label.setFixedHeight(self._line + 2)       # the hologram pill's one line, as set_holo set it
+            self.status_label.setContentsMargins(0, 0, 0, 0)
         if not on:
             self.input._canvas_placeholder = ""
             self.input._fit_placeholder()
+        self._render_status()
         self._sync_send()
         self._show_link()
         self.updateGeometry()
+
+    def _fit_status_height(self) -> None:
+        """The canvas: the status line's box as tall as the lines its text takes at its width (one or two). Two lines
+        are balanced (the label narrowed by even side margins to the least width that still holds the text in two
+        lines), so the second line is never one stray word."""
+        label = self.status_label
+        if not self._canvas:
+            return
+        width = label.width() - 2                       # the whole width: the side margins are this method's own
+        text, font = label.full_text(), label.font()
+        lines, margin = 1, 0
+        if width > 0 and text:
+            needed = _line_count(text, font, width)
+            lines = max(1, min(self._CANVAS_STATUS_LINES, needed))
+            if needed == 2:
+                low, high = width // 2, width            # the least width at which it still takes two lines
+                while low < high:
+                    mid = (low + high) // 2
+                    if _line_count(text, font, mid) <= 2:
+                        high = mid
+                    else:
+                        low = mid + 1
+                margin = max(0, (width - high - 8) // 2)    # a little slack: the label wraps as QTextLayout does
+        height = self._line * lines + 2
+        changed = False
+        if label.contentsMargins().left() != margin:
+            label.setContentsMargins(margin, 0, margin, 0)
+            changed = True
+        if label.height() != height or label.minimumHeight() != height:
+            label.setFixedHeight(height)
+            changed = True
+        if changed:
+            label._render()                              # cut (if it must be) at the width it has now
+            self.updateGeometry()
 
     def is_canvas(self) -> bool:
         return self._canvas
@@ -8524,6 +8591,8 @@ class CommandBar(QWidget):
                 self.field.update()            # the canvas line: CTRL K gives way to the arrow, and back
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt override
+        if watched is self.status_label and event.type() == QEvent.Type.Resize:
+            QTimer.singleShot(0, self._fit_status_height)       # its width changed: one line or two
         if watched is self.input and event.type() in (QEvent.Type.FocusIn, QEvent.Type.FocusOut):
             QTimer.singleShot(0, self._sync_typing)
         keypad = Qt.KeyboardModifier.KeypadModifier   # an arrow key may carry it; any other modifier: not ours
@@ -8632,6 +8701,7 @@ class CommandBar(QWidget):
             if quiet != text:
                 text, tooltip = quiet, tooltip or plain_tooltip(self._status_text)
         self.status_label.set_full_text(text, tooltip)
+        self._fit_status_height()
 
     # ---- input --------------------------------------------------------------------------
 

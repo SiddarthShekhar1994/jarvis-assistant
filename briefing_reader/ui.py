@@ -268,6 +268,7 @@ from .google_auth import (
     PROBLEM_SIGNED_OUT,
     PROBLEM_TIMEOUT,
     logged_alias,
+    tidy_token_path,
 )
 from .hotkey import describe_combo
 from .memory import (
@@ -5644,8 +5645,10 @@ class _ActionWorker:
     """
 
     def __init__(self, executor: Executor, calendars: Mapping[str, Any], store: ActionStore,
-                 bridge: _Bridge, stop: threading.Event) -> None:
+                 bridge: _Bridge, stop: threading.Event,
+                 tidy_token: Callable[[str], Path] | None = None) -> None:
         self._executor = executor
+        self._tidy_token = tidy_token      # an alias's tidy-up sign-in file (google_auth.tidy_token_path)
         self._calendars = dict(calendars)
         self._calendar = self._calendars.get(DEFAULT_ACCOUNT)
         self._store = store
@@ -5844,7 +5847,26 @@ class _ActionWorker:
             logger.warning("Could not disconnect the %s account (%s)", logged_alias(alias), type(exc).__name__)
             return DISCONNECT_FAILED_MESSAGE.format(alias=alias)
         logger.info("Disconnected the %s account's Google account (it was not the right one)", logged_alias(alias))
+        self._forget_tidy(alias)
         return ""
+
+    def _forget_tidy(self, alias: str) -> None:
+        """The account's tidy-up sign-in (google_token_<alias>.tidy.json) goes with its main one: it was made for the
+        Google account just forgotten, and a sign-in that may change mail labels must not outlive it. A file that
+        can't be deleted is logged; the main sign-in is gone already, so the sign-in that follows still starts (a
+        tidy-up checks its account before every change, and refuses another one)."""
+        if self._tidy_token is None:
+            return
+        try:
+            path = self._tidy_token(alias)
+            if not path.exists():
+                return
+            path.unlink()
+        except OSError as exc:
+            logger.warning("Could not delete the %s account's tidy-up sign-in (%s)", logged_alias(alias),
+                           type(exc).__name__)
+            return
+        logger.info("Deleted the %s account's tidy-up sign-in with its main sign-in", logged_alias(alias))
 
     def _connect(self, alias: str, *, force: bool = False) -> None:
         """One account's browser sign-in, unless a usable sign-in of a Google account Jarvis knows is
@@ -7373,8 +7395,10 @@ class AppController(QObject):
         """The action worker, started once Google Calendar or sending email is set up (it checks
         the sign-ins first)."""
         if self._calendar_worker is None and self._any_google_configured() and not self._closing.is_set():
+            data_dir = Path(self.config.data_dir)
             self._calendar_worker = _ActionWorker(self._executor, self._calendars, self._store, self._bridge,
-                                                  self._closing)
+                                                  self._closing,
+                                                  tidy_token=lambda alias: tidy_token_path(data_dir, alias))
             self._calendar_worker.check_sign_in()
         return self._calendar_worker
 
@@ -10030,6 +10054,8 @@ class AppController(QObject):
             if card_id:
                 self._hints[card_id] = ACCOUNT_RECONNECT_NOTE.format(alias=alias, button=button)
             mail = action if action is not None and action.sends_mail else None
+            if getattr(self, "standing", None) is not None:
+                self.standing.forget_tidy(alias)    # its tidy-up sign-in was the wrong Google account's too
             self._start_sign_in(alias, card_id=card_id, action=mail, disconnect=True)
         if card_id:   # a Calendar event's or Todo's card is not among the editable cards
             self._show_card_state(card_id)

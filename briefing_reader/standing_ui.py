@@ -90,7 +90,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from . import holo, standing_setup
 from .board.resting import AgentLine
 from .actions import CALENDAR, REPLY, SOURCE_STANDING, STANDING_MODES, STATUS_DENIED, TODO, ProposedAction
-from .google_auth import PROBLEM_DENIED, logged_alias
+from .google_auth import PROBLEM_DENIED, PROBLEM_SIGNED_OUT, logged_alias
 from .standing import cards as standing_cards
 from .standing import radar, schedule
 from .standing import tidy as tidy_mod
@@ -506,6 +506,7 @@ class StandingController(QObject):
         stage.runNowRequested.connect(self.run_now)
         stage.pauseRequested.connect(self.toggle_pause)
         stage.deleteRequested.connect(self.delete_job)
+        stage.editRequested.connect(self.edit_job)
         stage.undoRequested.connect(self.undo_receipt)
         stage.clearRequested.connect(self.clear_reports)
         stage.pauseAllRequested.connect(self.toggle_pause_all)
@@ -973,10 +974,11 @@ class StandingController(QObject):
                       can_run=agent.status == STATUS_LIVE and consented and not paused_all,
                       can_pause=live_or_paused, paused=agent.status == STATUS_PAUSED,
                       can_turn_on=draft, turn_on_tip=self._turn_on_tip(agent, problem), tooltip=agent.words,
+                      can_edit=draft and not self._busy,
                       sign_ins=self._sign_in_buttons(agent) if draft else ())
 
     def _rule_row(self, rule: Rule, now: datetime, today: Any, hour24: bool) -> JobRow:
-        meta = []
+        meta = [f"Watches {rule.account} mail"]           # which account, said on every row (live ones too)
         run = rule.dry_run
         if run is not None:
             meta.append(f"Dry run: {run.yes} of {run.judged} yes")
@@ -1009,7 +1011,8 @@ class StandingController(QObject):
                       paused=rule.status == STATUS_PAUSED, can_dry_run=not self._busy,
                       can_turn_on=rule.status == STATUS_TRIED and self._busy != f"dry:{rule.id}",
                       turn_on_tip=self._turn_on_tip(rule, problem) if rule.status == STATUS_TRIED else "",
-                      tooltip=rule.sentence, sign_ins=self._sign_in_buttons(rule) if not_on else ())
+                      tooltip=rule.sentence, sign_ins=self._sign_in_buttons(rule) if not_on else (),
+                      can_edit=not_on and not self._busy)
 
     def _activity(self, now: datetime, hour24: bool) -> tuple[list[ActivityRow], list[ReportRow]]:
         rows: list[ActivityRow] = []
@@ -1462,6 +1465,26 @@ class StandingController(QObject):
                 self._tidy_built = dict(build_tidy_accounts(self.config, persist=True))
         return self._tidy_built
 
+    def forget_tidy(self, alias: str) -> None:
+        """The app's "No, use another account" for ``alias``: its tidy-up sign-in, kept in memory here, is forgotten
+        too (on a worker: it deletes the file; the action worker deletes it as well, for when it was never loaded
+        here), so no tidy-up or Undo uses the wrong Google account's sign-in. The next tidy-up asks for its own
+        sign-in again."""
+        account = (self._tidy_built or {}).get(alias)
+        if account is None or not callable(getattr(account, "forget", None)):
+            return
+        logger.info("Standing: the %s account's tidy-up sign-in is forgotten with its main sign-in",
+                    logged_alias(alias))
+
+        def work() -> None:
+            try:
+                account.forget("disconnected", problem=PROBLEM_SIGNED_OUT)
+            except Exception as exc:  # noqa: BLE001 - google_auth logged it; the action worker deletes the file too
+                logger.warning("Standing: could not forget the %s account's tidy-up sign-in (%s)",
+                               logged_alias(alias), type(exc).__name__)
+
+        self.thread_runner(work)
+
     def _tidy_client(self, alias: str) -> Any:
         account = self.tidy_accounts().get(alias)
         return tidy_mod.GmailTidy(account) if account is not None else None
@@ -1863,6 +1886,24 @@ class StandingController(QObject):
     def prefill(self, kind: str) -> None:
         """New rule / New agent: Home, with "rule: " or "agent: " in the bar and the cursor after it."""
         self._to_bar(f"{kind}: ")
+
+    def edit_job(self, job_id: str) -> None:
+        """A draft row's Edit (an agent or rule not on yet): Home, with its words back in the bar ("agent: ..." /
+        "rule: ...") and the cursor at their end, to reword (name another account, say) and set up again; the draft
+        goes, as the setup card's Edit does. Nothing else changes: it never ran, and its dry run read only."""
+        job = self._jobs().get(job_id)
+        if job is None or job.status not in (STATUS_DRAFT, STATUS_TRIED) or self._busy or self._closed:
+            return
+        if self._setup is not None and self._setup.job is not None and self._setup.job.id == job_id:
+            self.edit_setup()
+            return
+        words = job.words if isinstance(job, Agent) else job.sentence
+        if not self._save([item for item in self.agents if item.id != job_id],
+                          [item for item in self.rules if item.id != job_id]):
+            return
+        logger.info("Standing: draft %s %s back in the bar to edit", job.kind, job_id)
+        self.reload(announce=False)
+        self._to_bar(f"{job.kind}: {words}")
 
     def edit_setup(self) -> None:
         """Edit: Home, with the owner's sentence back in the bar ("agent: ..." / "rule: ...") and the cursor at its

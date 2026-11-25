@@ -375,7 +375,7 @@ class DryRunAndTurnOnTests(_Base):
         rule_id = Definitions(files_of(self.app.config)).load()[1][0].id
         row = self.c.window.reading.agents_stage.job_row(rule_id)
         self.assertIn("Sign the work account in first: click Sign in work.", row.detail_label.text())
-        self.assertEqual([button.text() for button in row.buttons()], ["Sign in work", "Dry run", "Delete"])
+        self.assertEqual([button.text() for button in row.buttons()], ["Sign in work", "Dry run", "Edit", "Delete"])
         done = hold_sign_in(work)
         row.sign_in_button("work").click()
         settle()
@@ -406,13 +406,31 @@ class SignInWordsTests(unittest.TestCase):
     def test_the_words_name_the_button_never_the_day_view(self) -> None:
         self.assertEqual(standing_setup.sign_in_first("work"),
                          "Sign the work account in first: click Sign in work. Or Edit and name another account.")
-        self.assertEqual(standing_setup.sign_in_first("work", edit=False),    # a row has no Edit
+        self.assertEqual(standing_setup.sign_in_first("work", edit=False),    # a row's line (Edit is its button)
                          "Sign the work account in first: click Sign in work.")
         self.assertEqual(standing_setup.sign_in_first(["personal", "work"], edit=False),
                          "Sign the personal and work accounts in first: click Sign in personal and Sign in work.")
         for words in (standing_setup.sign_in_first("work"), standing_setup.sign_in_first("work", edit=False)):
             self.assertNotIn("Day view", words)
             self.assertNotIn("Connect", words)
+
+
+class NamedTests(unittest.TestCase):
+    """Which accounts the owner's own words name (setup keeps a named account even when it is not signed in)."""
+
+    def test_an_account_named_as_a_noun(self) -> None:
+        for words in ("my work mail", "Work and personal", "check WORK each morning", "work's inbox",
+                      "forward it to work mail", "from my work account", "personal, work"):
+            with self.subTest(words=words):
+                self.assertTrue(standing_setup.named("work", words))
+
+    def test_work_said_as_a_verb_names_no_account(self) -> None:
+        for words in ("every morning tell me what to work on", "I work late on Fridays", "what should I work on",
+                      "remind me when we can't work", "things I'll work through", "list what I usually work on"):
+            with self.subTest(words=words):
+                self.assertFalse(standing_setup.named("work", words))
+        self.assertTrue(standing_setup.named("personal", "what to work on from my personal mail"))
+        self.assertFalse(standing_setup.named("work", "homework and networks"))        # a whole word only
 
 
 class SignInTests(_Base):
@@ -439,7 +457,7 @@ class SignInTests(_Base):
 
     def test_only_the_account_not_signed_in_gets_a_sign_in_named_for_it(self) -> None:
         row, card = self.row(), self.card()
-        self.assertEqual([button.text() for button in row.buttons()], ["Sign in work", "Turn on", "Delete"])
+        self.assertEqual([button.text() for button in row.buttons()], ["Sign in work", "Turn on", "Edit", "Delete"])
         self.assertEqual([button.text() for button in card.buttons()], ["Sign in work", "Turn on", "Edit", "Discard"])
         self.assertIn("Sign the work account in first: click Sign in work.", row.detail_label.text())
         self.assertNotIn("Edit", row.detail_label.text())                      # a row has no Edit
@@ -659,6 +677,12 @@ class PreferSignedInTests(_Base):
         self.type("agent: " + AGENT_WORDS)                         # names no account
         agent = Definitions(files_of(self.app.config)).load()[0][0]
         self.assertEqual(agent.accounts, ("personal",))
+
+    def test_work_said_as_a_verb_does_not_keep_the_signed_out_work_account(self) -> None:
+        self.accounts()
+        self.engine.answers.append(BOTH_ANSWER)
+        self.type("agent: " + AGENT_WORDS + " and what to work on")       # "work" as a verb names no account
+        self.assertEqual(Definitions(files_of(self.app.config)).load()[0][0].accounts, ("personal",))
 
     def test_a_rule_moves_to_the_one_signed_in_account(self) -> None:
         self.accounts()

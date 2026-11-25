@@ -1861,6 +1861,9 @@ class CanvasWaysTests(BoardProbeCase):
         head = after["heads"][0]
         self.assertEqual(head["title"], "Dana's budget")                  # its heading is the answer's topic
         self.assertRegex(head["counts"], r"^6 frames · 2 sources · 00:\d\d$")
+        self.assertFalse(head["title_cut"])                               # the title before the counts
+        self.assertTrue(head["shown"].startswith("6 frames"))             # a narrow head drops whole counts only
+        self.assertTrue(head["counts"].startswith(head["shown"]))
         self.assertEqual(head["box"][:2], after["area"][:2])              # the head of the group, top left
         self.assertEqual(head["box"][3], 30)                              # shrunk to a small tile
         self.assertEqual((after["full"], after["tiles"]), (6, 0))

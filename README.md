@@ -880,7 +880,8 @@ cd "<project folder>"
 
    **Disconnecting.** Right after a name's first sign-in, **No, use another
    account** in the question above does it for you: that name's saved sign-in
-   and its binding are deleted and Google's sign-in opens again. Otherwise
+   and its binding are deleted, with that name's tidy-up sign-in if it has
+   one, and Google's sign-in opens again. Otherwise
    (Jarvis closed, or a binding you confirmed earlier): delete
    `%LOCALAPPDATA%\briefing-reader\google_token_personal.json`
    (or `google_token_work.json` for the work account; the next click on that
@@ -3476,7 +3477,12 @@ show **Sign in work** (the account's name) for each account that is not
 signed in to Jarvis yet (a rule's dry run reads that mail too, so it comes
 first): it opens that account's Google sign-in in your browser, the same one
 a card's **Sign in** opens, and the row and card say "Finish the sign-in in
-your browser..." until it is done, then whether it signed in or why not.
+your browser..." until it is done, then whether it signed in or why not. A
+draft's row also has **Edit**: its words go back in the bar on Home and the
+draft goes, so you can reword it (say, to leave out an account you don't
+use) and set it up again. A rule's row says which account it watches. Only
+the word naming an account counts: "what to work on" names no work account,
+while "my work mail" does.
 
 **When they run.** A timed agent at its times on its days (by the local date
 and clock, so a daylight-saving night neither skips nor repeats a run; a time
