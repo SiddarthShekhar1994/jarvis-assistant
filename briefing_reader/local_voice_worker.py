@@ -514,6 +514,17 @@ def answer_stream() -> IO[str]:
     return open(answers, "w", encoding="utf-8", newline="\n")  # noqa: SIM115
 
 
+def load_blas_first() -> None:
+    """SciPy's maths library (its OpenBLAS), loaded before onnxruntime and torch. transformers pulls SciPy in, and when
+    the unknown-word model's thread loaded it after Kokoro had run, it stalled there for over a minute (2026-11-25:
+    77 s in the app, over 200 s in a test; loaded first it takes 0.3 s and the model is ready in about 7 s). Without
+    SciPy this does nothing."""
+    try:
+        import scipy.linalg  # noqa: F401
+    except Exception:  # noqa: BLE001 - SciPy missing or broken: nothing to load early
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     os.environ.update(OFFLINE_ENV)                        # before anything that could reach the network loads
     parser = argparse.ArgumentParser(prog="briefing_reader.local_voice_worker")
@@ -526,6 +537,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--voice", default="")
     args = parser.parse_args(argv)
     out = answer_stream()
+    load_blas_first()                                     # before onnxruntime and torch (see load_blas_first)
     inp = open(0, "rb", closefd=False)  # noqa: SIM115
     dirs = {True: Path(args.g2p_gb), False: Path(args.g2p_us)}
     return serve(inp, out, lambda: KokoroSpeaker.load(Path(args.model), dirs, args.threads),

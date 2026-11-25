@@ -558,6 +558,22 @@ class ServeTests(unittest.TestCase):
         self.assertEqual({key: captured[key] for key in lv.OFFLINE_ENV}, {key: "1" for key in lv.OFFLINE_ENV})
         self.assertEqual(captured["warm_voice"], "bm_george")
 
+    def test_main_loads_scipys_maths_library_before_the_voice(self) -> None:
+        order: list[str] = []
+
+        def fake_serve(_inp, _out, _load, **kwargs):
+            order.append("serve")
+            return 0
+
+        with mock.patch.object(lw, "serve", fake_serve), mock.patch.object(lw, "answer_stream", io.StringIO), \
+                mock.patch.object(lw, "load_blas_first", lambda: order.append("blas")):
+            lw.main(["--model", "m", "--g2p-gb", "g", "--g2p-us", "u", "--out-root", str(self.root)])
+        self.assertEqual(order, ["blas", "serve"])     # Kokoro and torch load inside serve, after it
+
+    def test_without_scipy_loading_it_first_does_nothing(self) -> None:
+        with mock.patch.dict("sys.modules", {"scipy": None, "scipy.linalg": None}):
+            self.assertIsNone(lw.load_blas_first())
+
 
 class WordFallbackTests(unittest.TestCase):
     CONFIG = SimpleNamespace(grapheme_chars="____ab", phoneme_chars="____xy")
