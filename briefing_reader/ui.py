@@ -16552,12 +16552,21 @@ class AppController(QObject):
             return None
         from . import wake_ui
 
+        voiceprint = self._create_voiceprint(talk)
         controller = wake_ui.WakeController(self.config, talk, holds=self._wake_holds,
-                                            in_control=self._wake_in_control, parent=self)
+                                            in_control=self._wake_in_control, voiceprint=voiceprint, parent=self)
         panel = wake_ui.WakePanel()
         self._talk_panel.add_part(panel)
         settings = self.window.reading.settings_page
         controller.attach_panel(panel, refresh=settings.refresh)
+        if voiceprint is not None:
+            from . import voiceprint_ui
+
+            voice_panel = voiceprint_ui.VoicePanel()
+            self._talk_panel.add_part(voice_panel)          # "Recognise my voice", under the "Hey Jarvis" part
+            voiceprint.attach_panel(voice_panel, refresh=settings.refresh)
+            voiceprint.recordingChanged.connect(lambda _on: controller.refresh_holds())
+            voiceprint.warm()
         talk.extra_rows = controller.settings_rows
         talk.silent_mics = controller.silent_mics       # part 5B: "(silent)" in the microphone lists
         controller.changed.connect(self._on_wake_changed)
@@ -16569,6 +16578,31 @@ class AppController(QObject):
             picked.connect(controller.mic_picked)       # Settings > Meetings > Microphone: the listener moves to it
         self._on_wake_changed()
         return controller
+
+    def _create_voiceprint(self, talk: Any) -> Any:
+        """The voiceprint beside "Hey Jarvis" (voiceprint_ui.VoiceprintController): Settings > Talk's "Recognise my
+        voice" and the check of each wake. None if it could not start (every wake then goes through, as before)."""
+        self.voiceprint = None
+        try:
+            from . import voiceprint_ui
+
+            self.voiceprint = voiceprint_ui.VoiceprintController(
+                self.config, busy=self._voiceprint_busy, parent=self)
+        except Exception as exc:  # noqa: BLE001 - the voiceprint never stops the app
+            logger.warning("Voiceprint: not started (%s)", type(exc).__name__)
+        return self.voiceprint
+
+    def _voiceprint_busy(self) -> str:
+        """What stops a recording of the owner's voice now (voiceprint_ui.BUSY_*; "" nothing): a talk under way, or
+        Jarvis speaking or reading the briefing - the same as those holds of "Hey Jarvis"."""
+        from . import voiceprint_ui, wake_ui
+
+        holds = self._wake_holds()
+        if wake_ui.HOLD_TALK in holds:
+            return voiceprint_ui.BUSY_TALK
+        if wake_ui.HOLD_SPEAKING in holds:
+            return voiceprint_ui.BUSY_SPEAKING
+        return ""
 
     def _say_network_use(self) -> None:
         """Tell the web engine whether a page picture ([live] page pictures) or an agent page ([agent]) can be asked
@@ -16636,6 +16670,9 @@ class AppController(QObject):
             holds.append(wake_ui.HOLD_FOCUS)
         if self._call_quiet():
             holds.append(wake_ui.HOLD_CALL)
+        voiceprint = getattr(self, "voiceprint", None)
+        if voiceprint is not None and bool(voiceprint.recording()):
+            holds.append(wake_ui.HOLD_VOICEPRINT)      # Settings > Talk records the owner's "Hey Jarvis"
         return holds
 
     def _wake_in_control(self) -> bool:
@@ -16981,6 +17018,8 @@ class AppController(QObject):
             self.instant.shutdown()    # no network answer lands after this; the timers stay in their file
         if getattr(self, "wake", None) is not None:
             self.wake.shutdown()       # "Hey Jarvis": the listener ends (its microphone closes)
+        if getattr(self, "voiceprint", None) is not None:
+            self.voiceprint.shutdown()     # a recording of the owner's voice stops (nothing kept); a download stops
         if getattr(self, "talk", None) is not None:
             self.talk.shutdown()       # the microphone closes; the speech process ends
         if getattr(self, "voice_download", None) is not None:

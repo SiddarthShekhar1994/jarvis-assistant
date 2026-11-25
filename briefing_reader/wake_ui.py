@@ -18,6 +18,11 @@ the chime when nothing was said yet, the same routes and gates as typed words - 
 end closes the stream, which ends the hand-off. A listener that ends by itself is started again (RESTART_DELAYS_S),
 and after too many failures it stops, saying so.
 
+The voiceprint (voiceprint_ui, owner decisions 2026-11-24): once the owner's voice is recorded and "Only my voice wakes
+Jarvis" is on, each wake's pre-roll is checked first, on a worker thread; a voice that does not sound like the owner's
+opens no talk and plays no chime, and "That didn't sound like you, sir." shows where the wake's status shows for
+NOT_YOU_MS while it listens again. A check that cannot run lets the wake through. The talk key is never checked.
+
 What shows it: the HEY JARVIS mark (:class:`WakeBadge`) in the window's header and on the desktop HUD (cyan while it
 listens, dim while paused, amber when something is wrong; ``ReadingView.set_wake``), the tray icon's mark and
 tooltip, and Settings > Talk (:class:`WakePanel` and :meth:`WakeController.settings_rows`).
@@ -79,12 +84,18 @@ SHORT_STARTING = "Hey Jarvis starting"
 # The window brief: "Hey Jarvis" on the canvas (WakeController.hearing; board.protocol.HEAR_STATES).
 HEAR_OFF, HEAR_LISTENING, HEAR_PAUSED, HEAR_CANT_HEAR, HEAR_OTHER = "", "listening", "paused", "cant_hear", "other"
 HEAR_HEARING = "hearing"          # canvas part 5B: a talk "Hey Jarvis" started is listening to the owner now
+NOT_YOU = "That didn't sound like you, {address}."     # the voiceprint: a "Hey Jarvis" in another voice ...
+NOT_YOU_PLAIN = "That didn't sound like you."        # ... (an address too long for the badge: without it)
+NOT_YOU_MS = 4000                                    # ... shown this long where the wake's status shows
+SHORT_NOT_YOU = NOT_YOU.format(address="sir")
 SHORT_WORDS = (SHORT_OFF, SHORT_SETUP, SHORT_STOPPED, SHORT_PAUSED, SHORT_LISTENING, SHORT_VIRTUAL, SHORT_NO_MIC,
-               SHORT_BUSY, SHORT_SILENT, SHORT_NO_AUDIO, SHORT_RESTARTING, SHORT_STARTING)
+               SHORT_BUSY, SHORT_SILENT, SHORT_NO_AUDIO, SHORT_RESTARTING, SHORT_STARTING, SHORT_NOT_YOU)
 HOLD_TALK, HOLD_SPEAKING, HOLD_MEETING, HOLD_FOCUS = "talk", "speaking", "meeting", "focus"
 HOLD_CALL = "call"                # quiet during calls: another app uses the microphone
+HOLD_VOICEPRINT = "voiceprint"    # Settings > Talk records the owner's voice (voiceprint_ui)
 HOLD_TEXTS = {HOLD_TALK: "while you talk to him", HOLD_SPEAKING: "while he speaks",
-              HOLD_MEETING: "while a meeting records", HOLD_FOCUS: "in focus mode", HOLD_CALL: "while you're on a call"}
+              HOLD_MEETING: "while a meeting records", HOLD_FOCUS: "in focus mode", HOLD_CALL: "while you're on a call",
+              HOLD_VOICEPRINT: "while it learns your voice"}
 PROBLEM_STOPPED = "stopped"       # the listener kept failing: it is not started again until the owner turns it on
 PROBLEM_UNSAVED = "unsaved"       # Turn on could not be saved (fail-closed: it stays off)
 PROBLEM_UNSAVED_OFF = "unsaved_off"   # Turn off could not be saved: off for this run, on again at the next start
@@ -459,7 +470,8 @@ class WakeController(QObject):
                  store: WakeStore | None = None, models_root: Path | None = None,
                  client_factory: Callable[..., Any] | None = None, downloader_factory: Callable[..., Any] | None = None,
                  runtime_missing: Callable[[], str] | None = None, threaded: bool = True,
-                 clock: Callable[[], float] = time.monotonic, parent: QObject | None = None) -> None:
+                 clock: Callable[[], float] = time.monotonic, voiceprint: Any = None,
+                 parent: QObject | None = None) -> None:
         super().__init__(parent)
         from . import meetings
 
@@ -478,6 +490,17 @@ class WakeController(QObject):
         self._runtime_missing = runtime_missing or wake.runtime_missing
         self._threaded = threaded
         self._clock = clock
+        # The voiceprint (voiceprint_ui.VoiceprintController; None: every wake goes through): ``will_check()`` and
+        # ``check(pcm, done)``, its verdict back on this thread. A mismatch shows NOT_YOU for NOT_YOU_MS.
+        self._voiceprint = voiceprint
+        address = str(getattr(getattr(config, "assistant", None), "address", "") or "sir")
+        not_you = NOT_YOU.format(address=address)
+        self._not_you = not_you if len(not_you) <= SHORT_CAP else NOT_YOU_PLAIN
+        self._not_you_until = 0.0
+        self._not_you_timer = QTimer(self)
+        self._not_you_timer.setSingleShot(True)
+        self._not_you_timer.setInterval(NOT_YOU_MS)
+        self._not_you_timer.timeout.connect(self._changed)
         self._lock = threading.Lock()
         self._client: Any = None
         self._token: object | None = None               # the running listener's own mark: a replaced one's lines don't count
@@ -743,6 +766,44 @@ class WakeController(QObject):
             logger.info("Wake: heard (score %.2f) but %s; ignored", score, why or "its audio ended")
             stream.close()
             return
+        gate = self._voiceprint
+        if gate is not None and self._gate_checks(gate):
+            logger.info("Wake: heard (score %.2f); checking the voice", score)
+            gate.check(stream.preroll, partial(self._on_verdict, message, stream))
+            return
+        self._hand_over(message, stream, score)
+
+    def _gate_checks(self, gate: Any) -> bool:
+        try:
+            return bool(gate.will_check())
+        except Exception as exc:  # noqa: BLE001 - unknown: unchecked (the wake goes through, as without it)
+            logger.info("Wake: the voice check was not asked (%s)", type(exc).__name__)
+            return False
+
+    def _on_verdict(self, message: dict, stream: HandoffStream, verdict: Any) -> None:
+        """The voiceprint's verdict on a wake (the Qt thread): a mismatch lets the wake go - no talk, no chime - and
+        says NOT_YOU where the wake's status shows; a match (or a check that could not run) goes on as before."""
+        with self._lock:
+            current = self._stream is stream
+        if self._closing or stream.closed or not current:
+            stream.close()
+            return
+        if not getattr(verdict, "allows", True):
+            logger.info("Wake: voiceprint mismatch (score %.2f)", float(getattr(verdict, "score", 0.0) or 0.0))
+            self._not_you_until = self._clock() + NOT_YOU_MS / 1000
+            self._not_you_timer.start()
+            stream.close()                                    # the listener listens again
+            self._changed()
+            return
+        score = float(message.get("score") or 0.0)
+        why = self._refused()
+        if why or stream.ended:
+            logger.info("Wake: heard (score %.2f) but %s; ignored", score, why or "its audio ended")
+            stream.close()
+            return
+        self._hand_over(message, stream, score)
+
+    def _hand_over(self, message: dict, stream: HandoffStream, score: float) -> None:
         logger.info("Wake: heard (score %.2f)", score)
         started = self._talk.listen_from_wake(stream, preroll=stream.preroll, device_name=self._mic[0],
                                               follows_default=self._mic[1], speaking=bool(message.get("speaking")))
@@ -862,6 +923,8 @@ class WakeController(QObject):
         if self._talk_hears():
             return HEAR_HEARING, ""             # part 5B: never "paused" while a talk it started listens
         if look == LOOK_LISTENING:
+            if short == self._not_you:
+                return HEAR_OTHER, ""           # the voiceprint's caption: the page shows these words, not its own
             return HEAR_LISTENING, ""
         if look == LOOK_PAUSED:
             return HEAR_PAUSED, ""
@@ -898,6 +961,8 @@ class WakeController(QObject):
         where = "the Windows default" if follows else "picked in Settings > Talk"
         state = self._listener_state
         if state == wake_listen.STATE_LISTENING:
+            if self._clock() < self._not_you_until:
+                return f"{self._not_you} Listening for {PHRASE}", self._not_you, LOOK_LISTENING
             return f"Listening for {PHRASE}", SHORT_LISTENING, LOOK_LISTENING
         if state == wake_listen.STATE_VIRTUAL:
             return (f"Not listening: “{name}” ({where}) is a virtual microphone, silent unless its app runs. "
@@ -964,6 +1029,11 @@ class WakeController(QObject):
         rows = [("Hey Jarvis", self._status_row()),
                 ("Wake model", f"openWakeWord's “hey jarvis”: {model}"),
                 ("Sensitivity", wake.sensitivity_of(self._store.sensitivity).label)]
+        if self._voiceprint is not None:
+            try:
+                rows += list(self._voiceprint.settings_rows())
+            except Exception as exc:  # noqa: BLE001 - Settings shows the wake's own rows whatever happens
+                logger.warning("Wake: the voiceprint rows failed (%s)", type(exc).__name__)
         if self._store.on:
             counts = self._store.counts()
             rows.append(("Today", f"{counts[WakeStore.WAKES]} wake{'s' if counts[WakeStore.WAKES] != 1 else ''}, "
@@ -1027,4 +1097,5 @@ class WakeController(QObject):
         self._download_cancel.set()
         self._tail_timer.stop()
         self._restart_timer.stop()
+        self._not_you_timer.stop()
         self._stop_client()

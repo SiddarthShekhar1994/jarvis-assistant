@@ -110,12 +110,15 @@ EDITABLE: dict[str, Editable] = {
     "talk.quiet_ms": _number(cfg.TALK_RANGES["quiet_ms"], 100),
     "talk.keep_warm_minutes": _number(cfg.TALK_RANGES["keep_warm_minutes"], 5),
     "talk.live_captions": Editable(KIND_CHOICE, choices=cfg.LIVE_CAPTIONS),
+    # The voiceprint's switch (Settings > Talk > Recognise my voice): it only filters "Hey Jarvis" wakes on this PC
+    "wake.only_my_voice": _flag(),
 }
 
 # The tables' own settings, for a key's code default (what holds when config.toml does not set it).
 _DEFAULTS: dict[str, type] = {"voice": cfg.VoiceConfig, "assistant": cfg.AssistantConfig, "display": cfg.DisplayConfig,
                               "ui": cfg.UiConfig, "live": cfg.LiveConfig, "productivity": cfg.ProductivityConfig,
-                              "instant": cfg.InstantConfig, "talk": cfg.TalkConfig}
+                              "instant": cfg.InstantConfig, "talk": cfg.TalkConfig,
+                              "wake": cfg.WakeConfig}
 _KEY_SHAPE = re.compile(r"[a-z_]{1,24}\.[a-z_]{1,40}")
 _PERCENT_RE = re.compile(r"([+-]?)(\d{1,4})%")
 
