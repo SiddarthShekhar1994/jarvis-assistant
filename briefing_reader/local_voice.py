@@ -93,9 +93,10 @@ ERR_REFUSED = "refused"                # under the test guard, with no fake proc
 ERR_CLOSED = "closed"                  # the app is closing
 ERR_BUSY = "busy"                      # his line waited its most for the voice: the Windows voice says it
 ERR_LOAD = "load_failed"               # the process could not load (remembered: not started again until reset)
+ERR_WORD = "word_wait"                 # his line has a word the unknown-word model must say, and it is still loading
 MAX_TEXT_CHARS = 4000                  # one request (GROUP_CHARS is the usual; sentence_groups keeps far below it)
 # Errors about one line, not the voice: the Windows voice says that line, and the next one asks the local voice again.
-LINE_ERRORS = frozenset({ERR_TOO_LONG, ERR_FAILED, ERR_VOICE, ERR_PATH, ERR_BUSY})
+LINE_ERRORS = frozenset({ERR_TOO_LONG, ERR_FAILED, ERR_VOICE, ERR_PATH, ERR_BUSY, ERR_WORD})
 # What held the voice while one of his lines waited for it (reason words, safe to log).
 HELD_LOADING = "loading"               # the process was starting (a warm-up, or a request that started it)
 HELD_BRIEFING = "briefing"             # a briefing section's request (not urgent)
@@ -443,6 +444,16 @@ class LocalResult:
         return f"LocalResult({self.duration_ms} ms, {len(self.words)} words, made in {self.ms} ms)"
 
 
+def _log_word_helper(notice: dict) -> None:
+    """The voice process's unknown-word model ended loading: how long it took (a status word and a number only)."""
+    state = "ready" if notice.get("word_helper") == "ready" else "could not load"
+    try:
+        seconds = max(0, int(notice.get("ms") or 0)) / 1000
+    except (TypeError, ValueError):
+        seconds = 0.0
+    logger.info("Local voice: the unknown-word model is %s after %.1f s", state, seconds)
+
+
 class LocalVoiceClient:
     """See the module docstring. Thread-safe; one request at a time, Jarvis's own lines (``urgent``) before the
     briefing's. ``spawn(command, environ)`` (tests) replaces the real process; without it, under the test guard
@@ -529,7 +540,9 @@ class LocalVoiceClient:
                     line = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
                 except (ValueError, UnicodeDecodeError):
                     continue                      # not one of the worker's lines (a library's print): skipped
-                if isinstance(line, dict):
+                if isinstance(line, dict) and "word_helper" in line:
+                    _log_word_helper(line)        # its own notice, never an answer
+                elif isinstance(line, dict):
                     lines.put(line)
         except (OSError, ValueError):
             pass
@@ -712,7 +725,7 @@ class LocalVoiceClient:
                 raise LocalVoiceError(self._broken, waited_ms=waited_ms, held_by=held_by)
             if urgent and held_by == HELD_LOADING and not self.running():
                 raise LocalVoiceError(ERR_BUSY, waited_ms=waited_ms, held_by=held_by)   # that load did not take
-            result = self._synthesize(text, Path(out), voice or self.voice, float(speed), float(gain))
+            result = self._synthesize(text, Path(out), voice or self.voice, float(speed), float(gain), urgent=urgent)
         except LocalVoiceError as exc:
             if held_by and not exc.held_by:
                 exc.waited_ms, exc.held_by = waited_ms, held_by
@@ -723,7 +736,8 @@ class LocalVoiceClient:
             result = LocalResult(result.duration_ms, result.words, result.ms, result.load_ms, waited_ms, held_by)
         return result
 
-    def _synthesize(self, text: str, out: Path, voice: str, speed: float, gain: float) -> LocalResult:
+    def _synthesize(self, text: str, out: Path, voice: str, speed: float, gain: float, *,
+                    urgent: bool = False) -> LocalResult:
         load_ms = 0
         if (self.running() and self._keep_warm_s > 0
                 and self._clock() - self._last_used > self._keep_warm_s - IDLE_MARGIN_S):
@@ -737,7 +751,7 @@ class LocalVoiceClient:
                     raise LocalVoiceError(error)
             self._next_id += 1
             request = {"id": self._next_id, "text": text, "voice": voice, "speed": speed, "gain": gain,
-                       "out": str(out)}
+                       "out": str(out), "urgent": bool(urgent)}
             answer = self._send(request)
             if answer is None and attempt == 0:
                 self._kill()                      # it ended just then (idle, or crashed): started again, once
