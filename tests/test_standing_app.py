@@ -177,6 +177,31 @@ class ScreenTests(_Base):
         self.assertIn("DRY RUN: 3 OF 12 YES", rule.meta_label.text())
         self.assertTrue(rule.run_button.isHidden())                       # a rule runs on new mail only
 
+    def test_a_rule_row_says_which_account_it_watches_and_a_live_row_has_no_edit(self) -> None:
+        stage = self.c.window.reading.agents_stage
+        self.assertIn("WATCHES WORK MAIL", stage.job_row(RULE_ID).meta_label.text())     # a live rule's row too
+        self.assertTrue(stage.job_row(AGENT_ID).edit_button.isHidden())                  # only a draft has Edit
+        self.assertTrue(stage.job_row(RULE_ID).edit_button.isHidden())
+
+    def test_a_tried_rule_row_has_edit_and_its_sentence_goes_back_to_the_bar(self) -> None:
+        save_jobs(self.app.config, agents=[agent_data()], rules=[rule_data(status="tried")])
+        self.s.reload()
+        settle()
+        row = self.c.window.reading.agents_stage.job_row(RULE_ID)
+        self.assertFalse(row.edit_button.isHidden())
+        row.edit_button.click()
+        settle()
+        self.assertEqual(self.c.window.reading.command_bar.text(), f"rule: {SENTENCE}")
+        self.assertEqual(self.c.window.reading.current_tab(), ui.SCREEN_HOME)
+        self.assertEqual([rule.id for rule in Definitions(files_of(self.app.config)).load()[1]], [])   # the draft went
+        self.assertEqual([agent.id for agent in self.s.agents], [AGENT_ID])                            # nothing else
+
+    def test_edit_never_touches_a_live_job(self) -> None:
+        self.s.edit_job(RULE_ID)
+        self.s.edit_job(AGENT_ID)
+        self.assertEqual(sorted(job.id for job in [*self.s.agents, *self.s.rules]), sorted([AGENT_ID, RULE_ID]))
+        self.assertEqual(self.c.window.reading.command_bar.text(), "")
+
     def test_texts_are_plain_text(self) -> None:
         save_jobs(self.app.config, agents=[agent_data(name="<b>Bold</b> & co")], rules=[rule_data()])
         self.s.reload()
@@ -467,11 +492,21 @@ class DraftSignInTests(_Base):
         self.s.reload()
         settle()
 
+    def test_a_draft_row_has_edit_so_the_owner_can_leave_work_out(self) -> None:
+        row = self.c.window.reading.agents_stage.job_row(AGENT_ID)
+        self.assertFalse(row.edit_button.isHidden())
+        self.assertEqual([button.text() for button in row.buttons()][-2:], ["Edit", "Delete"])
+        row.edit_button.click()
+        settle()
+        self.assertEqual(self.c.window.reading.command_bar.text(), f"agent: {agent_data()['words']}")
+        self.assertEqual(Definitions(files_of(self.app.config)).load()[0], [])        # the draft went; nothing ran
+        self.assertEqual(self.started, [])
+
     def test_sign_in_work_on_the_row_then_turn_on_then_run_now(self) -> None:
         stage = self.c.window.reading.agents_stage
         self.assertIsNone(stage.notice_card(standing_ui.SETUP_CARD))
         row = stage.job_row(AGENT_ID)
-        self.assertEqual([button.text() for button in row.buttons()], ["Sign in work", "Turn on", "Delete"])
+        self.assertEqual([button.text() for button in row.buttons()], ["Sign in work", "Turn on", "Edit", "Delete"])
         self.assertIn("Sign the work account in first: click Sign in work.", row.detail_label.text())
         done = hold_sign_in(self.app.calendars["work"])
         row.sign_in_button("work").click()

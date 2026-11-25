@@ -294,9 +294,22 @@ def signed_in(account: Any) -> bool:
         return False
 
 
+# An alias said as a verb names no account ("what to work on", "I work late"); one followed by a mail word always does
+# ("forward it to work mail").
+_MAIL_WORD = re.compile(r"(?:'s)?\s+(?:e-?mails?|mails?|inbox(?:es)?|accounts?|gmail|calendars?|address(?:es)?)\b",
+                        re.IGNORECASE)
+_VERB_BEFORE = re.compile(r"(?:^|[^\w'])(?:to|i|we|you|they|can|could|will|would|should|must|might|may|don't|doesn't|"
+                          r"didn't|can't|won't|i'll|we'll|you'll|i'd|let's|usually|often|still|also)\s+$",
+                          re.IGNORECASE)
+
+
 def named(alias: str, words: str) -> bool:
-    """The owner's own words name this account ("my work mail", "personal")."""
-    return re.search(rf"(?<![\w-]){re.escape(alias)}(?![\w-])", words, re.IGNORECASE) is not None
+    """The owner's own words name this account ("my work mail", "personal", "work and personal"), and not as a verb:
+    "what to work on" names no work account."""
+    for found in re.finditer(rf"(?<![\w-]){re.escape(alias)}(?![\w-])", words, re.IGNORECASE):
+        if _MAIL_WORD.match(words, found.end()) or not _VERB_BEFORE.search(words[:found.start()]):
+            return True
+    return False
 
 
 def prefer_signed_in(job: Agent | Rule, words: str, accounts: Mapping[str, Any],

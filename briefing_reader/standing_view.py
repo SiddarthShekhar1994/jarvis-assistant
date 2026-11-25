@@ -17,7 +17,7 @@ Public API
     - RULES: one row per rule with Dry run (``dryRunRequested``), Turn on (``turnOnRequested``), Pause / Resume and
       Delete;
     - a draft's row (an agent's or a rule's) also has Sign in <alias> for each account it reads that is not signed in
-      (``signInRequested(job id, alias)``);
+      (``signInRequested(job id, alias)``), and Edit (``editRequested(job id)``: its words back in the bar);
     - ACTIVITY: what the jobs did, newest first (the first ``shown`` rows, then "+N more"), each with Undo while it
       can be undone (``undoRequested(row key)``);
     - REPORTS: what the agents wrote, each under "Written by Claude from your mail", with Clear (``clearRequested()``).
@@ -54,6 +54,8 @@ RESUME_TEXT = "Resume"
 DELETE_TEXT = "Delete"
 DRY_RUN_TEXT = "Dry run"
 TURN_ON_TEXT = "Turn on"
+EDIT_TEXT = "Edit"
+EDIT_TIP = "Put its words back in the bar to change them (this draft goes; nothing was on)"
 SIGN_IN_TEXT = "Sign in {alias}"
 UNDO_TEXT = "Undo"
 CLEAR_TEXT = "Clear"
@@ -94,6 +96,7 @@ class JobRow:
     can_turn_on: bool = False
     turn_on_tip: str = ""        # why Turn on can't go yet (its button is off and says why), "" when it can
     can_delete: bool = True
+    can_edit: bool = False       # a draft's Edit: its words back in the bar
     tooltip: str = ""
     sign_ins: tuple[tuple[str, bool], ...] = ()   # (alias, enabled): Sign in <alias> for an account not signed in
 
@@ -241,6 +244,7 @@ class JobTile(_Tile):
     delete = Signal(str)
     dryRun = Signal(str)
     turnOn = Signal(str)
+    edit = Signal(str)
     signIn = Signal(str, str)        # job id, alias
 
     def __init__(self, info: JobRow, parent: QWidget | None = None) -> None:
@@ -256,11 +260,14 @@ class JobTile(_Tile):
         self.dry_run_button = _button(DRY_RUN_TEXT, holo.GO)
         self.turn_on_button = _button(TURN_ON_TEXT, holo.AMBER_COMMIT)
         self.pause_button = _button(PAUSE_TEXT)
+        self.edit_button = _button(EDIT_TEXT)
+        self.edit_button.setToolTip(hud.plain_tooltip(EDIT_TIP))
         self.delete_button = _button(DELETE_TEXT, holo.DANGER_GHOST)
         self.run_button.clicked.connect(lambda: self.runNow.emit(self._info.job_id))
         self.dry_run_button.clicked.connect(lambda: self.dryRun.emit(self._info.job_id))
         self.turn_on_button.clicked.connect(lambda: self.turnOn.emit(self._info.job_id))
         self.pause_button.clicked.connect(lambda: self.pause.emit(self._info.job_id))
+        self.edit_button.clicked.connect(lambda: self.edit.emit(self._info.job_id))
         self.delete_button.clicked.connect(lambda: self.delete.emit(self._info.job_id))
         head = QHBoxLayout()
         head.setContentsMargins(16, 10, 12, 0)
@@ -278,7 +285,7 @@ class JobTile(_Tile):
         layout.addLayout(head)
         layout.addLayout(text)
         self._buttons_box = _buttons_row((self.run_button, self.dry_run_button, self.turn_on_button,
-                                          self.pause_button, self.delete_button), left=16)
+                                          self.pause_button, self.edit_button, self.delete_button), left=16)
         layout.addLayout(self._buttons_box)
         self.set_info(info)
 
@@ -287,7 +294,7 @@ class JobTile(_Tile):
 
     def _all_buttons(self) -> list[holo.HoloButton]:
         return [self.run_button, *self.sign_in_buttons, self.dry_run_button, self.turn_on_button, self.pause_button,
-                self.delete_button]
+                self.edit_button, self.delete_button]
 
     def buttons(self) -> list[holo.HoloButton]:
         return [button for button in self._all_buttons() if not button.isHidden()]
@@ -330,6 +337,7 @@ class JobTile(_Tile):
         self.turn_on_button.setToolTip(hud.plain_tooltip(info.turn_on_tip))
         self.pause_button.setVisible(info.can_pause)
         self.pause_button.setText(RESUME_TEXT if info.paused else PAUSE_TEXT)
+        self.edit_button.setVisible(info.can_edit)
         self.delete_button.setVisible(info.can_delete)
         self._sync_sign_ins(info.sign_ins)
         for button in self._all_buttons():
@@ -536,6 +544,7 @@ class AgentsStage(QScrollArea):
     deleteRequested = Signal(str)
     dryRunRequested = Signal(str)
     turnOnRequested = Signal(str)
+    editRequested = Signal(str)            # a draft row's Edit: job id
     signInRequested = Signal(str, str)     # a draft row's Sign in <alias>: job id, alias
     undoRequested = Signal(str)
     clearRequested = Signal()
@@ -716,6 +725,7 @@ class AgentsStage(QScrollArea):
             row.delete.connect(self.deleteRequested)
             row.dryRun.connect(self.dryRunRequested)
             row.turnOn.connect(self.turnOnRequested)
+            row.edit.connect(self.editRequested)
             row.signIn.connect(self.signInRequested)
         elif name == ACTIVITY_GROUP:
             row = ActivityTile(info)
