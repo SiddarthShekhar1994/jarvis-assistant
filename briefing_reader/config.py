@@ -113,7 +113,7 @@ _MISSING = object()
 _KNOWN_TABLES = ("voice", "prompt", "polling", "sections", "notion", "calendar", "actions",
                  "accounts", "schedule", "hotkey", "agenda", "display", "ask", "research", "assistant", "live",
                  "productivity", "ui", "meetings", "desktop", "agent", "talk", "instant", "standing", "look",
-                 "docs")
+                 "docs", "wake")
 # Library loggers kept at WARNING, also under --debug. The Google sign-in libraries log the
 # authorization code, the access token and the refresh token at DEBUG (requests_oauthlib),
 # before Jarvis could register them for redaction, so they never get DEBUG here.
@@ -597,6 +597,16 @@ class TalkConfig:
 
 
 @dataclass(frozen=True)
+class WakeConfig:
+    """``[wake]``: "Hey Jarvis" (turned on in Settings > Talk, kept in wake.json, never here). ``only_my_voice``: once
+    the owner's voice is recorded (Settings > Talk > Recognise my voice: voiceprint_ui), only a voice that sounds like
+    it wakes Jarvis with "Hey Jarvis" - the default; it does nothing without that recording. It only filters wakes:
+    the talk key is never checked, and voice never approves anything."""
+
+    only_my_voice: bool = True
+
+
+@dataclass(frozen=True)
 class DocsConfig:
     """``[docs]``: documents and datasheets kept on this PC (build plan item 5; on by default; the table may be absent
     from config.toml: these defaults hold). What the owner types is written at once; what Jarvis writes (an Ask, a
@@ -644,6 +654,7 @@ class Config:
     standing: StandingConfig = field(default_factory=StandingConfig)
     look: LookConfig = field(default_factory=LookConfig)
     docs: DocsConfig = field(default_factory=DocsConfig)
+    wake: WakeConfig = field(default_factory=WakeConfig)
     # Settings changed in the app (overrides.py: settings.json in the data folder, merged before the parsers): the
     # "table.key" names in use here, and what config.toml alone gives each of them. hash=False keeps Config hashable.
     overridden: frozenset[str] = frozenset()
@@ -794,6 +805,7 @@ def load_config(project_root: Path | None = None, *,
         standing=_parse_standing(doc, environ),
         look=_parse_look(doc),
         docs=_parse_docs(doc),
+        wake=_parse_wake(doc),
         overridden=overridden,
         toml_values=MappingProxyType(toml_values),
     )
@@ -1566,6 +1578,13 @@ def _parse_standing(doc: Mapping[str, Any], environ: Mapping[str, str] | None = 
                           quiet_from=r.time_of_day("quiet_from", d.quiet_from),
                           quiet_until=r.time_of_day("quiet_until", d.quiet_until),
                           open_when_closed=r.boolean("open_when_closed", d.open_when_closed), **numbers)
+
+
+def _parse_wake(doc: Mapping[str, Any]) -> WakeConfig:
+    """``[wake]`` from config.toml, or the defaults when the table is absent (the repo's config.toml has none)."""
+    d = WakeConfig()
+    r = _TableReader(doc, "wake", _field_names(WakeConfig))
+    return WakeConfig(only_my_voice=r.boolean("only_my_voice", d.only_my_voice))
 
 
 def _parse_docs(doc: Mapping[str, Any]) -> DocsConfig:

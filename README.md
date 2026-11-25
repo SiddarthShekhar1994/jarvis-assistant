@@ -3872,6 +3872,35 @@ for personal, non-commercial use**, so they are not part of this repository:
 Jarvis downloads them only when you click, into the models folder in the data
 folder, and checks each file's size and SHA-256 before using it.
 
+#### Only my voice (the voiceprint)
+
+Off until you record your voice. In Settings > Talk > **Recognise my voice**,
+click Download for the speaker model (about 26.5 MB, downloaded only when you
+click and checked against its pinned size and SHA-256), then **Record my
+voice** and say "Hey Jarvis" three times. After that, a "Hey Jarvis" in a
+voice that doesn't sound like yours opens nothing - no talk, no chime - and
+the HEY JARVIS mark at the canvas's bottom left says "That didn't sound like
+you, sir." for a few seconds, then it listens again.
+While you record, "Hey Jarvis" pauses; a talk starting or Jarvis speaking
+stops the recording and nothing is kept.
+
+- **What is kept, and where.** Jarvis keeps a voice template on this PC
+  (numbers, not a recording) in `voiceprint.json` in the data folder. No
+  audio is ever saved: your three takes stay in memory only while it learns.
+  **Forget my voice** deletes the template. **Record again** replaces it.
+- **The switch.** *Only my voice wakes Jarvis* is on after you record
+  (`[wake] only_my_voice = true` in config.toml is the default; the switch
+  keeps your choice in settings.json). Without a recording it does nothing.
+- **What it checks.** "Hey Jarvis" only. The talk key and every other way in
+  are never checked, and it never approves anything: it only keeps a wake in
+  another voice out. A wake too short to tell, a check that takes longer than
+  a second and a half, or a check that can't run (the model not downloaded or
+  not loading, the add-on missing) goes through as before. Settings > Talk
+  says why the check is off and counts the wakes that were too short to check.
+  A model that won't load is offered for Download again.
+
+Speaker model: WeSpeaker ResNet34 (VoxCeleb), CC BY 4.0.
+
 ### Instant answers
 
 Everyday questions are answered by Jarvis himself, typed in the bar or said
