@@ -19,7 +19,8 @@ Public API
     - a draft's row (an agent's or a rule's) also has Sign in <alias> for each account it reads that is not signed in
       (``signInRequested(job id, alias)``), and Edit (``editRequested(job id)``: its words back in the bar);
     - ACTIVITY: what the jobs did, newest first (the first ``shown`` rows, then "+N more"), each with Undo while it
-      can be undone (``undoRequested(row key)``);
+      can be undone (``undoRequested(row key)``); the times, the badges and the Undo buttons each stand in one column
+      (as wide as the widest of the rows shown; a row with no Undo keeps its place empty);
     - REPORTS: what the agents wrote, each under "Written by Claude from your mail", with Clear (``clearRequested()``).
 
     ``set_agents(info)`` (an AgentsInfo; None: nothing shows) fills it; ``job_row(id)``, ``activity_row(key)``,
@@ -189,6 +190,18 @@ class _Badge(QWidget):
             holo.paint_status_badge(painter, QPointF(0.5, self.height() / 2), self._text, self._tone)
         finally:
             painter.end()
+
+
+def _slot(widget: QWidget) -> QWidget:
+    """A box that holds ``widget`` at its left, vertically centred (its width set by its owner)."""
+    box = QWidget()
+    box.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+    row = QHBoxLayout(box)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(0)
+    row.addWidget(widget, 0, Qt.AlignmentFlag.AlignVCenter)
+    row.addStretch(1)
+    return box
 
 
 class _Tile(QWidget):
@@ -363,13 +376,17 @@ class ActivityTile(_Tile):
         self.undo_button.clicked.connect(lambda: self.undo.emit(self._info.key))
         self.text_label = body_label("", "body_sm", holo.INK_1)
         self.detail_label = body_label("", "body_sm", holo.INK_3)
+        # The badge and Undo each sit at the left of a slot the stage sets as wide as the group's widest (set_columns),
+        # so every row's badge and Undo line up; a row with no Undo keeps its slot, empty.
+        self.badge_slot = _slot(self.badge)
+        self.undo_slot = _slot(self.undo_button)
         head = QHBoxLayout()
         head.setContentsMargins(16, 8, 8, 0)
         head.setSpacing(8)
         head.addWidget(self.when_label, 0, Qt.AlignmentFlag.AlignVCenter)
         head.addWidget(self.job_label, 1, Qt.AlignmentFlag.AlignVCenter)
-        head.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignVCenter)
-        head.addWidget(self.undo_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        head.addWidget(self.badge_slot, 0, Qt.AlignmentFlag.AlignVCenter)
+        head.addWidget(self.undo_slot, 0, Qt.AlignmentFlag.AlignVCenter)
         text = QVBoxLayout()
         text.setContentsMargins(16, 2, 12, 10)
         text.setSpacing(2)
@@ -384,6 +401,20 @@ class ActivityTile(_Tile):
 
     def info(self) -> ActivityRow:
         return self._info
+
+    def natural_widths(self) -> tuple[int, int, int]:
+        """What this row needs for its time, its badge and its Undo (0 when it has none)."""
+        when = self.when_label.sizeHint().width()
+        badge = self.badge.width() if self._info.state_text else 0
+        undo = self.undo_button.sizeHint().width() if self._info.can_undo else 0
+        return when, badge, undo
+
+    def set_columns(self, when: int, badge: int, undo: int) -> None:
+        """The group's column widths (AgentsStage): the time, the badge's slot and Undo's slot (0: no slot)."""
+        self.when_label.setFixedWidth(max(when, self.when_label.sizeHint().width()))
+        for slot, width in ((self.badge_slot, badge), (self.undo_slot, undo)):
+            slot.setFixedWidth(max(0, width))
+            slot.setVisible(width > 0)
 
     def set_info(self, info: ActivityRow) -> None:
         self._info = info
@@ -664,6 +695,7 @@ class AgentsStage(QScrollArea):
             more.setVisible(hidden > 0 or (self._show_all[name] and len(rows) > shown))
             more.setText(FEWER_TEXT if self._show_all[name] else MORE_TEXT.format(count=max(0, hidden)))
             more.updateGeometry()
+        self._line_up_activity()
         for name, rows in ((AGENTS_GROUP, info.agents), (RULES_GROUP, info.rules), (ACTIVITY_GROUP, info.activity),
                            (REPORTS_GROUP, info.reports)):
             self._groups[name].setVisible(bool(rows))
@@ -733,6 +765,16 @@ class AgentsStage(QScrollArea):
         else:
             row = ReportTile(info)
         return row
+
+    def _line_up_activity(self) -> None:
+        """ACTIVITY's columns: every row's time, badge and Undo as wide as the widest of the rows shown."""
+        rows = self.activity_rows()
+        if not rows:
+            return
+        widths = [row.natural_widths() for row in rows]
+        when, badge, undo = (max(column) for column in zip(*widths))
+        for row in rows:
+            row.set_columns(when, badge, undo)
 
     def _sync(self, name: str, infos: Sequence[Any]) -> None:
         rows, layout = self._rows[name], self._layouts[name]

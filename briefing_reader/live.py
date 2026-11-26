@@ -107,12 +107,16 @@ TASK_DOC = "doc"                  # Jarvis writing in a document or a sheet (bui
                                   # the planner run, what came back (counts); never opens LIVE by itself
 TASK_AGENT = "agent"              # a task Jarvis works through (agent_ui): one step per tool call. Never opens LIVE by
                                   # itself; memory only, as every task here (SPEC D11)
+TASK_STANDING = "standing"        # a standing agent's or rule's run (the background check, outside Jarvis's process):
+                                  # posted once its run file is read (standing_ui), with its steps from that file -
+                                  # what started it, what was read (counts), the run, what it made. Never opens LIVE
 TASK_KINDS = (TASK_ASK, TASK_ACTION, TASK_BRIEFING, TASK_BACKGROUND, TASK_WEB, TASK_MEMORY, TASK_PLAN, TASK_PREP,
-              TASK_OWN_READS, TASK_NUDGE, TASK_MEETING, TASK_DESKTOP, TASK_AGENT, TASK_CAPTURE, TASK_REVISE, TASK_DOC)
+              TASK_OWN_READS, TASK_NUDGE, TASK_MEETING, TASK_DESKTOP, TASK_AGENT, TASK_CAPTURE, TASK_REVISE, TASK_DOC,
+              TASK_STANDING)
 TASK_TAGS = {TASK_ASK: "ASK", TASK_ACTION: "ACTION", TASK_BRIEFING: "BRIEFING", TASK_BACKGROUND: "BACKGROUND",
              TASK_WEB: "WEB", TASK_MEMORY: "MEMORY", TASK_PLAN: "PLAN", TASK_PREP: "PREP", TASK_OWN_READS: "READS",
              TASK_NUDGE: "NUDGE", TASK_MEETING: "MEETING", TASK_DESKTOP: "DESKTOP", TASK_AGENT: "TASK",
-             TASK_CAPTURE: "CAPTURE", TASK_REVISE: "REVISE", TASK_DOC: "DOC"}
+             TASK_CAPTURE: "CAPTURE", TASK_REVISE: "REVISE", TASK_DOC: "DOC", TASK_STANDING: "AGENTS"}
 # Tasks that open the LIVE view by themselves ([live] auto_open) and set the tab's dot.
 ATTENTION_KINDS = frozenset({TASK_ASK, TASK_ACTION, TASK_WEB, TASK_PLAN, TASK_PREP, TASK_NUDGE})
 COMPACT_KINDS = frozenset({TASK_BRIEFING, TASK_BACKGROUND, TASK_MEMORY, TASK_OWN_READS})
@@ -178,13 +182,18 @@ AGENT_REQUEST = "agent.request"           # what the owner asked and how the tas
 AGENT_TOOL = "agent.tool"                 # one tool call of a task
 AGENT_END = "agent.end"                   # how the task ended
 AGENT_STEP_KINDS = (AGENT_REQUEST, AGENT_TOOL, AGENT_END)
+STANDING_START = "standing.start"         # what started a standing run: the job, its trigger, which check, the times
+STANDING_READ = "standing.read"           # what the run read (counts), or why it read nothing
+STANDING_RUN = "standing.run"             # the run itself: how long, how it ended (a reason word, never content)
+STANDING_MADE = "standing.made"           # what it made: each card, answer or tidy-up as the Agents screen says it
+STANDING_STEP_KINDS = (STANDING_START, STANDING_READ, STANDING_RUN, STANDING_MADE)
 STEP_KINDS = (ASK_REQUEST, ASK_CHECKS, CALENDAR_READ, MAIL_THREAD, MAIL_SEARCH, PLANNER_RUN, ASK_VALIDATE,
               ASK_CARDS, ACTION_APPROVED, ACTION_PAYLOAD, ACTION_HOLD, ACTION_SIGNIN, ACTION_CHECKS,
               ACTION_CALL, BRIEFING_FETCH, AGENDA_READ, EVENT_CHECK, ACCOUNT_SIGNIN, CLAUDE_CHECK, WEB_SEARCH,
               WEB_FETCH, WEB_SOURCE, RESEARCH_INPUT, RESEARCH_RUN, RESEARCH_VALIDATE, MEMORY_SAVE, MODE_REQUEST,
               PLAN_FREE, PLAN_VALIDATE, PREP_MEETING, PREP_PEOPLE, PREP_VALIDATE, CALENDAR_DAY, OFFER_MADE,
               MAIL_SCAN, MEETING_INPUT, MEETING_VALIDATE, CAPTURE_INPUT, CAPTURE_VALIDATE, *DESKTOP_STEP_KINDS,
-              *AGENT_STEP_KINDS)
+              *AGENT_STEP_KINDS, *STANDING_STEP_KINDS)
 
 # Internal link ids a Field may carry besides a Jarvis-made Google result link: "tab:jarvis" (a tab),
 # "live:3" (a task), "picture:12" (step 12's picture shown larger; the step itself while it has none).
@@ -1175,6 +1184,13 @@ class LiveStream:
         self._notify()
 
 
+def _seconds(value: Any) -> float | None:
+    """A duration in seconds (finite, at least 0, at most a day), else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return min(max(0.0, float(value)), 86_400.0)
+
+
 def _status_or_blank(status: Any) -> str:
     return status if status in STATUSES else ""
 
@@ -1309,12 +1325,27 @@ class LiveTask:
         stream._mutate(task, None, change)
 
     @_safe()
-    def finish(self, status: str, *, status_text: str = "", summary: str | None = None) -> None:
-        """The end: every step still RUNNING gets ``status`` too; later calls change nothing."""
+    def finish(self, status: str, *, status_text: str = "", summary: str | None = None,
+               at: datetime | None = None, took_s: float | None = None) -> None:
+        """The end: every step still RUNNING gets ``status`` too; later calls change nothing. A task told after the
+        fact (a standing run, read from its run file) gives when it started (``at``, wall clock) and how long it took
+        (``took_s``), so its time and its elapsed are the run's, not the moment it was posted."""
         stream, task = self._stream, self._task
         if stream is None or task is None:
             return
         final = status if status in FINAL_STATUSES else STATUS_OK
+        took = _seconds(took_s)
+        if isinstance(at, datetime) or took is not None:
+            def change() -> int:              # before the end: a finished task changes no more
+                if isinstance(at, datetime):
+                    task.at = at
+                    for step in task.steps:
+                        step.at = at
+                if took is not None:
+                    task.started = stream._clock() - took
+                return 0
+
+            stream._mutate(task, None, change)
         stream._finish(task, final, clean_status_text(status_text),
                        stream._line(summary, SUMMARY_CAP) if summary is not None else None)
 
@@ -1482,10 +1513,22 @@ class LiveStep:
         self._apply(change)
 
     @_safe()
-    def done(self, status: str = STATUS_OK, *, status_text: str = "", summary: str | None = None) -> None:
-        """The step's end (its end time is set once; a later done may change status and summary)."""
+    def done(self, status: str = STATUS_OK, *, status_text: str = "", summary: str | None = None,
+             took_s: float | None = None) -> None:
+        """The step's end (its end time is set once; a later done may change status and summary). ``took_s``: how
+        long it took, for a step told after the fact (its elapsed is that, not the moment it was posted)."""
         final = status if status in FINAL_STATUSES else STATUS_OK
         self.update(status=final, status_text=status_text, summary=summary, deadline=None)
+        took = _seconds(took_s)
+        if took is None:
+            return
+
+        def change(step: _Step) -> int:
+            if step.ended is not None:
+                step.started = step.ended - took
+            return 0
+
+        self._apply(change)
 
     @_safe()
     def picture(self, picture: Any) -> None:
