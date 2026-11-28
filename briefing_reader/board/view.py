@@ -8,9 +8,11 @@ its place when it can't be.
                           queued until the page is ready), set_motion(level). Out: one typed signal per request the page
                           made and Python accepted - ready, layoutChanged(BoardLayout), frameFocused(id),
                           openRequested(id), closeRequested(id), pinRequested(id, on), bringBackRequested(id),
-                          approvalsRequested(id). When the web engine is missing (no QtWebEngine 6.8+,
-                          no scheme), refuses to start (a sandbox turned off, unsafe flags), the page does not say it is
-                          ready within READY_TIMEOUT_MS, or its renderer stops more than MAX_RESTARTS times, it shows
+                          approvalsRequested(id), holdRequested(id, on) (a closed frame's row has the pointer or the
+                          keyboard focus: its Bring back stays offered). When the web engine is missing (no
+                          QtWebEngine 6.8+, no scheme), refuses to start (a sandbox turned off, unsafe flags), the page
+                          does not say it is ready within READY_TIMEOUT_MS, or its renderer stops more than
+                          MAX_RESTARTS times, it shows
                           BoardFallback by itself and emits unavailable(reason): no web view and no renderer are left.
                           Fallen back, apply() still checks each message, and the frames the app sent (also those sent
                           before, kept as the page had them) show as read-only tiles (glance.GlanceTiles) under the
@@ -504,6 +506,7 @@ class BoardView(QWidget):
     pinRequested = Signal(str, bool)
     bringBackRequested = Signal(str)
     approvalsRequested = Signal(str)
+    holdRequested = Signal(str, bool)      # a closed frame's row has the pointer or the focus (True), or no longer
     # Part 5b: the bar's Clear, the cleared row's Bring back, the pill's Show, the owner at the board (the pointer over
     # it, the focus in it), and the keyboard focus out of it (Esc, F6: "ask" / "conversation").
     clearRequested = Signal()
@@ -1063,6 +1066,8 @@ class BoardView(QWidget):
             self.pinRequested.emit(request.frame_id, request.on)
         elif kind == "bring_back":
             self.bringBackRequested.emit(request.frame_id)
+        elif kind == "hold":
+            self.holdRequested.emit(request.frame_id, request.on)
         elif kind == "go_approvals":
             self.approvalsRequested.emit(request.frame_id)
         elif kind == "clear":

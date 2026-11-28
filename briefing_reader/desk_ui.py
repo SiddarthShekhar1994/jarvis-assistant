@@ -12,8 +12,10 @@ minimal) there is no board unless a factory is given (``can_have_board``): the w
 process. Its requests: ``go_approvals`` opens Approvals at that card (Ctrl+3's path) and does nothing else; part 5b's
 ways (DESIGN-SPEC 3.5, 3.6), the app the source of truth (board.feed decides, the page shows it at once and gets a
 frame's flags again when the app decided otherwise): pin (6 at most), close (the frame leaves CLOSE_S later unless
-brought back), Clear (every unpinned frame out of sight with Bring back for CLEAR_S, then gone; nothing left: the desk
-folds through ReadingView.set_board_count), restore (that Bring back), show_new and reading (parking: a group that comes
+brought back; while its row has the pointer over it or the keyboard focus in it - the page's hold - it does not leave,
+and its CLOSE_S starts again once the row has neither, as the page's own CLOSED_MS does), Clear (every unpinned frame
+out of sight with Bring back for CLEAR_S, then gone; nothing left: the desk folds through
+ReadingView.set_board_count), restore (that Bring back), show_new and reading (parking: a group that comes
 while the owner reads the board - the pointer over it, the focus in it, a scroll or key in it within QUIET_S - parks
 under the pill "New answer above · Show" and lands after QUIET_S quiet seconds or on Show; only then do older groups
 fold), focus_out (Esc and F6 back to the ask bar or the conversation); F6 into the board (``focus_board``). Focus is
@@ -43,10 +45,15 @@ its topic: Ask's ``topic`` field, part 6, else the first frame's title):
   checked them), each keyed by its kind and title; and an instant maths answer's working (``on_instant_answer``).
 
 In a group a frame that waits on the owner comes first, then the order Jarvis speaks of them (board.feed.spoken_rank).
-Limits: 24 frames and 8 groups (the oldest group without a pinned frame leaves whole). Frames last for the session and
-are never saved. The desk forms with a group's first frame (ReadingView: the ring flies to the column head, the view's
-geometry is set once, then ``desk: enter``); the first time in a session the empty Home's hint is counted
-(prefs.note_board_hint; it stops after three).
+Limits: 24 frames and 8 groups (the oldest group without a pinned frame leaves whole). Frames last for the session,
+except pins (board.pins, ``pins``: board_pins.json in the data folder): after every change of the board the pinned
+frames board.pins may keep are saved (pin, unpin, a close or a rebuild of a pinned frame: written only when they
+changed); when the board is made (on the canvas with the window, beside the conversation at the first Ask) they come
+back pinned, in their order, in one group "Pinned" (its time: when it went up; no landing sounds). A pinned frame of
+a kind that is never kept (mail, the calendar, a page picture, a web search's results, follow-ups, the canvas's "Now")
+stays pinned for the session only. The desk forms with a group's first frame (ReadingView: the ring flies to the
+column head, the view's geometry is set once, then ``desk: enter``); the first time in a session the empty Home's hint
+is counted (prefs.note_board_hint; it stops after three).
 
 Part 7: after every send that changed the board, the look controller's ``on_board_changed(feed)`` gives the second
 screen the board as it is (its frames as the page has them; never the lit frame, a backdrop or open big).
@@ -86,6 +93,7 @@ from . import pictures
 from .board import ask_frames
 from .board import feed as feed_mod
 from .board import frames as board_frames
+from .board import pins as board_pins
 from .board import protocol as board_protocol
 from .board.feed import BoardFeed, ReadingWatch, spoken_rank
 from .desk_big import BigController
@@ -97,6 +105,7 @@ logger = logging.getLogger(__name__)
 CHANGED_PASS_MS = 2500            # a resting frame kept current: its CHANGED tag goes this long after its light starts
 ANSWERS_KEPT = 16                 # the answers whose late pictures may still join their group
 HINT_SESSIONS = 3                 # empty Home's hint line until the owner has seen the board this many times
+PINNED_TOPIC = "Pinned"           # the group the pins kept across a restart come back in
 
 # What an answer is about, from the owner's words and Jarvis's (a calendar read is put up only for these; to-dos and
 # follow-ups only when spoken of or proposed).
@@ -256,6 +265,10 @@ class DeskController(QObject):
         self._pass_timer.timeout.connect(lambda: self._send(self.feed.pass_changed()))
         self.counts: Counter[str] = Counter()
         self.first_frame_ms: list[int] = []     # answer -> its first frame sent, ms (measured, not assumed)
+        data_dir = getattr(getattr(host, "config", None), "data_dir", None)
+        self.pins = board_pins.PinStore(data_dir) if data_dir else None   # the pins kept across a restart
+        self._pins_read = False             # board_pins.json was read (nothing is saved before that)
+        self._pin_group = ""                # the group the kept pins came back in (no landing sounds)
         reading = self.reading
         reading.set_board_available(True)
         reading.set_board_hint(self._hints_left())
@@ -312,6 +325,9 @@ class DeskController(QObject):
         view.pinRequested.connect(self._on_pin)
         view.closeRequested.connect(self._on_close)
         view.bringBackRequested.connect(self._on_bring_back)
+        hold = getattr(view, "holdRequested", None)
+        if hold is not None:
+            hold.connect(self._on_hold)
         view.clearRequested.connect(self._on_clear)
         view.restoreRequested.connect(self._on_restore)
         view.showNewRequested.connect(self._on_show_new)
@@ -327,7 +343,48 @@ class DeskController(QObject):
         self._started_at = time.monotonic()
         view.start()
         logger.info("Board: made and starting")
+        self._restore_pins()
         return view
+
+    # ---- the pins kept across a restart (board.pins) ---------------------------------------------------------------
+
+    def _restore_pins(self) -> None:
+        """The pins board_pins.json holds, back on the board pinned, in their order, in one group "Pinned" (queued on
+        the page until it is ready). Once only, when the board is made; nothing is saved before this ran."""
+        store = self.pins
+        if store is None or self._pins_read:
+            return
+        try:
+            kept = store.load()
+        except Exception as exc:  # noqa: BLE001 - the board never stops for its pins
+            logger.warning("Board: the kept pins were not read (%s)", type(exc).__name__)
+            kept = []
+        self._pins_read = True
+        if not kept:
+            return
+        self._synthetic -= 1
+        key = self._synthetic
+        when = format_time(self._now(), hour24=self._hour24())
+        messages: list[dict[str, Any]] = []
+        for index, pin in enumerate(kept[:board_protocol.MAX_PINS]):
+            source = f"{pin.source}#{index}"
+            frame_id = self.feed.frame_id(key, source, "", pin.key)
+            messages += self.feed.put(key, source, [pin.message(frame_id)], when=when, topic=PINNED_TOPIC,
+                                      approvals=pin.approvals, rank=float(index), key=pin.key, pinned=True)
+        self._pin_group = self.feed.group_for(key)
+        self._send(messages)
+        self._sync_counts()
+        logger.info("Board: %d kept pin(s) came back", self.feed.pinned())
+
+    def _save_pins(self) -> None:
+        """The pinned frames board.pins may keep, saved (written only when they changed)."""
+        store = self.pins
+        if store is None or not self._pins_read:
+            return
+        try:
+            store.save(board_pins.kept(self.feed.pinned_view(), self.quiet_groups))
+        except Exception as exc:  # noqa: BLE001 - a pin that is not kept never stops the board
+            logger.warning("Board: the pins were not saved (%s)", type(exc).__name__)
 
     def _count_request(self, word: str) -> None:
         self.counts[f"request:{word}"] += 1      # counts only
@@ -405,7 +462,7 @@ class DeskController(QObject):
         (a page that came back after its renderer stopped) never sounds again."""
         self._count_request(f"landed:{step}")
         group = self.feed.group_of(frame_id)
-        if not group or group in self.quiet_groups:
+        if not group or group in self.quiet_groups or group == self._pin_group:
             return
         if step == "outline":
             if frame_id in self._landed:
@@ -444,6 +501,19 @@ class DeskController(QObject):
     def _on_bring_back(self, frame_id: str) -> None:
         self._count_request("bringBackRequested")
         self._send(self.feed.bring_back(frame_id))
+        self._schedule_due()
+
+    def _on_hold(self, frame_id: str, on: bool) -> None:
+        """A closed frame's row has the pointer or the keyboard focus (it does not leave), or has neither any more (it
+        leaves CLOSE_S from now, as the page offers its Bring back CLOSED_MS again)."""
+        self._count_request("holdRequested")
+        self._send(self.feed.hold(frame_id, on, self._clock()))
+        self._schedule_due()
+
+    def _release_holds(self) -> None:
+        """The page can no longer say the owner left a closed row (it came up again, fell back, or the desk folded):
+        every held closed frame leaves CLOSE_S from now."""
+        self.feed.release_holds(self._clock())
         self._schedule_due()
 
     def _on_clear(self) -> None:
@@ -554,6 +624,7 @@ class DeskController(QObject):
         self.big.end_now()
         self.cue.reset_page()
         self._watch.reset()                      # the old page's last "reading" report ended with it
+        self._release_holds()                    # ... and its holds of closed rows (the new page starts CLOSED_MS)
         self._send(self.feed.resend())
         if self.reading.desk_shown():
             self._send([{"type": "desk", "state": "enter"}])
@@ -573,6 +644,7 @@ class DeskController(QObject):
         self.big.end_now()
         self.cue.clear()
         self._watch.reset()                      # the dead page can never say the owner left it
+        self._release_holds()                    # ... nor a closed row
         logger.info("Board: read-only tiles in its place (%s)", reason)
         self._land()                             # a parked answer shows as read-only tiles
 
@@ -601,6 +673,7 @@ class DeskController(QObject):
             self._pass_timer.start()             # a resting frame's light plays (quietly), then its tag goes
         self.cue.refresh()
         self.big.check()
+        self._save_pins()                        # the pins kept across a restart, as they are now
         self._look_call("on_board_changed", self.feed)    # part 7: the board as it is now, to the second screen
 
     def _sync_counts(self) -> None:
@@ -646,6 +719,7 @@ class DeskController(QObject):
             self.big.end_now()                  # part 5c: open big ends at once, the Dock and the header undimmed
             self.cue.clear()
             self._watch.reset()                 # out of sight: nobody reads it (a parked answer lands)
+            self._release_holds()               # ... nor holds a closed row
             self._send([{"type": "desk", "state": "leave"}])
             self._land()
 
@@ -1120,6 +1194,7 @@ class DeskController(QObject):
         self._due_timer.stop()
         self._land_timer.stop()
         self._pass_timer.stop()
+        self._save_pins()                        # (saved after every change already: nothing new, nothing written)
         self.cue.shutdown()
         self.big.shutdown()
         canvas = self.canvas

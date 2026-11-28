@@ -12,7 +12,7 @@ raises for odd data.
             source - the same thread, day, page or list ("mail:work:t1", "day:2026-11-17") - and a frame of another
             answer built from it, still on the board (not closed, not cleared), lends its id: it is built again
         put(answer, source, messages, *, when, topic="", merge="", approvals="", rank=0.0, park=False, key="",
-            not_ready=False) -> list[dict]
+            not_ready=False, pinned=False) -> list[dict]
             a builder's messages (board.frames.Built.messages: the frame, then its picture) for ``answer``'s group,
             and returns what to send, in order: the room made (whole groups leaving), the group (new: on top of the
             board, its header ``when`` - "9:41 AM" - and ``topic``, else the first frame's title, at most 40
@@ -35,7 +35,8 @@ raises for odd data.
             Part 3B (the canvas's resting group "Now"): ``again`` - the same answer's frame built again in place is
             sent with "changed" when what it says differs (``substance``) and the owner has seen it; ``below`` - a new
             group goes under every group already there (never the newest: it takes no answer's best places; its
-            group message says "below")
+            group message says "below"). ``pinned``: a new frame comes pinned (the pins kept across a restart,
+            board.pins; never past MAX_PINS)
         remove(frame_id) -> list[dict]             part 3B: one frame taken away at once (``remove``, or its group's
                                                    ``remove_group``), then the bar
         quiet_changed(frame_ids)                   part 3B: those frames' changed light goes without its sound
@@ -45,6 +46,12 @@ raises for odd data.
             the page's own change (it showed it at once) as the app decides it: a 7th pin is refused (MAX_PINS); a
             closed frame leaves ``close_s`` later (due); the frame's message again when the app's flags differ from
             what the page did, and the bar when its counts changed
+        hold(frame_id, on, now) -> list[dict]      a closed frame's row has the pointer over it or the keyboard focus
+                                                   in it (on: it does not leave while so held) or has neither any more
+                                                   (off: it leaves ``close_s`` from then, as the page offers its Bring
+                                                   back CLOSED_MS again); a frame not closed is left as it is
+        release_holds(now)                         every held closed frame leaves ``close_s`` from now (a page that came
+                                                   up again, fell back or went out of sight can no longer say so)
         clear_unpinned(now) / restore() -> list[dict]
             the bar's Clear: every unpinned frame that has landed goes out of sight (a ``cleared`` message: the row
             "Board cleared · 8 FRAMES · Bring back") and leaves ``clear_s`` later; restore() brings them back
@@ -67,6 +74,8 @@ raises for odd data.
         frames(), waits(), pinned(), cleared(), parked_groups(), groups(), group_of(frame_id), group_for(answer),
         frame_ids(), flags(frame_id), counts(), frame_message(frame_id), picture_message(frame_id), key_of(frame_id),
         mark() (the board as it shows now: equal while nothing on it changed)
+        pinned_view() -> list[PinnedFrame]         the pinned frames on the board (not closed, not cleared) in board
+                                                   order: what of them is kept across a restart board.pins decides
         clear()                                    nothing on the board any more (the app's own reset)
         resend()                                   the board as it is, for a page that has nothing
 
@@ -77,7 +86,8 @@ raises for odd data.
 
 Limits (DESIGN-SPEC 3.5): ``max_frames`` frames and ``max_groups`` groups; past them the oldest group with no pinned
 frame leaves whole (never the answer being added to; frames a Clear took away leave first); when none can leave, the
-new frame is refused (counted). At most MAX_PINS pins. Frames last for the session only: nothing here is ever saved.
+new frame is refused (counted). At most MAX_PINS pins. Nothing here is ever saved: the desk keeps what board.pins may
+keep of the pinned frames (desk_ui) and puts them up again at the next start (``pinned``).
 """
 
 from __future__ import annotations
@@ -238,6 +248,7 @@ class _Frame:
     key: str = ""                  # its source (part 5c): a later answer built from it builds this frame again
     changed: bool = False          # it was built again and said something else: CHANGED stays
     passing: bool = False          # canvas part 5A: a resting frame kept current - its light plays, no tag stays
+    held: bool = False             # closed, and its row has the pointer or the focus: it does not leave meanwhile
 
     def shown(self) -> tuple[dict[str, Any], dict[str, Any] | None, str]:
         """(the frame message, its picture message or None, the card go_approvals opens): a merged frame is the mail as
@@ -264,6 +275,21 @@ class _Frame:
             [part for part in parts if part.frame.get("waits")][-1:]
         if len(keep) < len(parts):
             self.parts = {part.source: part for part in sorted(keep, key=lambda part: part.seq)}
+
+
+@dataclass(frozen=True, repr=False)
+class PinnedFrame:
+    """A pinned frame as board.pins needs it (pinned_view). repr: its id and kind only."""
+
+    id: str
+    group: str
+    sources: tuple[str, ...]
+    key: str
+    frame: dict[str, Any]
+    approvals: str
+
+    def __repr__(self) -> str:
+        return f"PinnedFrame({self.id}, {self.frame.get('kind', '')})"
 
 
 @dataclass
@@ -304,7 +330,8 @@ class BoardFeed:
         self._next_group = 0
         self._just_changed: list[str] = []
         self._counts = {"frames": 0, "groups": 0, "left": 0, "refused": 0, "merged": 0, "pins_refused": 0,
-                        "closed": 0, "cleared": 0, "parked": 0, "landed": 0, "changed": 0, "rebuilt": 0}
+                        "closed": 0, "cleared": 0, "parked": 0, "landed": 0, "changed": 0, "rebuilt": 0,
+                        "held": 0}
 
     # ---- ids ---------------------------------------------------------------------------------------------------------
 
@@ -456,6 +483,19 @@ class BoardFeed:
                           frame.sent_picture, frame.pinned, frame.closed, frame.cleared, frame.changed))
         return tuple(found)
 
+    def pinned_view(self) -> list[PinnedFrame]:
+        """The pinned frames on the board, not closed and not taken away by a Clear, in board order (the newest group
+        first, each group's own order): each one's id, group, the sources its builds came from, its source key, the
+        frame as its builder made it (without the app's flags) and the card its chip opens."""
+        found: list[PinnedFrame] = []
+        for frame_id in self.frame_ids():
+            frame = self._frames[frame_id]
+            if not frame.pinned or frame.closed or frame.cleared or not frame.parts:
+                continue
+            shown, _picture, approvals = frame.shown()
+            found.append(PinnedFrame(frame_id, frame.group, tuple(sorted(frame.parts)), frame.key, shown, approvals))
+        return found
+
     def set_turn(self, answer: Hashable, entry_id: int) -> None:
         group = self._groups.get(self._by_answer.get(answer, ""))
         if group is not None and isinstance(entry_id, int) and entry_id > 0:
@@ -499,7 +539,7 @@ class BoardFeed:
     def put(self, answer: Hashable, source: str, messages: Sequence[dict[str, Any]], *, when: str = "",
             topic: str = "", merge: str = "", approvals: str = "", rank: float = 0.0,
             park: bool = False, key: str = "", not_ready: bool = False, again: bool = False,
-            below: bool = False) -> list[dict[str, Any]]:
+            below: bool = False, pinned: bool = False) -> list[dict[str, Any]]:
         """See the module doc."""
         frame_message = next((dict(item) for item in messages if isinstance(item, dict)
                               and item.get("type") == "frame"), None)
@@ -533,7 +573,8 @@ class BoardFeed:
                                               below=below)
                 out += made
             self._seq += 1
-            frame = _Frame(frame_id, group.id, merge, self._seq, float(rank), key=str(key or ""))
+            frame = _Frame(frame_id, group.id, merge, self._seq, float(rank), key=str(key or ""),
+                           pinned=bool(pinned) and self.pinned() < protocol.MAX_PINS)
             self._frames[frame_id] = frame
             group.frames.append(frame_id)
             self._counts["frames"] += 1
@@ -795,9 +836,33 @@ class BoardFeed:
         group = self._groups.get(frame.group)
         if not frame.closed and not frame.cleared and group is not None and not group.parked:
             frame.closed = True
+            frame.held = False
             frame.leave_at = float(now) + self.close_s
             self._counts["closed"] += 1
         return self._again_if_differs(frame) + self._bar_if_changed()
+
+    def hold(self, frame_id: str, on: bool, now: float) -> list[dict[str, Any]]:
+        """The closed row's pointer or focus (the page's hold): see the module doc. Nothing to send: the page keeps its
+        own Bring back while it holds it, and starts its CLOSED_MS again when it lets go."""
+        frame = self._frames.get(frame_id)
+        if frame is None or not frame.closed or frame.cleared:
+            return []
+        if on:
+            if not frame.held:
+                frame.held = True
+                frame.leave_at = None
+                self._counts["held"] += 1
+        elif frame.held:
+            frame.held = False
+            frame.leave_at = float(now) + self.close_s
+        return []
+
+    def release_holds(self, now: float) -> None:
+        """See the module doc."""
+        for frame in self._frames.values():
+            if frame.closed and frame.held:
+                frame.held = False
+                frame.leave_at = float(now) + self.close_s
 
     def bring_back(self, frame_id: str) -> list[dict[str, Any]]:
         """The closed row's Bring back (the page showed the frame again at once)."""
@@ -806,6 +871,7 @@ class BoardFeed:
             return []
         self._note_page(frame, closed=False)
         frame.closed = False
+        frame.held = False
         frame.leave_at = None
         return self._again_if_differs(frame) + self._bar_if_changed()
 
@@ -983,4 +1049,4 @@ def spoken_rank(say: str, words: Iterable[str]) -> float:
     return best / (len(line) + 1) if best <= len(line) else 1.0
 
 
-__all__ = ["BoardFeed", "CLEAR_S", "CLOSE_S", "QUIET_S", "ReadingWatch", "spoken_rank", "substance"]
+__all__ = ["BoardFeed", "CLEAR_S", "CLOSE_S", "PinnedFrame", "QUIET_S", "ReadingWatch", "spoken_rank", "substance"]
