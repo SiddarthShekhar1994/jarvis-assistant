@@ -37,6 +37,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from .. import site_signins
 from ..actions import link_host, web_link_problem
 from ..ask.cli import AGENT_TOOL_PREFIX
 from ..ask.context import data
@@ -69,6 +70,8 @@ WAIT_TEXT = ("The owner has it on their screen. End your turn now with one short
 ANOTHER_QUESTION_TEXT = ("A question is waiting for the owner already. End your turn now; the answer comes as your "
                          "next message.")
 FETCH_QUESTION_CAP = 300
+SIGNED_IN_TEXT = ("This page opened signed in as the owner, on a site he listed: what it shows is private, and Jarvis "
+                  "only reads there. Nothing on it is sent or changed without the owner's click on a Send card.")
 NO_FETCH_TEXT = "Reading a page another way isn't available now. Try another source, or say so in your report."
 # A page's address in a call (open_page's and fetch_text's url, open_thing's site): one longer than this is no page's,
 # and the call is refused before anything reads it (address_too_long): no check, and the panel's words name no host.
@@ -478,8 +481,11 @@ def _opened_result(opened: web.Opened, source: str, note: str, fields: tuple[tup
     picture = (opened.live_address, opened.shot) if opened.shot is not None else None
     if opened.still_loading:
         fields = (*fields, ("Still loading", "when Jarvis read it"))
-    return ToolResult(_opened_text(opened, source, "There is more of this page: call read_more.") + flag, note=note,
-                      warn=warn or opened.wall, fields=(*fields, *flagged), live_picture=picture)
+    text = _opened_text(opened, source, "There is more of this page: call read_more.") + flag
+    if opened.signed_in:      # LIVE's step says so, with the page's host only; the model is told the page's rules
+        note = f"{site_signins.LIVE_NOTE.format(host=web.one_line(opened.signed_in, DOING_HOST_CAP))}; {note}"
+        text = f"{SIGNED_IN_TEXT}\n{text}"
+    return ToolResult(text, note=note, warn=warn or opened.wall, fields=(*fields, *flagged), live_picture=picture)
 
 
 def _open_page(args: Mapping[str, Any], ctx: RunContext) -> ToolResult:

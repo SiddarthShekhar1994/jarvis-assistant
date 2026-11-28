@@ -6753,6 +6753,7 @@ class AppController(QObject):
         self.meetings: Any = self._create_meetings()    # [meetings]: the meeting recorder, or None while it is off
         self._init_desktop(desktop_factory)             # [desktop]: the Dock's Desktop, Settings > Desktop, the HUD
         self.task_feed: Any = None                     # the task's panel and cards (agent_feed), with the agent
+        self.site_signins: Any = self._create_site_signins()   # Settings > LIVE and privacy: sites used signed in
         self.agent: Any = self._create_agent(agent_factory)   # [agent]: a task worked through, or None while it is off
         self.talk: Any = self._create_talk()            # [talk]: the talk key's listening, or None while it is off
         self.wake: Any = self._create_wake()            # "Hey Jarvis" (wake_ui) beside the talk, or None without it
@@ -7291,6 +7292,29 @@ class AppController(QObject):
                 self._outlook_unread[str(alias)] = list(messages)
             else:
                 self._outlook_unread.pop(str(alias), None)
+
+    def _create_site_signins(self) -> Any:
+        """Settings > LIVE and privacy's "Sites Jarvis may use signed in" (site_signins_ui): the owner's list
+        (site_signins.json), his own Sign in... in a window of Jarvis's, Remove and Forget every sign-in. The sign-in
+        profile is made only when first needed, and only a task's page on a listed site uses it. None if it could not
+        be set up (every page stays off the record)."""
+        try:
+            from . import site_signins_ui
+
+            lender = site_signins_ui.SignInProfile(self.config.data_dir, parent=self)
+            panel = site_signins_ui.SitesPanel()
+            control = site_signins_ui.SitesControl(lender, panel, parent=self)
+            self.window.reading.settings_page.attach_extra("live", panel)
+        except Exception as exc:  # noqa: BLE001 - Jarvis works without it: nothing is used signed in
+            logger.warning("Signed-in sites: not set up (%s)", type(exc).__name__)
+            return None
+        logger.info("Signed-in sites: %d listed", len(lender.hosts()))
+        return control
+
+    def _signins_option(self) -> dict[str, Any]:
+        """The agent's ``signins`` (the sign-in profile's lender), when Settings' part is there."""
+        control = getattr(self, "site_signins", None)
+        return {"signins": control.lender} if control is not None else {}
 
     def _create_outlook_settings(self) -> Any:
         """Settings > Accounts' Outlook part (outlook_ui): Connect / Disconnect per Outlook account, only on a click.
@@ -12123,7 +12147,8 @@ class AppController(QObject):
                                                                consent=desktop.consent_given,
                                                                tasks_consent=desktop.consent_for_tasks,
                                                                drive_consent=desktop.consent_for_drive, parent=self,
-                                                               window_avoid=self._hud_reach, things=things)
+                                                               window_avoid=self._hud_reach, things=things,
+                                                               **self._signins_option())
         except Exception as exc:  # noqa: BLE001 - Jarvis works without tasks
             logger.warning("Could not set up tasks (%s)", type(exc).__name__)
             return None
@@ -17313,6 +17338,8 @@ class AppController(QObject):
         self._undos.clear()
         if getattr(self, "agent", None) is not None:
             self.agent.shutdown()  # a running task is killed and stamped: no process is left
+        if getattr(self, "site_signins", None) is not None:
+            self.site_signins.shutdown()   # the sign-in window closes, then the sign-in profile goes
         if self.ask is not None:
             self.ask.shutdown()   # a running Ask is cancelled: nothing is proposed
         if self.productivity is not None:

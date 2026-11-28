@@ -1,6 +1,9 @@
 """Jarvis, a true agent, in the app: the controller of the one task that may run (SPEC 5, D4, R1, R8; parts A1, A2).
 
     AgentController(config, planner, live=, consent=, ...)     made by the app only while agent.policy.agent_on(config)
+                               (``signins``: Jarvis's sign-in profile's lender, site_signins_ui.SignInProfile: a
+                               task's open_page on a site the owner listed reads it signed in, read only, and the run's
+                               firewall goes strict before a word of it is read; None: never)
         offered()              may a first planner run hand a request to a task now? (any thread: on, the owner's
                                Turn on, no task running, Claude Code able to plan, no extra-usage pause).
                                AskPlanner.agent_allowed asks it. The day's tasks used up, or a Claude Code too old for
@@ -494,8 +497,9 @@ class AgentController(QObject):
                  now: Callable[[], datetime] = lambda: datetime.now().astimezone(), timing: Timing = Timing(),
                  tools: Sequence[Tool] | None = None, parent: QObject | None = None,
                  window_avoid: Callable[[], Any] | None = None,
-                 browser_factory: Callable[..., Any] | None = None, things: Any = None) -> None:
+                 browser_factory: Callable[..., Any] | None = None, things: Any = None, signins: Any = None) -> None:
         super().__init__(parent)
+        self._signins = signins           # the sign-in profile's lender (None: every page off the record, as before)
         self.config = config
         self.planner = planner
         self.live = live
@@ -592,6 +596,8 @@ class AgentController(QObject):
         session = self._new_session(drive)
         self.firewall = agent_firewall.WebFirewall(
             session.book, link_of=session.link_address if isinstance(session, agent_drive.DriveSession) else None)
+        if self._signins is not None:      # a page read signed in as the owner is private: strict before it is read
+            session.use_signins(self._signins.hosts, self.firewall.go_strict)
         owner = None
         if things is not None:
             things.ready()
@@ -669,6 +675,8 @@ class AgentController(QObject):
         make = self._browser_factory or BrowserClient
         desktop = getattr(self.config, "desktop", None)
         options: dict[str, Any] = {"drive": True} if drive else {}
+        if self._signins is not None:
+            options["signins"] = self._signins
         browser = make(self, avoid=self._window_avoid,
                        hide_from_capture=bool(getattr(desktop, "hide_from_capture", True)), **options)
         for name, slot in (("hideAsked", lambda: self.windowHidden.emit(True)),

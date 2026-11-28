@@ -4,7 +4,8 @@ one file of this package that imports Qt; BrowserClient is how the endpoint's th
     register_scheme()     Jarvis's own address scheme for a task's files: before the QApplication, like the web engine's
                           other setup, and only while tasks are on (__main__)
     AgentBrowser          a real page in a visible window, one at a time. It IS snapshot_engine.PageCamera, whose every
-                          rule stands: a fresh off-the-record profile and page for each page opened, the page's window
+                          rule stands: a fresh off-the-record profile and page for each page opened (but a listed site's
+                          page of open_page's: Jarvis's sign-in profile, read only - below), the page's window
                           sandboxed for life with no downloads, modals, forms or top navigation, the request
                           interceptor, permissions, pop-ups, dialogs, file choosers, sign-in prompts and client
                           certificates refused, every connection through the network gate (public IPv4, port 443),
@@ -58,6 +59,14 @@ Hide (on the strip) and the app's "away" (the owner brought the Jarvis window ba
 page goes on behind it, and a picture that comes out blank meanwhile is said to be one (R_BLANK). The owner's Show on
 the result card opens a task's file in the same sealed way, and only then does the wheel scroll the page.
 
+Sites the owner listed (site_signins; Settings > LIVE and privacy, where he signs in himself in a window of Jarvis's
+own): open_page's load (load_signed_in) of a page on one of them opens with Jarvis's sign-in profile instead of a fresh
+one, lent by its lender (``signins``: site_signins_ui.SignInProfile) to one shot at a time and given back, never
+deleted, when that page goes; anything else (a search, a research picture, a task's file, a second tab while one holds
+it) stays off the record. Such a page is read only: a main or inline frame asked for with anything but GET or HEAD,
+and any form submit, is refused unless the owner's click on its Send card presses it now (press_approved), and its
+main frame never leaves the listed sites. Its ShotResult says ``signed_in``. Downloads stay refused as on every page.
+
 Never a disguise: the user agent and every header stay the engine's own (nothing here sets one), a refused page is not
 tried again with another identity, and no captcha is answered.
 
@@ -80,7 +89,7 @@ from PySide6.QtCore import QBuffer, QCoreApplication, QIODevice, QObject, QRect,
 from PySide6.QtGui import QColor, QFontMetricsF, QGuiApplication, QPainter, QPen, QPixmap, QScreen
 from PySide6.QtWidgets import QWidget
 
-from .. import holo, hud, hud_overlay, snapshot_engine, snapshots
+from .. import holo, hud, hud_overlay, site_signins, snapshot_engine, snapshots
 from ..actions import link_host, web_link_problem
 from ..snapshot_engine import PageCamera, encode_picture
 from ..snapshots import ShotResult
@@ -161,7 +170,7 @@ BIG_SETTLE_MS = 600               # the page draws itself at the new size before
 _RING_OPS = frozenset({"type", "choose", "click", "press", "scroll"})
 _DRIVE_MARK = re.compile(r"/\*drive:(\w+)\*/\nvar ARGS = (.*);\n")
 _LOCAL_SCHEMES = frozenset({"about", "data", "blob"})
-_PAGE_OPS = frozenset({"load", "load_file", "script", "picture"})
+_PAGE_OPS = frozenset({"load", "load_signed_in", "load_file", "script", "picture"})
 _ACT_OPS = frozenset({"act", "press_approved"})
 # The element a drive script acted on, read in Jarvis's own world (the page's scripts can't see or change it).
 _RING_SCRIPT = ("(function () { var store = window[STORE]; if (!store || store.gen !== GEN) { return null; }"
@@ -653,9 +662,10 @@ class _Request:
     label: str
     timeout_ms: int
     delivered: bool = False
+    signed_in: bool = False           # open_page's: it may open with Jarvis's sign-in profile on a listed site
 
     def __repr__(self) -> str:        # never the address
-        return f"_Request(file={self.folder is not None}, delivered={self.delivered})"
+        return f"_Request(file={self.folder is not None}, delivered={self.delivered}, signed_in={self.signed_in})"
 
 
 # Pages the agent wrote whose profile is still there (GUI thread). The gate stays sealed until the last one is really
@@ -734,8 +744,11 @@ class AgentBrowser(PageCamera):
                  screens: Callable[[], Sequence[QScreen]] | None = None,
                  decide: Callable[..., str] = snapshots.request_problem, settle_ms: int = SETTLE_MS,
                  linger_s: float = LINGER_S, drive: bool = False,
-                 open_url: Callable[[str], None] | None = None) -> None:
+                 open_url: Callable[[str], None] | None = None, signins: Any = None) -> None:
         super().__init__(parent, decide=decide, settle_ms=settle_ms)
+        self._signins = signins            # the sign-in profile's lender (site_signins_ui.SignInProfile; None: none)
+        self._lent_shot: Any = None        # the one shot that holds it now
+        self._pressing_shot: Any = None    # the shot the owner's Send presses now (a signed-in page may send then)
         self._drive = bool(drive)          # this task may fill in pages: its web pages get DRIVE_SANDBOX
         self._open_url = open_url if open_url is not None else owner_browser   # "Open in my browser" (tests fake it)
         self._addresses: dict[int, str] = {}   # each tab's public page as it last arrived (for "Open in my browser")
@@ -925,6 +938,7 @@ class AgentBrowser(PageCamera):
         window is sealed again as before, every connection cut."""
         self._seal_gen += 1
         self._no_open.add(tab)
+        self._pressing_shot = self._shot if tab == self._tab else self._parked.get(tab)
         sealed = self._sealed_drive
         if sealed:
             self._send_hosts = frozenset(str(host).casefold() for host in hosts or () if host)
@@ -933,6 +947,7 @@ class AgentBrowser(PageCamera):
 
         def pressed(result: Any) -> None:
             self._send_hosts = frozenset()
+            self._pressing_shot = None
             if sealed:
                 snapshot_engine.seal_drive_only(())
                 if isinstance(result, ActResult) and result.ok and result.navigated:
@@ -1254,6 +1269,13 @@ class AgentBrowser(PageCamera):
         """A web page (on a test platform only local HTML: the ``html_for`` seam)."""
         html, final = self._local_page(url)
         self._start(_Request(url, html, final, None, "", done, link_host(url), _milliseconds(timeout_s)))
+
+    def load_signed_in(self, url: str, timeout_s: float, done: Callable[[Any], None]) -> None:
+        """open_page's web page: on a site the owner listed it opens with Jarvis's sign-in profile when that is free
+        (its ShotResult says ``signed_in``), else off the record as any page."""
+        html, final = self._local_page(url)
+        self._start(_Request(url, html, final, None, "", done, link_host(url), _milliseconds(timeout_s),
+                             signed_in=True))
 
     def load_file(self, name: str, folder: TaskFolder, timeout_s: float, done: Callable[[Any], None]) -> None:
         """The file ``name`` of this task's folder, at an address with this run's token."""
@@ -1594,7 +1616,36 @@ class AgentBrowser(PageCamera):
             shot.blocked += 1
             self._count("held")
             return True
+        if shot.lent and not shot.done and shot.opened:
+            why = self._signed_in_request(shot, info)
+            if why:
+                shot.blocked += 1
+                self._count(f"signed_in_{why}")
+                return True
         return super()._judge(shot, info)
+
+    def _signed_in_request(self, shot: Any, info: Any) -> str:
+        """Read only, on a page signed in as the owner (site_signins): a main or inline frame asked for with anything
+        but GET or HEAD is refused unless the owner's click on its Send card presses it now, and a main frame never
+        leaves the listed sites. Unsure: refused."""
+        try:
+            classes = snapshot_engine._classes()
+            kind = info.resourceType()
+            main = kind in classes.main_types
+            frame = main or (classes.sub_frame is not None and kind == classes.sub_frame)
+            why = site_signins.request_refused(bytes(info.requestMethod().data()), frame,
+                                               self._pressing_shot is shot)
+            if not why and main and not site_signins.host_listed(info.requestUrl().host(), self._signin_hosts()):
+                why = site_signins.R_OFF_LIST
+            return why
+        except Exception:  # noqa: BLE001 - unsure: refused
+            return site_signins.R_WRITE
+
+    def _signin_hosts(self) -> tuple[str, ...]:
+        try:
+            return tuple(self._signins.hosts()) if self._signins is not None else ()
+        except Exception:  # noqa: BLE001 - unknown: no site
+            return ()
 
     def _on_navigation(self, shot: Any, request: Any) -> None:
         try:
@@ -1603,6 +1654,15 @@ class AgentBrowser(PageCamera):
                 self._count("held")
                 request.reject()
                 return
+            if shot.lent and not shot.done and shot.opened:
+                why = site_signins.navigation_refused(request.navigationType(), bool(request.isMainFrame()),
+                                                      request.url().host(), self._signin_hosts(),
+                                                      self._pressing_shot is shot)
+                if why:
+                    shot.blocked += 1
+                    self._count(f"signed_in_{why}")
+                    request.reject()
+                    return
         except Exception:  # noqa: BLE001 - unsure: refuse
             _quietly(request.reject)
             return
@@ -1620,13 +1680,26 @@ class AgentBrowser(PageCamera):
         super()._on_crash(shot)
 
     def _teardown(self, shot: Any) -> None:
-        """As the camera's; what goes while sealed is waited for before the seal lifts."""
-        items = [item for item in (shot.page, shot.profile) if item is not None]
+        """As the camera's; what goes while sealed is waited for before the seal lifts. A lent sign-in profile is not
+        deleted: once its page is on its way out it goes back to its lender, which refuses every request of it until
+        it is lent again."""
+        lent = shot.profile if shot.lent else None
+        interceptor = shot.interceptor if shot.lent else None
+        items = [item for item in (shot.page, None if shot.lent else shot.profile) if item is not None]
         self._loads.pop(shot.serial, None)
         self._shot_request.pop(shot.serial, None)
         super()._teardown(shot)
         if self._sealed_drive:
             self._sealed_doomed.extend(items)
+        if shot.lent:
+            if self._lent_shot is shot:
+                self._lent_shot = None
+            if self._pressing_shot is shot:
+                self._pressing_shot = None
+            if lent is not None and self._signins is not None:
+                _quietly(lambda: self._signins.give_back(self, lent))
+            if interceptor is not None:
+                _quietly(interceptor.deleteLater)   # the lender's own refusal is on the profile first
 
     def _on_loading(self, shot: Any, info: Any) -> None:
         """The main frame's load: its HTTP status when it answered with an error. It stands through what the engine loads
@@ -1647,7 +1720,35 @@ class AgentBrowser(PageCamera):
         except Exception as exc:  # noqa: BLE001 - only how a failure is told apart
             logger.debug("Agent browser: a load's state could not be read (%s)", type(exc).__name__)
 
+    def _new_profile(self, shot: Any, classes: Any) -> Any:
+        """open_page's page on a site the owner listed: Jarvis's sign-in profile, lent while this shot lives (one shot
+        at a time); every other page, and that one when the profile is not free, a fresh off-the-record one."""
+        request = self._request
+        lender = self._signins
+        if request is not None and request.signed_in and request.folder is None and request.html is None \
+                and lender is not None:
+            if self._lent_shot is not None and not self._lent_shot.done:
+                self._count("signed_in_busy")          # another tab holds it: this one opens off the record
+            elif site_signins.listed_host(request.url, self._signin_hosts()):
+                try:
+                    profile = lender.lend(self)
+                except Exception as exc:  # noqa: BLE001 - off the record instead
+                    logger.debug("Agent browser: the sign-in profile was not lent (%s)", type(exc).__name__)
+                    profile = None
+                if profile is not None:
+                    shot.lent = True
+                    self._lent_shot = shot
+                    logger.info("Agent browser: a page opens signed in")
+                    return profile
+                self._count("signed_in_unlent")
+        return super()._new_profile(shot, classes)
+
     def _configure(self, profile: Any, classes: Any, shot: Any) -> None:
+        if shot.lent:
+            # The lender set the profile up once (site_signins_ui); here only this shot's judge goes on it.
+            shot.interceptor = classes.Interceptor(lambda info: self._judge(shot, info), profile)
+            profile.setUrlRequestInterceptor(shot.interceptor)
+            return
         super()._configure(profile, classes, shot)
         request = self._request
         if request is not None and request.folder is not None:
@@ -1823,7 +1924,7 @@ class AgentBrowser(PageCamera):
         logger.info("Agent browser: a page is up in %.1f s (%d request(s) blocked%s)", took / 1000, shot.blocked,
                     ", still loading" if still_loading else "")
         _answer(request.done, ShotResult(True, final_url=final_url, took_ms=took, still_loading=still_loading,
-                                         blocked=shot.blocked))
+                                         blocked=shot.blocked, signed_in=bool(shot.lent)))
 
     def _end(self, shot: Any, reason: str, **data: Any) -> None:
         if shot.done:
@@ -1956,6 +2057,10 @@ class BrowserClient(QObject):
 
     def load(self, url: str, *, timeout_s: float, cancelled: Callable[[], bool]) -> ShotResult:
         return self._loaded(self._ask("load", (url, timeout_s), timeout_s + LOAD_MARGIN_S, cancelled))
+
+    def load_signed_in(self, url: str, *, timeout_s: float, cancelled: Callable[[], bool]) -> ShotResult:
+        """open_page's load: signed in on a site the owner listed when the sign-in profile is free (``signed_in``)."""
+        return self._loaded(self._ask("load_signed_in", (url, timeout_s), timeout_s + LOAD_MARGIN_S, cancelled))
 
     def load_file(self, name: str, folder: TaskFolder, *, timeout_s: float,
                   cancelled: Callable[[], bool]) -> ShotResult:
@@ -2107,7 +2212,7 @@ class BrowserClient(QObject):
             getattr(self._ensure(), job.op)(*job.args, done=job.finish)
         except Exception as exc:  # noqa: BLE001 - a broken step is a plain answer, never a waiter left hanging
             logger.warning("Agent browser: a step failed (%s)", type(exc).__name__)
-            shot_op = job.op in ("load", "load_file", "picture")
+            shot_op = job.op in ("load", "load_signed_in", "load_file", "picture")
             if shot_op:
                 job.finish(ShotResult(False, snapshots.R_ENGINE_FAILED))
             else:

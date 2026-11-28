@@ -107,8 +107,10 @@ class DriveConsentTests(DriveApp):
         self.assertFalse(names & drive_tool_names())
         self.assertNotIsInstance(session, drive.DriveSession)
         self.assertIsNone(self.c.agent.firewall.link_of)
-        self.assertEqual(self.options, [{"avoid": self.c.agent._window_avoid,
-                                         "hide_from_capture": True}])  # no drive=True
+        self.assertEqual([{key: value for key, value in options.items() if key != "signins"}
+                          for options in self.options],
+                         [{"avoid": self.c.agent._window_avoid, "hide_from_capture": True}])  # no drive=True
+        self.assertIs(self.options[0]["signins"], self.c.site_signins.lender)    # only listed sites ever use it
         self.assertEqual(self.drive_browser.bigs, [False])
         self.assertFalse(self.desktop.consent_for_drive())
         self.assertTrue(self.desktop.consent_for_tasks())

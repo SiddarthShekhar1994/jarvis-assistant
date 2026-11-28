@@ -15,7 +15,9 @@ Public API
     (``set_connected({alias: True | False})``, from the app's own sign-in check; "Not checked yet" before it); an
     Outlook account's row says "Outlook - ..." and its Connect / Disconnect is outlook_ui's part under the rows.
     LIVE and privacy also says whether other AI apps may read the board (``MCP_LABEL``: [mcp] enabled, set in
-    config.toml only - it widens who reads what Jarvis keeps, so it never has a Change).
+    config.toml only - it widens who reads what Jarvis keeps, so it never has a Change), and has "Sites Jarvis may use
+    signed in" as its own part under the rows (site_signins_ui.SitesPanel: kept in site_signins.json, never in
+    settings.json, whose overrides never widen what is read or reached).
 
 ``SettingsStage.set_store(store)``, ``EDIT_ROWS``, ``edit_keys(config, group, label)``
     Changing a comfort setting here (Smaller items, part 4): with the app's ``overrides.SettingsStore`` (settings.json

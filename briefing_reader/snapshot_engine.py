@@ -9,6 +9,12 @@ checked source its answer cites, and takes a picture of its first screen, for th
                                       engine_classes() then gives its classes, private_profile(parent) a fresh
                                       off-the-record profile (the first starts Chromium), apply_web_settings(settings)
                                       the fixed settings
+    signin_ready() -> str             the engine ready for a page opened with Jarvis's sign-in profile ("" or a
+                                      reason): a page shot's checks, the gate usable; signin_profile(folder, parent)
+                                      that persistent profile, its cookies and site storage in ``folder`` alone, its
+                                      cache in memory (site_signins_ui makes the one of the process). Never a page
+                                      picture's, the board's or a snapshot's: only the agent's task page on a site the
+                                      owner listed (agent.browser) and the owner's own sign-in window
     set_network_use(possible)         the app says whether a page picture or an agent page can be asked for in
                                       this run (network_possible())
     PageCamera(parent, ...)           one page at a time on the GUI thread: shoot(url) -> finished(ShotResult)
@@ -59,9 +65,9 @@ starting the engine for the board (ensure_engine, warm_up) never opens a usable 
 agent page can be asked for in this run (set_network_use: [live] page pictures off and [agent] off), Chromium starts
 with the dead proxy, as on a test platform, and no gate is made at all. Otherwise the gate binds SEALED
 (ConnectGate.seal(True), before it listens: reason "start") and is unsealed only by the code that takes the first page
-picture or agent page (PageCamera.shoot -> _start_engine(page=True)); the agent's own seals (seal_gate: a page it wrote
-is open; seal_drive: a page holds what Jarvis typed, with cut_gate ending every connection open then) are other
-reasons, and the gate is usable only with none. When the gate cannot bind, the board still starts,
+picture or agent page (PageCamera.shoot -> _start_engine(page=True)), or the owner's sign-in window
+(signin_ready); the agent's own seals (seal_gate: a page it wrote is open; seal_drive: a page holds what Jarvis
+typed, with cut_gate ending every connection open then) are other reasons, and the gate is usable only with none. When the gate cannot bind, the board still starts,
 with the dead proxy (a page picture in that run says R_ENGINE_FAILED, as it did before).
 
 Logging: counts, kinds and times only ("Page snapshot: taken in 2.3 s (1 of 2 for this research,
@@ -339,9 +345,13 @@ def _classes() -> Any:
     preload = getattr(info, "ResourceTypeNavigationPreloadMainFrame", None)
     if preload is not None:
         main_types.add(preload)
+    import PySide6.QtWebEngineCore as core
+
     _ENGINE.classes = SimpleNamespace(
         QWebEnginePage=QWebEnginePage, QWebEngineProfile=QWebEngineProfile, QWebEngineSettings=QWebEngineSettings,
         QWebEngineView=QWebEngineView, Interceptor=Interceptor, Page=Page, Seed=Seed, main_types=frozenset(main_types),
+        QWebEngineProfileBuilder=getattr(core, "QWebEngineProfileBuilder", None),   # Qt 6.9+: the sign-in profile
+        sub_frame=getattr(info, "ResourceTypeSubFrame", None),
         websocket=getattr(info, "ResourceTypeWebSocket", None),
         app_world=int(QWebEngineScript.ScriptWorldId.ApplicationWorld))
     return _ENGINE.classes
@@ -597,6 +607,80 @@ def private_profile(parent: QObject | None = None) -> Any:
     return profile
 
 
+SIGNIN_STORAGE = "jarvis-site-signins"   # the sign-in profile's storage name (one in the process: site_signins_ui)
+
+
+def signin_ready() -> str:
+    """The web engine ready for a page of the web opened with Jarvis's sign-in profile, by the owner (his sign-in
+    window) or a task (GUI thread): "" or a reason (snapshots.R_*). The same checks as a page's shot: the inherited
+    settings first, then the engine with the network gate usable (as a page shot's start: it lifts the board's start
+    seal). Never raises."""
+    try:
+        if QCoreApplication.instance() is None:
+            return snapshots.R_ENGINE_FAILED
+        environ = _judged_environ()   # as inherited: never Jarvis's own merged flags
+        problem = snapshots.sandbox_problem(environ) or snapshots.engine_flags_problem(environ)
+        if problem:
+            return problem
+        return _start_engine(page=True)
+    except Exception as exc:  # noqa: BLE001 - "not ready" is the safe answer
+        logger.debug("Web engine: not ready for the sign-in profile (%s)", type(exc).__name__)
+        return snapshots.R_ENGINE_FAILED
+
+
+def signin_profile(folder: str, parent: QObject | None = None) -> Any:
+    """Jarvis's sign-in profile (site_signins_ui.SignInProfile makes the one of the process; GUI thread, once
+    signin_ready() said ""): a persistent profile whose cookies and site storage live in ``folder`` alone - never a
+    browser's own profile, and nothing is imported from one. Its HTTP cache is in memory only (nothing of a page's
+    content is written), cookies are kept so a sign-in lasts, permissions are asked each time (and refused by the
+    page's owner), no spell check, no push service, downloads refused (the private download folder and a cancel: the
+    agent window's sandbox keeps them from starting at all), the fixed web settings. None when the engine gave an
+    off-the-record one, or one whose storage is not ``folder`` (it is deleted)."""
+    classes = _classes()
+    kinds = classes.QWebEngineProfile
+    first = not _ENGINE.started
+    began = time.monotonic()
+    builder_class = getattr(classes, "QWebEngineProfileBuilder", None)
+    if builder_class is not None:
+        builder = builder_class()
+        builder.setPersistentStoragePath(folder)
+        builder.setCachePath(os.path.join(folder, "cache"))
+        builder.setHttpCacheType(kinds.HttpCacheType.MemoryHttpCache)
+        builder.setPersistentCookiesPolicy(kinds.PersistentCookiesPolicy.ForcePersistentCookies)
+        builder.setPersistentPermissionsPolicy(kinds.PersistentPermissionsPolicy.AskEveryTime)
+        profile = builder.createProfile(SIGNIN_STORAGE, parent)
+    else:   # before Qt 6.9 (kept for safety)
+        profile = kinds(SIGNIN_STORAGE, parent)
+        profile.setPersistentStoragePath(folder)
+        profile.setCachePath(os.path.join(folder, "cache"))
+        profile.setHttpCacheType(kinds.HttpCacheType.MemoryHttpCache)
+        profile.setPersistentCookiesPolicy(kinds.PersistentCookiesPolicy.ForcePersistentCookies)
+        if hasattr(profile, "setPersistentPermissionsPolicy"):
+            profile.setPersistentPermissionsPolicy(kinds.PersistentPermissionsPolicy.AskEveryTime)
+    if profile is None:
+        return None
+    if profile.isOffTheRecord() or not _same_folder(profile.persistentStoragePath(), folder):
+        profile.deleteLater()
+        return None
+    if first:
+        _ENGINE.started = True
+        logger.info("Web engine: started in %.1f s", time.monotonic() - began)
+    profile.setSpellCheckEnabled(False)
+    if hasattr(profile, "setPushServiceEnabled"):
+        profile.setPushServiceEnabled(False)
+    profile.setDownloadPath(download_folder())
+    profile.downloadRequested.connect(lambda download: _quietly(download.cancel))
+    apply_web_settings(profile.settings())
+    return profile
+
+
+def _same_folder(one: Any, other: Any) -> bool:
+    try:
+        return os.path.normcase(os.path.abspath(str(one))) == os.path.normcase(os.path.abspath(str(other)))
+    except (TypeError, ValueError):
+        return False
+
+
 def apply_web_settings(settings: Any, *, local_storage: bool = True) -> None:
     """The web settings every page Jarvis opens runs with (GUI thread, once ensure_engine() said ""): _SETTINGS_OFF off
     and _SETTINGS_ON on (JavaScript among them), but local storage as ``local_storage``; addresses of a scheme the engine
@@ -704,7 +788,7 @@ class _Shot:
 
     __slots__ = ("serial", "url", "html", "final_hint", "local", "offline", "started", "progress", "loaded",
                  "starts", "fail_starts", "tries", "blocked", "done", "profile", "page", "interceptor", "on_view",
-                 "target", "seed", "seeded", "adopted", "opened")
+                 "target", "seed", "seeded", "adopted", "opened", "lent")
 
     def __init__(self, serial: int, url: str, html: str | None, final_hint: str) -> None:
         self.serial = serial
@@ -730,6 +814,7 @@ class _Shot:
         self.seeded = False           # the seed's script ran (once)
         self.adopted = False          # the shot's page took the sandboxed pop-up (once)
         self.opened = False           # the pop-up passed the sandbox check: the page was asked for
+        self.lent = False             # its profile is the sign-in profile, lent (agent.browser): never deleted here
 
     def __repr__(self) -> str:
         return f"_Shot(serial={self.serial}, loaded={self.loaded}, done={self.done})"
@@ -834,9 +919,9 @@ class PageCamera(QObject):
 
     def _open(self, shot: _Shot, classes: Any) -> str:
         first = not _ENGINE.started
-        profile = classes.QWebEngineProfile(self)   # no storage name: off the record
+        profile = self._new_profile(shot, classes)
         shot.profile = profile
-        if not profile.isOffTheRecord():
+        if profile is None or not (shot.lent or profile.isOffTheRecord()):
             return snapshots.R_ENGINE_FAILED
         if first:
             _ENGINE.started = True
@@ -870,6 +955,11 @@ class PageCamera(QObject):
         self._timeout.start(self._timeout_ms)
         seed.load(QUrl("about:blank"))
         return ""
+
+    def _new_profile(self, _shot: _Shot, classes: Any) -> Any:
+        """The shot's profile: here always a fresh off-the-record one (agent.browser lends a task's page on a site the
+        owner listed Jarvis's sign-in profile instead, and marks the shot ``lent``)."""
+        return classes.QWebEngineProfile(self)   # no storage name: off the record
 
     def _new_view(self, classes: Any) -> Any:
         """The view the pages show on: here a hidden one, never on screen (agent.browser's is in the window Jarvis
@@ -1196,7 +1286,7 @@ class PageCamera(QObject):
                 _quietly(lambda: self._view.setPage(None))
             _quietly(page.deleteLater)
             self._doomed.append(page)
-        if profile is not None:
+        if profile is not None and not shot.lent:   # a lent profile goes back to its lender (agent.browser)
             _quietly(profile.deleteLater)   # after the page (deferred deletes run in order); its interceptor with it
             self._doomed.append(profile)
         self._prune()

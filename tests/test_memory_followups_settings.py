@@ -363,8 +363,10 @@ class SettingsStageTests(unittest.TestCase):
             self.assertEqual((stage.current_group(), stage.title_label.text()), (key, title))
             self.assertTrue(stage.rows(), key)
             self.assertIn("config.toml, then restart Jarvis", stage.text_label.text())
+            sites = app.c.site_signins.panel.field              # LIVE and privacy's "Sites ... signed in": its own file
             for kind in (QLineEdit, QTextEdit, QPlainTextEdit, QCheckBox, QComboBox, QAbstractSpinBox):
-                self.assertEqual(stage.findChildren(kind), [], f"{key}: no editing control ({kind.__name__})")
+                self.assertEqual([edit for edit in stage.findChildren(kind) if edit is not sites], [],
+                                 f"{key}: no editing control ({kind.__name__})")
         self.assertEqual(config_path.read_bytes(), before)            # never written
         self.assertTrue(stage.config_button.isVisible() or stage.config_button.isVisibleTo(stage))
         stage.select_group("voice")

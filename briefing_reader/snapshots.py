@@ -679,6 +679,7 @@ class ShotResult:
     still_loading: bool = False
     blocked: int = 0
     http_status: int = 0   # R_SITE_REFUSED: the status it answered with
+    signed_in: bool = False   # an agent's page opened with Jarvis's sign-in profile (agent.browser; site_signins)
 
     def __repr__(self) -> str:   # never the URL or the image
         if not self.ok:
