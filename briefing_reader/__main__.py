@@ -18,6 +18,9 @@ Two more modes serve the scheduled tasks:
   (:mod:`briefing_reader.hotkey`), also without Qt - and for the HUD key while
   [desktop] is on (it starts the app with ``--hud`` when none runs).
 
+``--mcp`` serves another AI app on this PC over stdin and stdout (:mod:`briefing_reader.mcp_server`: read-only views
+of the board, off until ``[mcp] enabled = true``), also without Qt or the app lock, and without reading ``.env``.
+
 The Qt half (activation messages, Qt's log output) lives in
 :mod:`briefing_reader.activation` and is imported only when a window or an
 activation message is needed. Nothing here assumes a console: under
@@ -151,6 +154,10 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--standing-check", action="store_true",
                       help="standing agents and rules: print what is set up and how the checks went (no Claude "
                            "request, nothing read from Google)")
+    mode.add_argument("--mcp", action="store_true",
+                      help="let another AI app on this PC read the board over MCP (stdin and stdout): the waiting "
+                           "cards, to-dos, captures, documents, agents and the last day's conversation, read only; "
+                           "nothing can be sent or changed. Off until [mcp] enabled = true in config.toml")
     # Internal: who started a standing check (the task, or Jarvis while his window is open).
     parser.add_argument("--origin", choices=("task", "app", "now"), default="task", help=argparse.SUPPRESS)
     parser.add_argument("--ask-dry-run", action="store_true",
@@ -191,7 +198,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                            ("--plan-dry-run", args.plan_dry_run is not None),
                            ("--desktop-dry-run", args.desktop_dry_run is not None),
                            ("--followups-check", args.followups_check),
-                           ("--standing-run", args.standing_run), ("--standing-check", args.standing_check)):
+                           ("--standing-run", args.standing_run), ("--standing-check", args.standing_check),
+                           ("--mcp", args.mcp)):
             if used:
                 parser.error(f"{view} cannot be combined with {flag}")
         if args.read and args.ask:
@@ -232,8 +240,8 @@ def launch_kind(args: argparse.Namespace) -> str:
 def _run(args: argparse.Namespace) -> int:
     from .config import load_config, setup_logging
 
-    # The hotkey agent runs all day: it must not hold the log open (rotation).
-    log_file = setup_logging(debug=args.debug, keep_open=not (args.hotkey_agent or args.standing_run))
+    # The hotkey agent runs all day (and --mcp as long as its client): it must not hold the log open (rotation).
+    log_file = setup_logging(debug=args.debug, keep_open=not (args.hotkey_agent or args.standing_run or args.mcp))
     logger.info("%s %s starting (Python %s on %s)", APP_NAME, __version__,
                 platform.python_version(), platform.platform())
     logger.info("Arguments: run=%s open=%s now=%s read=%s catch_up=%s hotkey_agent=%s ask=%s hud=%s slots=%s "
@@ -243,6 +251,12 @@ def _run(args: argparse.Namespace) -> int:
                 args.from_file or "-", args.debug, args.detached, launch_kind(args))
     logger.info("Log file: %s", log_file)
 
+    if args.mcp:
+        # Other AI apps reading the board: no window, no Qt, no app lock. Given the environment, load_config does not
+        # read .env (no token is needed or read for this mode).
+        from . import mcp_server
+
+        return mcp_server.run(load_config(environ=os.environ))
     config = load_config()
     _log_config(config)
     if (getattr(args, "ask_check", False) or getattr(args, "ask_text", None) is not None
