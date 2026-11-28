@@ -85,7 +85,7 @@ PROBE = Path(__file__).with_name("board_probe.py")
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CASES = ("lockdown", "control", "media", "keys", "fallback", "shell", "kinds", "desk", "desk_x15", "ways", "lit", "big",
          "big_x15", "expiry", "reduced", "typed", "canvas", "canvas_layout", "canvas_ways", "canvas_fixes",
-         "canvas_resting", "canvas_hear", "canvas_5b", "capture")
+         "canvas_resting", "canvas_now", "canvas_hear", "canvas_5b", "capture")
 # Round 5: what each probe's engine is told of reduced motion (tests/board_probe.py NO_REDUCED_MOTION, REDUCED_MOTION).
 NO_REDUCED_MOTION = "--force-prefers-no-reduced-motion"
 REDUCED_MOTION = "--force-prefers-reduced-motion"
@@ -2369,6 +2369,85 @@ class CanvasHearTests(BoardProbeCase):
         self.assertEqual(report["blocked"], {})
         self.assertEqual(list(report["allowed"]), ["jarvis-board"])
         self.assertEqual(report["messages_refused"], {})
+
+
+class CanvasNowRowsTests(BoardProbeCase):
+    """The resting group "Now" in the real engine with 3, 4 and 5 frames at 1120x700, the owner's 1389x868 and
+    1920x1080 (tests/board_probe.py "canvas_now"): its whole frames in even rows - no row with a lone frame while the
+    group shows more than one, the rows' counts within one of each other (the fuller first), a row's frames equally
+    wide, equally tall and level, as many across as the width gives room (at least a frame of 340 px), none cut, nothing
+    overlapping or over the orb's corner, the group's head over the whole first row. Where those rows cannot hold
+    every frame whole but the frames placed one by one at their own heights can (4 frames at 1120x700), that placement
+    is used: all whole, nothing cut. Only when neither holds them all whole, the rows and the fold to tiles - never
+    lost."""
+
+    def now(self) -> dict:
+        report = self.report("canvas_now")
+        self.assertTrue(report["ready"])
+        self.assertEqual(len(report["sizes"]), 9)
+        return report
+
+    def test_the_rows_are_even_at_every_size(self) -> None:
+        for key, look in self.now()["sizes"].items():
+            with self.subTest(key):
+                count = int(key.split("@")[0])
+                self.assertTrue(look["settled"])
+                self.assertEqual((look["overlaps"], look["outside"], look["on_orb"], look["lost"]), ([], [], [], []))
+                rows = look["rows"]
+                whole = sum(len(row["ids"]) for row in rows)
+                self.assertEqual(whole + look["tiles"], count)              # every frame whole or a tile
+                self.assertGreaterEqual(whole, 3)
+                if not look["rest"]:                                      # placed one by one: only when all whole
+                    self.assertEqual(look["tiles"], 0)
+                    self.assertEqual([row["cut"] for row in rows], [[]] * len(rows))
+                    continue
+                counts = [len(row["ids"]) for row in rows]
+                self.assertEqual(counts, sorted(counts, reverse=True))    # the fuller rows first
+                self.assertLessEqual(max(counts) - min(counts), 1)       # shared out evenly
+                if whole > 1:
+                    self.assertNotIn(1, counts)                           # never a lone frame on a row
+                for row in rows:
+                    self.assertEqual(len(set(row["lines"])), 1, row)      # equally tall ...
+                    self.assertEqual(len(set(row["heights"])), 1, row)
+                    self.assertEqual(len(set(row["bottoms"])), 1, row)    # ... and level
+                    self.assertEqual(len(set(row["cols"])), 1, row)       # equally wide
+                    self.assertEqual(row["cut"], [], row)                 # nothing cut
+                    self.assertLessEqual(sum(row["cols"]), 12)
+                widths = [item for item in look["rows"] for item in item["cols"]]
+                self.assertTrue(all(cols * (look["area"][2] + look["grid"]["gap"]) / 12 - look["grid"]["gap"] >= 340
+                                    for cols in widths), widths)
+                first = rows[0]
+                head = look["heads"][0]                                   # the group's head over its first row
+                self.assertEqual(len(look["heads"]), 1)
+                self.assertAlmostEqual(head[2], round(sum(first["cols"]) * (look["area"][2] + look["grid"]["gap"]) / 12
+                                                      - look["grid"]["gap"]), delta=1)
+
+    def test_sensible_columns_for_the_width(self) -> None:
+        sizes = self.now()["sizes"]
+
+        def shape(key: str) -> list[int]:
+            return [len(row["ids"]) for row in sizes[key]["rows"]]
+
+        self.assertEqual(shape("3@1389x868"), [3])                        # the owner's screen: three across ...
+        self.assertEqual(shape("4@1389x868"), [2, 2])                     # ... four as two and two, never 3 + 1
+        self.assertEqual(shape("5@1389x868"), [3, 2])
+        self.assertEqual(shape("3@1920x1080"), [3])
+        self.assertEqual(shape("4@1920x1080"), [4])                       # 1920 wide: four across
+        self.assertEqual(shape("5@1920x1080"), [3, 2])                    # five: three and two, never 4 + 1
+        for key in ("4@1389x868", "5@1389x868", "4@1920x1080", "5@1920x1080", "3@1389x868", "3@1920x1080",
+                    "3@1120x700"):
+            self.assertEqual(sizes[key]["tiles"], 0, key)                 # all of them whole where there is room ...
+            self.assertTrue(sizes[key]["rest"], key)                      # ... in the even rows
+        self.assertEqual(sizes["4@1120x700"]["tiles"], 0)                 # 1120x700, four: the rows would fold one,
+        self.assertFalse(sizes["4@1120x700"]["rest"])                     # placing them one by one keeps all whole
+        self.assertTrue(sizes["5@1120x700"]["rest"])                      # five: neither holds all whole - the rows,
+        self.assertGreater(sizes["5@1120x700"]["tiles"], 0)               # the rest folded to tiles
+
+    def test_the_page_takes_the_group_and_lets_nothing_out(self) -> None:
+        report = self.now()
+        self.assertEqual(report["messages_refused"], {})                  # its "rest" group message taken
+        self.assertEqual(report["blocked"], {})
+        self.assertEqual(list(report["allowed"]), ["jarvis-board"])
 
 
 class Canvas5BTests(BoardProbeCase):

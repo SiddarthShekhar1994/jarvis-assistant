@@ -1798,6 +1798,23 @@ class RestingGroupTests(CanvasApp):
         self.assertTrue(head["below"] and head["older"])                  # the page puts it under the answer
         self.assertFalse(desk.feed.group_header(answer_group)[2])         # the answer stays the newest
 
+    def test_its_group_is_the_resting_group_the_canvas_lays_out_in_even_rows(self) -> None:
+        self.make(resting=True, lines=CARDS)
+        board = self.started()
+        now_group, _kinds, _frames = self.group()
+        self.put(2)                                                       # an answer: an ordinary group
+        answer_group = self.c.look.desk.feed.groups()[0]
+        self.assertNotEqual(answer_group, now_group)
+        heads = {message["id"]: message for message in board.of_type("group")}
+        self.assertIs(heads[now_group].get("rest"), True)                 # "Now": its frames in even rows
+        self.assertNotIn("rest", heads[answer_group])                     # an answer's: never said
+        for head in (heads[now_group], heads[answer_group]):
+            sent = json.loads(protocol.check_message(dict(head), set(head["frames"]), set(heads)).text)
+            self.assertEqual(sent.get("rest"), head.get("rest"))
+        for bad in ("yes", 1, None):                                      # only a true or false flag
+            with self.assertRaises(protocol.Refused):
+                protocol.check_message(dict(heads[now_group], rest=bad), set(heads[now_group]["frames"]), set(heads))
+
     def test_the_agents_frame_when_the_owner_has_an_agent_and_its_button_works(self) -> None:
         from tests.standing_fakes import STANDING_ON, agent_data, consent, save_jobs
 

@@ -121,6 +121,9 @@ In (app -> page): check_message(message, known, groups=()) -> Checked
                  page's own words) asks go "approvals". Never an approve, send or undo control
         group    + "below" (only when given): a new group goes under the groups the page has, never on top (the
                  resting group "Now": it never takes an answer's best places)
+        group    + "rest" (only when given): the resting group "Now" - on the canvas its frames go in even rows (as
+                 many across as the width gives room, no row with a lone frame, a row's frames equally tall; placed
+                 one by one instead on a small window where only that shows every frame whole)
         frame    + the kind "agents" {"rows": [{"name", "state", "last", "came", "next", "waits"}], "more", "waits"}:
                  the owner's standing agents (1 to ROWS_CAP rows; "more": agents past them) - each its name, its state
                  (AGENT_STATES), when it last ran ("" never) and what came of it (its proposals; -1 not known),
@@ -743,7 +746,7 @@ def _frame(value: dict[str, Any], known: Collection[str], groups: Collection[str
 def _group(value: dict[str, Any], known: Collection[str], groups: Collection[str]) -> tuple[dict[str, Any], str]:
     """One answer's group: its header's time and topic, its frames in board order, whether it is older than the
     newest (its header in INK_4) and, when given, whether it is parked (part 5b: out of sight until it lands)."""
-    fields = _fields(value, ("type", "id", "time", "topic", "frames", "older", "parked", "below"),
+    fields = _fields(value, ("type", "id", "time", "topic", "frames", "older", "parked", "below", "rest"),
                      ("type", "id", "time", "topic", "frames"))
     group_id = _frame_id(fields["id"])
     if group_id not in groups and len(groups) >= MAX_GROUPS:
@@ -758,6 +761,8 @@ def _group(value: dict[str, Any], known: Collection[str], groups: Collection[str
         clean["parked"] = _flag(fields["parked"])
     if "below" in fields:       # part 3B: a new group goes under the groups the page has (the resting group)
         clean["below"] = _flag(fields["below"])
+    if "rest" in fields:        # the resting group "Now": its frames in even rows on the canvas
+        clean["rest"] = _flag(fields["rest"])
     return clean, group_id
 
 

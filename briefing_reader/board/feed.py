@@ -35,8 +35,9 @@ raises for odd data.
             Part 3B (the canvas's resting group "Now"): ``again`` - the same answer's frame built again in place is
             sent with "changed" when what it says differs (``substance``) and the owner has seen it; ``below`` - a new
             group goes under every group already there (never the newest: it takes no answer's best places; its
-            group message says "below"). ``pinned``: a new frame comes pinned (the pins kept across a restart,
-            board.pins; never past MAX_PINS)
+            group message says "below"); ``rest`` - a new group is the resting group (its group message says "rest":
+            the canvas lays its frames out in even rows). ``pinned``: a new frame comes pinned (the pins kept across a
+            restart, board.pins; never past MAX_PINS)
         remove(frame_id) -> list[dict]             part 3B: one frame taken away at once (``remove``, or its group's
                                                    ``remove_group``), then the bar
         quiet_changed(frame_ids)                   part 3B: those frames' changed light goes without its sound
@@ -304,6 +305,7 @@ class _Group:
     older: bool = False
     parked: bool = False           # it came while the owner read the board: out of sight until it lands
     below: bool = False            # the canvas, part 3B: made under the groups already there (the resting group)
+    rest: bool = False             # the resting group "Now": the canvas lays its frames out in even rows
     sent: str = ""
     turn: int = 0
 
@@ -539,7 +541,7 @@ class BoardFeed:
     def put(self, answer: Hashable, source: str, messages: Sequence[dict[str, Any]], *, when: str = "",
             topic: str = "", merge: str = "", approvals: str = "", rank: float = 0.0,
             park: bool = False, key: str = "", not_ready: bool = False, again: bool = False,
-            below: bool = False, pinned: bool = False) -> list[dict[str, Any]]:
+            below: bool = False, pinned: bool = False, rest: bool = False) -> list[dict[str, Any]]:
         """See the module doc."""
         frame_message = next((dict(item) for item in messages if isinstance(item, dict)
                               and item.get("type") == "frame"), None)
@@ -570,7 +572,7 @@ class BoardFeed:
                 return out
             if group is None:
                 group, made = self._new_group(answer, when, topic or str(frame_message.get("title", "")), park,
-                                              below=below)
+                                              below=below, rest=rest)
                 out += made
             self._seq += 1
             frame = _Frame(frame_id, group.id, merge, self._seq, float(rank), key=str(key or ""),
@@ -681,7 +683,7 @@ class BoardFeed:
         return shown
 
     def _new_group(self, answer: Hashable, when: str, topic: str, park: bool,
-                   below: bool = False) -> tuple[_Group, list[dict[str, Any]]]:
+                   below: bool = False, rest: bool = False) -> tuple[_Group, list[dict[str, Any]]]:
         self._next_group += 1
         self._seq += 1
         seq = self._seq
@@ -689,7 +691,8 @@ class BoardFeed:
         if below:                                  # under every group already there: never the newest
             seq = min(group.seq for group in self._groups.values()) - 1
         group = _Group(f"g{self._next_group}", answer, _cut(str(when or ""), protocol.TIME_CAP),
-                       _cut(str(topic or ""), protocol.TOPIC_CAP), seq, parked=bool(park), below=below)
+                       _cut(str(topic or ""), protocol.TOPIC_CAP), seq, parked=bool(park), below=below,
+                       rest=bool(rest))
         self._groups[group.id] = group
         self._by_answer[answer] = group.id
         self._counts["groups"] += 1
@@ -708,6 +711,8 @@ class BoardFeed:
             message["parked"] = True
         if group.below:
             message["below"] = True                # part 3B: the page puts it under the groups it has
+        if group.rest:
+            message["rest"] = True                 # the resting group: the canvas lays its frames out in even rows
         group.sent = _same(message)
         return [message]
 

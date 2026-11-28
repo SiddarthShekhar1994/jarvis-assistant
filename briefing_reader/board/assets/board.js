@@ -1377,7 +1377,7 @@
     var rule = make('i', 'g-rule');
     rule.setAttribute('aria-hidden', 'true');
     var group = {id: id, el: section, time: make('span', 'g-time t-badge'), topic: make('span', 'g-topic'),
-                 list: make('div', 'g-frames'), order: [], older: false, parked: false, seen: false,
+                 list: make('div', 'g-frames'), order: [], older: false, parked: false, seen: false, rest: false,
                  rule: make('i', 'ix-rule')};
     group.rule.setAttribute('aria-hidden', 'true');
     sections.set(section, group);
@@ -2581,8 +2581,9 @@
   };
 
   HANDLERS.group = function (message) {
-    if (!onlyKeys(message, ['type', 'id', 'time', 'topic', 'frames', 'older', 'parked', 'below'])
-        || (message.below !== undefined && typeof message.below !== 'boolean') || typeof message.id !== 'string'
+    if (!onlyKeys(message, ['type', 'id', 'time', 'topic', 'frames', 'older', 'parked', 'below', 'rest'])
+        || (message.below !== undefined && typeof message.below !== 'boolean')
+        || (message.rest !== undefined && typeof message.rest !== 'boolean') || typeof message.id !== 'string'
         || !ID.test(message.id) || !words(message.time, CAPS.time) || !words(message.topic, CAPS.topic)
         || !list(message.frames, MAX_FRAMES) || typeof message.older !== 'boolean'
         || (message.parked !== undefined && typeof message.parked !== 'boolean')
@@ -2616,6 +2617,7 @@
     group.el.classList.toggle('older', message.older);
     group.older = message.older;
     group.parked = parkedNow;
+    group.rest = message.rest === true;        // the resting group "Now": on the canvas its frames go in even rows
     group.order = message.frames.slice();
     arrange(group);
     if ((fresh && !parkedNow && lands) || (wasParked && !parkedNow)) {
@@ -4876,9 +4878,9 @@
     return Math.round(cols * m.unit - m.gap);
   }
 
-  function measure(list, m) {                  // each frame's own height at the width its place would have; what it
-    var todo = list.filter(function (rec) {    // looks like now is put back at once (nothing is painted in between)
-      var px = colsPx(frameCols(rec, m), m);
+  function measure(list, m, wide) {            // each frame's own height at the width its place would have (``wide``:
+    var todo = list.filter(function (rec) {    // that many columns, the resting group's rows); what it looks like now
+      var px = colsPx(wide || frameCols(rec, m), m);     // is put back at once (nothing is painted in between)
       if (!rec.nat || rec.nat.rev !== rec.rev) {
         rec.nat = {rev: rec.rev, sizes: {}};
       }
@@ -4888,7 +4890,7 @@
       return;
     }
     var was = todo.map(function (rec) {
-      var el = rec.el, cols = frameCols(rec, m);
+      var el = rec.el, cols = wide || frameCols(rec, m);
       var keep = {w: el.style.width, h: el.style.height, sat: el.classList.contains('sat'),
                   wide: el.classList.contains('wide'), cut: el.classList.contains('cut')};
       el.classList.add('measuring');
@@ -4899,7 +4901,7 @@
       return keep;
     });
     todo.forEach(function (rec) {
-      rec.nat.sizes[colsPx(frameCols(rec, m), m)] = rec.el.offsetHeight;
+      rec.nat.sizes[colsPx(wide || frameCols(rec, m), m)] = rec.el.offsetHeight;
     });
     todo.forEach(function (rec, index) {
       var el = rec.el, keep = was[index];
@@ -4914,12 +4916,12 @@
 
   var SHORT_KINDS = {approvals: true, agents: true, todos: true, capture: true};   // part 5A: as tall as their rows
 
-  function frameLines(rec, m, headed) {        // the lines a frame takes: a row at least, more for what it holds
-    var most = Math.min(m.rows, m.rows >= 4 ? 3 : 2) * m.sub;      // (its group's head over it counted)
-    if (rec.kind === 'picture' && rec.data && rec.data.status === 'ok') {
+  function frameLines(rec, m, headed, wide) { // the lines a frame takes: a row at least, more for what it holds
+    var most = Math.min(m.rows, m.rows >= 4 ? 3 : 2) * m.sub;      // (its group's head over it counted; ``wide``:
+    if (rec.kind === 'picture' && rec.data && rec.data.status === 'ok') {     // its width in columns, else its own)
       return Math.min(m.rows, 2) * m.sub;      // a page picture: two rows, the picture filling them
     }
-    var need = (rec.nat && rec.nat.sizes[colsPx(frameCols(rec, m), m)]) || 0;
+    var need = (rec.nat && rec.nat.sizes[colsPx(wide || frameCols(rec, m), m)]) || 0;
     if (headed) {
       need += HEAD_H + HEAD_GAP;
     }
@@ -4949,10 +4951,112 @@
     return plain.concat(opened, pinned);
   }
 
+  // ---- the resting group's rows -------------------------------------------------------------------------------------
+  // The resting group "Now" (its group message says "rest") is laid out in even rows, not frame by frame: as many
+  // across as the width gives each frame at least SPAN_TARGET px (or the grid's own frame width, when narrower), the
+  // frames shared out over the fewest rows so no row is left with a lone frame (4 across 3 -> 2 + 2, 5 -> 3 + 2), each
+  // row's frames as wide as the row allows (the 12 columns shared out; one row alone at most SPREAD_MAX px a frame;
+  // a row the orb's corner cuts into a little narrower, never under restLeast) and all as tall as the row's tallest,
+  // its head tile over the whole first row; rows narrower than the grid centred, all or none. When the rows do not hold
+  // every frame whole but placing the frames one by one at their own heights (as any group's) does, that placement is
+  // used (a small window: nothing folds that would fit); when neither does, the rows, and the group's last frames fold
+  // to tiles, as any group's do. A close leaves its gap (Tidy packs
+  // again), but while the group is alone on the canvas a frame that comes or goes makes its rows again (keepPack).
+
+  function restGroup(rec) {                    // the frame belongs to the resting group
+    var group = rec.group ? groups.get(rec.group) : null;
+    return !!(group && group.rest);
+  }
+
+  function restLeast(m) {                      // the narrowest a resting frame is made: SPAN_TARGET, or the grid's own
+    return Math.min(SPAN_TARGET, colsPx(m.span, m));                            // frame width when that is narrower
+  }
+
+  function restAcross(m) {                     // how many frames a row of the resting group holds at this width
+    var least = restLeast(m), across = 1;
+    [2, 3, 4, 6].forEach(function (count) {
+      if (colsPx(GRID_COLS / count, m) >= least) {
+        across = count;
+      }
+    });
+    return across;
+  }
+
+  function restCounts(count, across) {         // the frames of each row: the fewest rows, the fuller ones first
+    var rows = Math.ceil(count / across), counts = [];
+    for (var row = 0; row < rows; row += 1) {
+      counts.push(Math.floor(count / rows) + (row < count % rows ? 1 : 0));
+    }
+    return counts;
+  }
+
+  function restSpot(occ, m, frames, first, line, last) {   // one row: its frames as wide as they can be where they
+    var wide = Math.floor(GRID_COLS / frames.length);     // fit whole (narrower, never under restLeast, where the
+    while (first === 'alone' && wide > 1 && colsPx(wide, m) > SPREAD_MAX) {   // orb's corner takes the row's end)
+      wide -= 1;                               // one row alone: no frame wider than a spread one
+    }
+    for (var most = wide; wide >= 1 && (wide === most || colsPx(wide, m) >= restLeast(m)); wide -= 1) {
+      measure(frames, m, wide);
+      var lines = 0, used = wide * frames.length;
+      frames.forEach(function (rec) {
+        lines = Math.max(lines, frameLines(rec, m, !!first, wide));
+      });
+      for (var cy = line; cy + lines <= m.lines; cy += 1) {
+        for (var cx = last && cy === last.cy ? last.cx : 0; cx + used <= GRID_COLS; cx += 1) {
+          if (cellsFree(occ, {cx: cx, cy: cy, cw: used, ch: lines})) {
+            return {cx: cx, cy: cy, cw: used, ch: lines, wide: wide};
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  function restRows(occ, m, members, from) {  // the group's frames in even rows, from ``from`` on; null: no room
+    var counts = restCounts(members.length, restAcross(m)), cells = new Map(), spots = [], at = 0;
+    var line = from ? from.cy : 0, last = from;
+    for (var row = 0; row < counts.length; row += 1) {
+      var frames = members.slice(at, at + counts[row]);
+      at += counts[row];
+      var spot = restSpot(occ, m, frames, row > 0 ? '' : (counts.length === 1 ? 'alone' : 'first'), line, last);
+      if (!spot) {
+        return null;
+      }
+      takeCells(occ, spot);
+      spots.push({spot: spot, frames: frames});
+      line = spot.cy + spot.ch;
+      last = {cy: spot.cy, cx: spot.cx + spot.cw - spot.wide};
+    }
+    // Rows narrower than the grid are centred - all of them, or none when one cannot be (the orb's corner, a frame
+    // beside it): the block stays one block.
+    var centred = spots.every(function (one) {
+      var spot = one.spot;
+      return spot.cw >= GRID_COLS || (spot.cx === 0
+        && cellsFree(occ, {cx: spot.cw, cy: spot.cy, cw: GRID_COLS - spot.cw, ch: spot.ch}));
+    });
+    spots.forEach(function (one, index) {
+      var spot = one.spot, dx = centred ? Math.floor((GRID_COLS - spot.cw) * m.unit / 2) : 0;
+      one.frames.forEach(function (rec, place) {
+        var cell = {cx: spot.cx + place * spot.wide, cy: spot.cy, cw: spot.wide, ch: spot.ch, kind: 'full'};
+        if (index === 0) {
+          cell.top = HEAD_H + HEAD_GAP;        // the head tile goes over the whole row: each frame under it
+        }
+        if (dx) {
+          cell.dx = dx;
+        }
+        cells.set(rec.el, cell);
+      });
+    });
+    var head = spots[0].frames[0].el;
+    cells.get(head).headCols = spots[0].spot.cw;
+    return {cells: cells, head: head, after: last};
+  }
+
   // ---- the pack -----------------------------------------------------------------------------------------------------
 
-  function tryPack(list, m, folded, withCard, lenient) {
+  function tryPack(list, m, folded, withCard, lenient, plain) {   // (``plain``: the resting group placed as any other)
     var occ = blockedCells(m), cells = new Map(), heads = new Map(), headed = new Set(), ok = true, over = 0;
+    var rested = new Set(), rest = false;      // the resting groups laid out in rows (each once, at its first frame)
     var after = null;                          // part 5B: the last frame's place - the next goes at or after it, so a
     if (withCard) {                            // group's frames stay together and in their order
       var spot = firstFit(occ, m, m.span, m.sub, 1);
@@ -4963,7 +5067,25 @@
       cells.set(card.el, spot);
     }
     list.forEach(function (rec) {              // first the frames, each on whole rows
-      if (!ok || rec.closed || folded.has(rec)) {
+      if (!ok || rec.closed || folded.has(rec) || rested.has(rec.group)) {
+        return;
+      }
+      if (!plain && restGroup(rec)) {          // the resting group: all its whole frames at once, in even rows
+        rested.add(rec.group);
+        var laid = restRows(occ, m, list.filter(function (one) {
+          return one.group === rec.group && !one.closed && !folded.has(one);
+        }), after);
+        if (!laid) {
+          ok = false;
+          return;
+        }
+        laid.cells.forEach(function (cell, el) {
+          cells.set(el, cell);
+        });
+        headed.add(rec.group);
+        heads.set(rec.group, laid.head);
+        after = laid.after;
+        rest = true;
         return;
       }
       var head = !!rec.group && !headed.has(rec.group);
@@ -4998,22 +5120,31 @@
       cell.kind = 'tile';
       cells.set(rec.el, cell);
     });
-    return ok || lenient ? {m: m, cells: cells, heads: heads, over: over} : null;
+    return ok || lenient ? {m: m, cells: cells, heads: heads, over: over, rest: rest} : null;
   }
 
   function canonical(list, withCard, reset) {  // a fresh pack: the roomiest grid that holds everything; else the
     var none = new Set(), options = densities(), found = null, m = null;   // finest, the oldest folded until it does
-    for (var index = 0; index < options.length; index += 1) {
-      m = gridMetrics(options[index].span, options[index].rows, false);
-      measure(list, m);
-      found = tryPack(list, m, none, withCard, false);
-      if (found) {
-        return withCard ? found : spread(found, list);
+    var finest = options[options.length - 1];
+    // Every frame whole: the resting group in its even rows (at any grid, then the finest with its lines a little
+    // lower); when those rows cannot hold all of it whole, its frames placed one by one at their own heights, as any
+    // group's, if that holds them all whole (a small window); only when neither does, the even rows and the fold.
+    var resting = list.some(function (rec) { return !rec.closed && restGroup(rec); });
+    var ways = resting ? [false, true] : [false];
+    for (var pass = 0; pass < ways.length; pass += 1) {
+      for (var index = 0; index <= options.length; index += 1) {
+        m = index < options.length ? gridMetrics(options[index].span, options[index].rows, false)
+          : gridMetrics(finest.span, finest.rows, true);
+        measure(list, m);
+        found = tryPack(list, m, none, withCard, false, ways[pass]);
+        if (found) {
+          return withCard || index === options.length ? found : spread(found, list);
+        }
       }
     }
     // Not everything fits whole: the finest grid, the oldest folded one by one until it does - with tiles as wide
     // as the frames, with narrow ones, then with every line a little lower; the way that folds the fewest is taken.
-    var finest = options[options.length - 1], order = foldOrder(list, reset), folded = none, best = null;
+    var order = foldOrder(list, reset), folded = none, best = null;
     for (var way = 0; way < 3; way += 1) {
       m = gridMetrics(finest.span, finest.rows, way === 2, way === 1);
       measure(list, m);
@@ -5058,8 +5189,8 @@
 
   function spread(found, list) {               // part 3: one to three frames use the screen - each wider (up to
     var count = list.filter(function (rec) { return !rec.closed; }).length;     // SPREAD_MAX) while they still stand
-    if (count < 1 || count > SPREAD_MOST || !oneBand(found)) {                  // side by side, then the band centred
-      return found;
+    if (count < 1 || count > SPREAD_MOST || found.rest || !oneBand(found)) {    // side by side, then the band centred
+      return found;                            // (the resting group's rows are already as wide as they may be)
     }
     var best = found;
     SPANS.forEach(function (width) {
@@ -5127,6 +5258,37 @@
     if (shifted && todo.length) {
       return null;                             // a centred band and something new: packed afresh (part 3)
     }
+    // The resting group alone on the canvas: a frame that came or went makes its rows again (they stay even). Under
+    // answers, a resting group that is new as a whole takes its rows in the room left; else what is new is placed.
+    var shown = list.filter(function (rec) { return !rec.closed; });
+    var known = new Set(list.map(function (rec) { return rec.el; })), went = false;
+    lay.cells.forEach(function (cell, el) {
+      went = went || (cell.kind === 'full' && !known.has(el));
+    });
+    if (shown.length && shown.every(restGroup) && (went || todo.some(function (item) { return item && item.full; }))) {
+      return null;
+    }
+    var restNew = new Map();
+    todo.forEach(function (item) {
+      if (item && item.full && restGroup(item.rec)) {
+        restNew.set(item.rec.group, (restNew.get(item.rec.group) || []).concat([item.rec]));
+      }
+    });
+    restNew.forEach(function (members, id) {
+      var whole = list.every(function (rec) {  // (none of its whole frames placed already)
+        var was = lay.cells.get(rec.el);
+        return rec.group !== id || rec.closed || members.indexOf(rec) >= 0 || (!!was && was.kind === 'tile');
+      });
+      var laid = whole && ok ? restRows(occ, m, members, null) : null;
+      if (!laid) {
+        return;
+      }
+      laid.cells.forEach(function (cell, el) {
+        cells.set(el, cell);
+      });
+      heads.set(id, laid.head);
+      todo = todo.filter(function (item) { return !item || members.indexOf(item.rec) < 0; });
+    });
     todo.forEach(function (item) {
       var cell = null;
       if (!ok) {
@@ -5157,7 +5319,7 @@
 
   function sameCell(a, b) {
     return !!a && !!b && a.cx === b.cx && a.cy === b.cy && a.cw === b.cw && a.ch === b.ch
-      && (a.top || 0) === (b.top || 0) && (a.dx || 0) === (b.dx || 0);
+      && (a.top || 0) === (b.top || 0) && (a.dx || 0) === (b.dx || 0) && (a.headCols || 0) === (b.headCols || 0);
   }
 
   function samePack(a, b) {                    // two packs place everything alike
@@ -5374,7 +5536,8 @@
       head.el.classList.remove('away');
       syncHead(group);
       var over = cellBox(cell, m);
-      putAt(head.el, {x: over.x, y: over.y - (cell.top || 0), w: over.w, h: HEAD_H}, fresh);
+      putAt(head.el, {x: over.x, y: over.y - (cell.top || 0), w: cell.headCols ? colsPx(cell.headCols, m) : over.w,
+                      h: HEAD_H}, fresh);      // (the resting group's: over its whole first row)
       fitHead(head);                           // its counts against the width it has now
       if (fresh && K > 0 && head.el.animate) {
         head.el.animate([{opacity: 0}, {opacity: 1}], {duration: 220 * K, easing: easeOut});
@@ -5393,6 +5556,7 @@
     lay.cells = found.cells;
     lay.heads = found.heads;
     lay.m = m;
+    lay.rest = !!found.rest;                   // (the resting group in its even rows: the probes read it)
     list.forEach(function (rec) {              // a body its place cuts says so (Enter opens it big: all of it)
       var body = rec.body, rows = body ? body.querySelector(':scope > .rs-rows') : null;   // (a resting frame's rows
       rec.el.classList.toggle('cut', !rec.sat && !rec.closed && !!body                    // give way to its button)
@@ -5906,7 +6070,8 @@
       win: [window.innerWidth, window.innerHeight],
       grid: m ? {span: m.span, rows: m.rows, sub: m.sub, tile: m.tile, tight: m.tight, gap: m.gap} : null,
       orb: [Math.round(window.innerWidth - CORNER_INSET - reach), Math.round(window.innerHeight - CORNER_INSET - reach)],
-      items: items, heads: heads, untidy: lay.untidy, over: lay.over, packs: lay.packs, filter: filter,
+      items: items, heads: heads, rest: !!lay.rest, untidy: lay.untidy, over: lay.over, packs: lay.packs,
+      filter: filter,
       settled: !lay.timer && !!lay.packedAt && lay.packedAt[0] === root.clientWidth
         && lay.packedAt[1] === root.clientHeight,       // part 5A: no pack waits and the last was for this room
       top: canvas ? {row: box(canvas.tr), tl: box(canvas.tl), folded: canvas.folded.slice(), more: !canvas.more.hidden,
