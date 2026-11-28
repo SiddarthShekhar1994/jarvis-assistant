@@ -467,7 +467,8 @@ class AppSettingsTests(unittest.TestCase):
         stage.select_group("instant")
         self.assertEqual(set(stage.change_buttons), {"Temperature"})
         self.assertEqual(config_path.read_bytes(), before)
-        self.assertEqual(stage.findChildren(QLineEdit), [])          # no field while no time editor is open
+        sites = app.c.site_signins.panel.field                       # LIVE and privacy's "Sites ... signed in"
+        self.assertEqual([edit for edit in stage.findChildren(QLineEdit) if edit is not sites], [])   # no time field
 
 
 if __name__ == "__main__":

@@ -15,7 +15,10 @@ are.
     AddressBook                     the run's numbered addresses (results and links keep their number for the whole
                                     run) and every address seen in it, as exact strings: the firewall's list
     WebSession(browser, engine)     one run's use of the window: search, open_page, more, look, show. Thread-safe, one
-                                    page at a time (tool calls may come side by side: they wait their turn)
+                                    page at a time (tool calls may come side by side: they wait their turn).
+                                    use_signins(hosts, on_signed_in): open_page on a site the owner listed asks the
+                                    browser for it signed in (load_signed_in, never a search); a page that came so
+                                    makes the run's firewall strict before a word of it is read (Opened.signed_in)
     Browser                         the seam it drives (agent.browser.BrowserClient; a fake in the tests)
     workspace_name(path, token)     a workspace page's address back to a file's name, "" when it is not this task's
     suspect_lines(text)             how many lines hold a strong sign of an order to Jarvis (guard.strong_order)
@@ -38,7 +41,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 from urllib.parse import quote, quote_plus, unquote, urlsplit
 
-from .. import snapshots
+from .. import site_signins, snapshots
 from ..actions import body_links, web_link_problem
 from ..desktop import guard
 from ..format_chars import drop_invisible
@@ -79,11 +82,14 @@ W_NOT_PUBLIC, W_NO_PAGE, W_NO_RESULTS, W_NOT_LOADED, W_TOO_SLOW, W_NO_ANSWER, W_
     "not_public", "no_page", "no_results", "not_loaded", "too_slow", "no_answer", "stopped", "busy", "no_number")
 W_CRASHED, W_NO_ENGINE, W_TOO_BIG, W_NO_WINDOW, W_TEST_RUN = "crashed", "no_engine", "too_big", "no_window", "test_run"
 W_REFUSED, W_HIDDEN = "site_refused", "hidden"
+W_SIGNED_IN = "signed_in_care"    # a page that came signed in, whose care could not be taken: not read
 # What a wall is (wall_kind), and how a search page fared.
 WALL_CAPTCHA, WALL_CONSENT, WALL_BLOCK = "captcha", "consent", "block"
 T_NO_RESULTS, T_NOT_LOADED, T_NO_TIME = "no_results", "not_loaded", "no_time"
 
 NO_WINDOW_TEXT = "Jarvis's web window is not available on this PC. Say so in your report."
+SIGNED_IN_CARE_TEXT = ("That page opened signed in as the owner, but Jarvis could not take the care such a page needs, "
+                       "so it was not read. Say so in your report.")
 NOT_PUBLIC_TEXT = "Jarvis opens only public https pages ({why}). Choose another address."
 NO_NUMBER_TEXT = "No address has that number in this task. Use a number from a result or a link you were given."
 NO_PAGE_TEXT = "No page is open in the window now. Open one with open_page first."
@@ -614,20 +620,23 @@ class Opened:
     shot: snapshots.ShotResult | None = field(default=None, repr=False)
     live_address: str = field(default="", repr=False)
     hidden: bool = False          # the page holds a hidden message (guard.hidden_message)
+    signed_in: str = field(default="", repr=False)   # the host it was read on signed in as the owner ("": not)
 
 
 class _Page:
     """The page in the window: what was read of it and how far."""
 
-    __slots__ = ("title", "address", "text", "offset", "total", "still_loading", "live_address", "hidden")
+    __slots__ = ("title", "address", "text", "offset", "total", "still_loading", "live_address", "hidden",
+                 "signed_in")
 
     def __init__(self, title: str, address: str, text: str, total: int, still_loading: bool, live_address: str,
-                 hidden: bool = False) -> None:
+                 hidden: bool = False, signed_in: str = "") -> None:
         self.title, self.address, self.text, self.total = title, address, text, total
         self.offset = 0
         self.still_loading = still_loading
         self.live_address = live_address
         self.hidden = hidden
+        self.signed_in = signed_in        # the page's host when it opened signed in as the owner (site_signins)
 
     def __repr__(self) -> str:        # never its address or words
         return f"_Page({len(self.text)} characters, at {self.offset})"
@@ -652,9 +661,42 @@ class WebSession:
         self._turn = threading.Lock()
         self._page: _Page | None = None
         self._results_shown = False
+        self._signin_hosts: Callable[[], Any] | None = None   # the owner's listed sites (site_signins)
+        self._on_signed_in: Callable[[], None] | None = None  # the run's firewall goes strict (go_strict)
 
     def __repr__(self) -> str:
         return f"WebSession({self.book!r})"
+
+    def use_signins(self, hosts: Callable[[], Any], on_signed_in: Callable[[], None]) -> None:
+        """open_page may open a page on a site the owner listed (``hosts()``) signed in as him, with Jarvis's sign-in
+        profile (agent.browser's load_signed_in); before anything of such a page is read, ``on_signed_in()`` is called
+        (the run's firewall goes strict: what the owner's account shows is private). Never a search."""
+        self._signin_hosts = hosts
+        self._on_signed_in = on_signed_in
+
+    def signed_in_host(self, address: str) -> str:
+        """The listed site ``address`` is on ("" when none, or nothing is listed)."""
+        hosts = self._signin_hosts
+        if hosts is None or self._on_signed_in is None:
+            return ""
+        try:
+            listed = tuple(hosts() or ())
+        except Exception:  # noqa: BLE001 - unknown: no site
+            return ""
+        return site_signins.listed_host(address, listed) if listed else ""
+
+    def _care_for(self, loaded: snapshots.ShotResult, final: str) -> str:
+        """A page that came signed in: the run's firewall goes strict before a word of it is read; its host for the
+        step's note. One whose care can't be taken is not read (fail-closed)."""
+        if not getattr(loaded, "signed_in", False):
+            return ""
+        try:
+            if self._on_signed_in is None:
+                raise RuntimeError("no care")
+            self._on_signed_in()
+        except Exception:  # noqa: BLE001 - not read
+            raise WebRefused(W_SIGNED_IN, SIGNED_IN_CARE_TEXT) from None
+        return site_signins.page_host(final) or "this site"
 
     @contextmanager
     def _one_at_a_time(self, call: Call) -> Iterator[Browser]:
@@ -754,15 +796,17 @@ class WebSession:
         self._page = None
         self._results_shown = False
         seconds = min(LOAD_TIMEOUT_S, call.left())
-        loaded = browser.load(address, timeout_s=seconds, cancelled=call.cancelled)
+        load = getattr(browser, "load_signed_in", None) if self.signed_in_host(address) else None
+        loaded = (load if callable(load) else browser.load)(address, timeout_s=seconds, cancelled=call.cancelled)
         call.check()
         if not loaded.ok:
             raise _load_failure(loaded, seconds)
+        signed_in = self._care_for(loaded, loaded.final_url or address)
         read = self._read(browser, call)
         final = loaded.final_url or read.url or address
         if not web_link_problem(final):
             self.book.see(final)
-        page = _Page(read.title, final, read.text, read.length, loaded.still_loading, final, read.hidden)
+        page = _Page(read.title, final, read.text, read.length, loaded.still_loading, final, read.hidden, signed_in)
         self._page = page
         links = []
         for words, link in read.links[:MAX_LINKS]:
@@ -799,7 +843,7 @@ class WebSession:
         return Opened(page.title, page.address, page.text[first:last].strip("\n"), first + 1 if last > first else 0,
                       last, len(page.text), links, last < len(page.text), page.total > TEXT_KEEP, page.still_loading,
                       not first and len(page.text) < _WALL_SHORT and bool(wall_kind(page.text, page.address)), shot,
-                      page.live_address, page.hidden)
+                      page.live_address, page.hidden, page.signed_in)
 
     def more(self, call: Call) -> Opened:
         """The next part of this page's text; the window really scrolls there. A page that grows as it scrolls is read

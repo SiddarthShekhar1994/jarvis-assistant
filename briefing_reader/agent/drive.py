@@ -25,7 +25,10 @@ when none did), or until the tab is closed (close_tab destroys its page and prof
 field takes one value a page: what Jarvis typed is never replaced, so the card can name every value the page may have
 kept. A submit, Enter in a field, a button whose words commit (guard.COMMIT_WORDS and a few more), and any press while
 the tab holds owner values put a Send card up; nothing else does, and nothing acts on that tab while it is up. Values
-from the owner's mail, files or calendar may go only through that card, each tagged.
+from the owner's mail, files or calendar may go only through that card, each tagged. A tab whose page opened signed in
+as the owner (site_signins: a site he listed) is read only: every button there puts the Send card up, and a link whose
+words would sign out, delete, unsubscribe or commit is not followed (D_SIGNED_IN); agent.browser refuses its form
+submits and its writes unless the card's click presses them.
 
 Nothing here logs anything; no repr holds a value, a label, a name, an address or a host.
 """
@@ -46,6 +49,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
+from .. import site_signins
 from ..actions import link_host, web_link_problem
 from ..desktop import guard
 from ..snapshots import LOCAL_BASE_URL
@@ -97,6 +101,7 @@ D_TABS, D_NO_TAB, D_CARD_UP, D_DECLINED, D_NO_SEAL = "tabs_full", "no_tab", "car
 D_WRONG_KIND, D_NO_OPTION, D_NO_LINK, D_BAD_INPUT = "wrong_kind", "no_option", "no_link", "bad_input"
 D_TYPED_ONCE, D_MISSING, D_MOVED, D_OTHER_WINDOW = "typed_once", "field_gone", "page_moved", "other_window"
 D_TOO_LONG, D_TOO_MANY, D_NOT_CLOSED = "too_long", "too_many_values", "not_closed"
+D_SIGNED_IN = "signed_in_read_only"   # a link that would change the owner's account, on a page signed in as him
 REFUSAL_CODES = frozenset({D_SECRET_FIELD, D_FILE_FIELD, D_PAYMENT, D_SECRET_VALUE, D_CARD_NUMBER, D_IBAN,
                            D_NATIONAL_ID})
 # What came of an approved Send (SendOutcome.code).
@@ -148,6 +153,9 @@ TOO_MANY_TEXT = ("That form carries more values the page set itself than a card 
                  "send it. Leave it for the owner and say so in your report.")
 NOT_CLOSED_TEXT = ("Tab {tab} could not be closed just now, so it still holds what Jarvis typed and the window stays "
                    "sealed. Call close_tab {tab} again.")
+SIGNED_IN_LINK_TEXT = ("This page is signed in as the owner, and Jarvis only reads there: he doesn't follow a link "
+                       "that would sign out, delete, unsubscribe or change something. Leave it for the owner and say "
+                       "so in your report.")
 
 # Words of a button that commits besides guard.COMMIT_WORDS: one more way of saying it.
 _MORE_COMMIT = guard._phrases("subscribe", "sign up", "signup", "register", "apply", "book", "reserve", "donate",
@@ -951,6 +959,12 @@ def _host_of(address: str) -> str:
     return link_host(address) if address and not web_link_problem(address) else ""
 
 
+def _signed_in_on(before: str, final: str) -> str:
+    """A tab whose page was signed in stays so after a click or a Send in it (its profile is the page's for life, and
+    its main frame never leaves the listed sites): the host now, "" for a tab that was not."""
+    return (site_signins.page_host(final) or before) if before else ""
+
+
 def _folded(text: str) -> str:
     return " ".join((text or "").split()).casefold()
 
@@ -1354,22 +1368,26 @@ class DriveSession(WebSession):
     def click(self, ref: Any, call: Call, taint_hits: Callable[[str], Sequence[str]] = lambda _text: ()) -> Clicked:
         """A link opens as open_page would (in a new tab when it opens a new window), refused while a tab holds owner
         values, and only when it is still the address the firewall judged. A submit, a button whose words commit, or
-        any button of a tab that holds owner values gives the plan of a Send card. Any other button is clicked in
-        place."""
+        any button of a tab that holds owner values or is signed in as the owner gives the plan of a Send card. Any
+        other button is clicked in place. Signed in, a link whose words would change the account is refused."""
         judged, self._judged_link = self._judged_link, None
         with self._turn_for(call) as browser:
             tab = self._tab(None)
             control = self._control(tab, ref)
+            signed_in = tab.page.signed_in if tab.page is not None else ""
             if control.role == R_LINK:
                 if not control.href:
                     raise WebRefused(D_NO_LINK, NO_LINK_TEXT)
                 if self._links_judged and judged != control.href:   # the tab or the page changed since the check
                     raise WebRefused(D_STALE, STALE_TEXT)
+                if signed_in and (commits(control.name) or site_signins.signs_out(control.name)):
+                    raise WebRefused(D_SIGNED_IN, SIGNED_IN_LINK_TEXT)   # read only, signed in as the owner
                 opened = self._load(browser, control.href, call, control.blank)
                 return Clicked(opened=opened, label=control.name)
             if control.role not in (R_BUTTON, R_SUBMIT):
                 raise WebRefused(D_WRONG_KIND, WRONG_KIND_TEXT["click"])
-            if control.role == R_SUBMIT or tab.held or commits(control.name):
+            # Signed in as the owner the page is read only: every button goes to the owner's Send card.
+            if control.role == R_SUBMIT or tab.held or commits(control.name) or signed_in:
                 return Clicked(plan=self._plan(browser, tab, control, call, taint_hits), label=control.name)
             gen = tab.book.gen if tab.book is not None else ""
             done = browser.act(tab.id, click_script(gen, control.n), settle_s=CLICK_SETTLE_S,
@@ -1391,7 +1409,8 @@ class DriveSession(WebSession):
             final = done.final_url or read.url
             if final and not web_link_problem(final):
                 self.book.see(final)
-            page = web._Page(read.title, final, read.text, read.length, False, final, read.hidden)
+            page = web._Page(read.title, final, read.text, read.length, False, final, read.hidden,
+                             _signed_in_on(signed_in, final))
             tab.page = page
             links = []
             for words, link in read.links[:web.MAX_LINKS]:
@@ -1574,6 +1593,7 @@ class DriveSession(WebSession):
             if self._compared(again) != plan.snapshot:
                 tab.pending = None
                 return SendOutcome(S_CHANGED)
+            signed_in = tab.page.signed_in if tab.page is not None else ""
             done = browser.press_approved(tab.id, press_script(plan.gen, plan.ref, plan.keys, raw), plan.hosts,
                                           settle_s=SETTLE_S, timeout_s=self._wait(call, SETTLE_S + web.SCRIPT_TIMEOUT_S),
                                           cancelled=call.cancelled)
@@ -1599,7 +1619,8 @@ class DriveSession(WebSession):
             final = done.final_url or read.url
             if final and not web_link_problem(final):
                 self.book.see(final)
-            tab.page = web._Page(read.title, final, read.text, read.length, False, final, read.hidden)
+            tab.page = web._Page(read.title, final, read.text, read.length, False, final, read.hidden,
+                                 _signed_in_on(signed_in, final))
             return SendOutcome(S_SENT, read.title, final, read.text[:AFTER_SEND_CHARS], read.hidden)
 
     def _read_tab(self, browser: DriveBrowser, tab: _Tab, call: Call) -> web.PageRead | None:

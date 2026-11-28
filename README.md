@@ -3355,6 +3355,44 @@ sign-in; then he says so. A value he typed is never in a line he says, never sai
 logged: logs keep kinds, counts, durations, how a Send card ended and refusal codes, never an address,
 a label or a value.
 
+#### Sites Jarvis may use signed in
+
+Normally every page Jarvis opens for a task is off the record: a fresh, empty window that is signed
+in nowhere and keeps nothing. You can give him a short list of sites he may read **signed in as
+you**, such as your web mail or a members' area, so a task can read what you would see there.
+
+**What it does.** For a site on the list (the site itself, or any part of it such as
+`mail.example.com` for `example.com`), a page a task opens there uses the sign-in you made in
+Jarvis's own window, instead of an empty, signed-out one. Everything else stays exactly as before:
+searches, every other page, the pictures in LIVE and research, and the board never use it. The list is empty to begin with, so nothing is
+signed in until you add a site. A step in LIVE that read such a page says "signed in as you on"
+and the site's name.
+
+**You sign in yourself, in Jarvis's own window.** Open Settings › LIVE and privacy, find "Sites
+Jarvis may use signed in", type a site's name (just the name, such as `example.com`: no page, no
+`www` needed) and click **Add**. Then click **Sign in…** next to it: a plain window of Jarvis's
+opens on that site; sign in as you normally would, then click **Done**. That sign-in is kept in a
+folder of Jarvis's own (`site-signins` in the data folder). Jarvis never imports, reads or copies
+anything from your own web browser or any other: not cookies, not passwords, not history. If a site
+signs you in through another site (a "Sign in with..." button), add that site to the list too, or
+Jarvis can't follow it there. Passkeys don't work in this window; use a password and code.
+
+**Read only.** On a signed-in page Jarvis only reads. He never sends a form, posts, buys, deletes
+or changes anything there on his own: any form, any button and anything that would write to the
+site is refused unless it goes through a Send card that you click, exactly as when he fills in a
+public page. He doesn't follow a link that would sign out, delete, unsubscribe or change your
+account, and the page can't take him off the sites on your list. Downloads stay refused. What such a
+page shows is treated as private, like your mail: from then on in that task nothing goes to the web
+without the usual checks.
+
+**Removing a site or forgetting everything.** **Remove** next to a site takes it off the list and
+deletes that site's sign-in cookies from Jarvis's window. **Forget every sign-in** (click it twice)
+signs Jarvis out of every site at once and deletes his whole sign-in folder; your list stays, signed
+out. If the folder is still in use at that moment, it is deleted the next time Jarvis starts, before
+anything can use it. The list itself is kept in `site_signins.json` in the data folder; a damaged
+file means no sites at all. The logs say only how many sites there are and why something was
+refused, never a site's name or an address.
+
 ### Capture: pictures, PDFs, text and calendar files
 
 Drop a screenshot, a photo, a PDF, a text file or a calendar file (`.ics`) on
