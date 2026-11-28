@@ -54,8 +54,10 @@ click left the page's focus on <body> leaves it there and the board's scroll as 
 answer that made the room, parked while the owner read, lands once quiet), lively and off. Round 5: a closed frame's own
 end with the page's expiry before the app's removal keeps the keyboard in the closed frame (no reading or focus report,
 no scroll, its keys doing nothing), then a staying frame has it after remove_group and after remove, never <body>,
-lively and off; and every probe's page plays the probe's own motion level whatever this PC's "Show animations" says
-(Chromium told no reduced motion), with one probe told reduced motion showing the page's own rule still holds. Part
+lively and off (the canvas-pins brief: first the keyboard on its Bring back holds the row past the app's CLOSE_S - no
+expiry, no removal, the hold told the app - and moving it to the frame lets the hold go); and every probe's page
+plays the probe's own motion level whatever this PC's "Show animations" says (Chromium told no reduced motion), with
+one probe told reduced motion showing the page's own rule still holds. Part
 6, Ask's typed frames: a model's answer with markup, scripts, javascript: and http: addresses and bidi characters in
 every string, through board.ask_frames and board.protocol into the real page - only elements its renderers make,
 no attribute from data in a frame's body, no request, no script run, its words whole as text; the page refusing what
@@ -697,6 +699,8 @@ class WaysTests(BoardProbeCase):
         self.assertTrue(closing["closed"].endswith("Bring back"))
         self.assertTrue(report["closing_flags"]["closed"])             # the app knows
         self.assertEqual(report["closing_active"], "f-act")            # the focus on Bring back
+        self.assertEqual(report["closing_held"], 1)                    # ... holds it past CLOSE_S (canvas-pins brief)
+        self.assertTrue(report["closing_held_feed"]["closed"])
         self.assertEqual(report["closed_gone"], 0)                     # then it left the board
         self.assertEqual(report["closed_gone_feed"], {})
         self.assertNotIn("closed", _classes(report["brought_back"]))
@@ -1230,7 +1234,9 @@ class ExpiryTests(BoardProbeCase):
     def test_a_closed_frame_s_own_end_keeps_the_keyboard_on_the_board(self) -> None:
         # The owner closed a frame from the keyboard (its Bring back has the focus). The page's own expiry hid that
         # Bring back before the app's removal came, and the keyboard fell to <body>: remove_group (the group's last
-        # frame) and remove (not its last) then had nothing to give back, and the board's keys were dead.
+        # frame) and remove (not its last) then had nothing to give back, and the board's keys were dead. The
+        # canvas-pins brief: while the keyboard is on that Bring back the row stays (the page holds it and tells the
+        # app); once the keyboard is on the frame itself the hold goes and the expiry comes as before.
         report = self.report("expiry")
         self.assertTrue(report["ready"])
         for motion in ("lively", "off"):
@@ -1240,6 +1246,10 @@ class ExpiryTests(BoardProbeCase):
                     frame = row["frame"]
                     self.assertTrue(row["closed"])
                     self.assertEqual(row["after_delete"], f"bring_back:{frame}")
+                    self.assertTrue(row["held"])                                # past CLOSE_S: still there ...
+                    self.assertTrue(row["held_shown"])                          # ... its Bring back offered
+                    self.assertEqual(row["held_active"], f"bring_back:{frame}")
+                    self.assertEqual(row["holds"], [[frame, True], [frame, False]])
                     self.assertTrue(row["marked_before_expiry"])                # (the window's marks came first)
                     self.assertEqual(row["expired"], frame)                     # the page's own expiry ...
                     self.assertTrue(row["expired_first"])                       # ... while the app still had it

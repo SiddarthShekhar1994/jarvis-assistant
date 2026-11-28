@@ -69,9 +69,11 @@ Cases:
                parked answer landing once quiet; lively and off
     expiry     part 5c fixes, round 5: a closed frame's own end with the app's controller, the page's expiry first (its
                8 s made short once) and the app's removal later (CLOSE_S made longer): real Delete on a group's last
-               frame (remove_group) and on one that is not (remove), the row cut by the view's edge; the keyboard stays
-               in the closed frame at the expiry (no reading or focus report, no scroll; Enter, P and Delete there do
-               nothing), then a staying frame has it, never <body>; lively and off
+               frame (remove_group) and on one that is not (remove), the keyboard on its Bring back holding the row
+               past CLOSE_S (the canvas-pins brief: no expiry, no removal, the app told), then the row cut by the
+               view's edge and the keyboard moved to the frame (the hold let go); the keyboard stays in the closed
+               frame at the expiry (no reading or focus report, no scroll; Enter, P and Delete there do nothing), then
+               a staying frame has it, never <body>; lively and off
     reduced    part 5c fixes, round 5: the page's own reduced motion (Chromium told reduced motion, as this PC's "Show
                animations" off would tell it): lively plays as off (K and --k 0)
     typed      part 6, Ask's typed frames: a model's answer (invented) with markup, scripts, javascript: and http:
@@ -1565,6 +1567,10 @@ def ways_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> d
     report["closing"] = next(item for item in page()["frames"] if item["id"] == closable)
     report["closing_flags"] = desk.feed.flags(closable)
     report["closing_active"] = page()["active"]
+    pump(1.9)                                    # past CLOSE_S: the keyboard on its Bring back holds the row
+    report["closing_held"] = [item["id"] for item in page()["frames"]].count(closable)
+    report["closing_held_feed"] = desk.feed.flags(closable)
+    main_world(board, f"{frame_js(closable)}.focus({{preventScroll: true}}); 1")    # off the row: CLOSE_S again
     pump(1.9)
     report["closed_gone"] = [item["id"] for item in page()["frames"]].count(closable)
     report["closed_gone_feed"] = desk.feed.flags(closable)
@@ -3032,7 +3038,8 @@ def big_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> di
 # made short once when asked (window.__expiryMs), so its own expiry comes well before the app's removal - the order the
 # owner meets whenever the app's timer is a few ms later than the page's; every other timer keeps its time. Where the
 # keyboard goes (a frame by its id: the frame itself, its Bring back, or inside it) and, after the expiry's style
-# update, where it is and the board's scroll.
+# update, where it is and the board's scroll. The canvas-pins brief: a row with the keyboard on its Bring back is held
+# (no expiry, no removal); the keyboard moved to the frame itself lets it go, and CLOSED_MS starts again then.
 _EXPIRY_HOOKS = r"""(function () {
   var later = window.setTimeout;
   window.__expiryMs = 0;
@@ -3111,6 +3118,7 @@ def expiry_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) ->
     asked: list[list[str]] = []
     reading_posts: list[list[bool]] = []
     focus_posts: list[str] = []
+    holds: list[list[Any]] = []
 
     def answer(key: int, names: list[tuple[str, str]]) -> list[str]:
         desk._watch.reset()                      # (nobody reads: never parked)
@@ -3125,24 +3133,33 @@ def expiry_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) ->
         return str(main_world(board, "window.__name(document.activeElement)"))
 
     def close_one(frame_id: str, route: str) -> dict[str, Any]:
-        """Real Delete on ``frame_id`` (its own key target: a satellite's row, else the frame), then its row cut by the
-        view's edge; the page's expiry; Enter, P and Delete on it; the app's removal."""
+        """Real Delete on ``frame_id`` (its own key target: a satellite's row, else the frame): its Bring back has the
+        keyboard and holds the row past the app's CLOSE_S; then its row cut by the view's edge, the keyboard moved to
+        the frame itself (the hold let go: CLOSED_MS again, made short), the page's expiry; Enter, P and Delete on it;
+        the app's removal."""
         board.web_view().setFocus(Qt.FocusReason.OtherFocusReason)
         wait_until(lambda: view.keeps_space(QApplication.focusWidget()), 5)
         main_world(board, f"(function () {{ var f = {frame_js(frame_id)}; (f.classList.contains('sat') ? "
                           "f.querySelector('.f-sat') : f).focus(); })(); 1")
         pump(0.2)
-        main_world(board, "window.__seen.trail = []; window.__seen.expired = ''; window.__seen.atExpiry = ''; "
-                          "window.__expiryMs = 1500; 1")
+        main_world(board, "window.__seen.trail = []; window.__seen.expired = ''; window.__seen.atExpiry = ''; 1")
+        holds_from = len(holds)
         QTest.keyClick(QApplication.focusWidget(), Qt.Key.Key_Delete)
         pump(0.3)
         row: dict[str, Any] = {"route": route, "frame": frame_id, "group": desk.feed.group_of(frame_id),
                                "after_delete": active(), "closed": bool(desk.feed.flags(frame_id).get("closed"))}
         reading_from, focus_from = len(reading_posts), len(focus_posts)
+        pump(desk.CLOSE_S + 0.8)                 # past the app's CLOSE_S: the keyboard on Bring back holds the row
+        row["held"] = frame_id in desk.feed.frame_ids() and bool(desk.feed.flags(frame_id).get("closed"))
+        row["held_shown"] = main_world(board, f"{frame_js(frame_id)}.classList.contains('expired')") is False
+        row["held_active"] = active()
         row["cut"] = json.loads(main_world(board, _CUT_ROW % json.dumps(frame_id)))
         pump(0.1)
         row["scroll_before"] = main_world(board, "document.getElementById('board').scrollTop")
         row["marked_before_expiry"] = main_world(board, "window.__seen.expired") == ""
+        main_world(board, f"window.__expiryMs = 1500; {frame_js(frame_id)}.focus({{preventScroll: true}}); 1")
+        pump(0.2)
+        row["holds"] = holds[holds_from:]        # on (Delete put the keyboard on Bring back), then off
         wait_until(lambda: main_world(board, "window.__seen.atExpiry") != "", 6)
         seen = json.loads(main_world(board, "JSON.stringify(window.__seen)"))
         row.update(expired=seen["expired"], at_expiry=seen["atExpiry"], scroll_at_expiry=seen["scrollAtExpiry"],
@@ -3183,6 +3200,7 @@ def expiry_case(wait_until: Any, pump: Any, main_world: Any, settle_end: Any) ->
             for name in ("openRequested", "closeRequested", "bringBackRequested"):
                 getattr(board, name).connect(lambda frame_id, n=name: asked.append([n, frame_id]))
             board.pinRequested.connect(lambda frame_id, on: asked.append(["pinRequested", frame_id, on]))
+            board.holdRequested.connect(lambda frame_id, on: holds.append([frame_id, on]))
             board.readingChanged.connect(lambda pointer, focus: reading_posts.append([pointer, focus]))
             board.frameFocused.connect(focus_posts.append)
         board.set_motion(motion)

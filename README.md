@@ -1126,8 +1126,22 @@ LIVE keeps them.
   a line drawn into the orb, with "Board cleared · Bring back" for a few
   seconds. **P** (or a frame's pin) keeps a frame and its place, six at most;
   **Delete** (or its close) leaves "Closed: ..." with **Bring back** for 8
-  seconds. At most 24 frames in 8 groups: past that, the oldest group without a
-  pin leaves whole. Frames last for the session: they are never saved.
+  seconds. While the pointer is over that row, or the keyboard is on its
+  **Bring back**, it stays; its 8 seconds start again once you move away. At
+  most 24 frames in 8 groups: past that, the oldest group without a pin leaves
+  whole. Frames last for the session, except pins (below).
+- **Pins come back after a restart.** The frames you pinned are kept on this
+  PC (`board_pins.json` in the data folder) and come back pinned, in the same
+  order, in one group "Pinned" when the board starts (on the canvas, with the
+  window; beside the conversation, with your first question). Kept: Jarvis's
+  own answers (a web research's answer and its sources, tables, charts,
+  timelines, maths, a big number), a capture's frame, the to-do list, and a
+  document's or sheet's frame. Never kept, because Jarvis never writes them to
+  a file: a mail thread or a reply waiting on Approvals, a day or a week of
+  your calendar, a page picture, a web search's results, the follow-ups and
+  the "Now" group; such a pin lasts for the session only. Unpinning or closing
+  a frame takes it out of the kept pins (Bring back puts it back); **Clear
+  view** never takes a pinned frame.
 - **Reading is safe.** While the pointer is over the frames (or the keyboard is
   in them, or you scrolled there in the last 8 seconds), a new answer does not
   move them: "New answer above · Show" appears, and it lands on **Show** or
@@ -5913,6 +5927,8 @@ starting", "Board: page ready in 420 ms", "Board: ready 640 ms after it
 started", "Board: an answer put up 5 frame(s) in 3 ms", "Board: 1 frame(s)
 changed", "Board: frame f3 open big" and "... back on the board", "Board:
 cleared (1 frame(s) kept)", "Board: a pin was refused (6 pinned at most)",
+"Board: 3 pin(s) kept", "Board: 3 kept pin(s) came back", "Board:
+board_pins.json is damaged; no pins came back",
 "Board: a parked answer landed", "Board: a message was refused (size)", "Board:
 a request of the page was dropped (layout, rate)", "Board: the page's renderer
 stopped (crashed); loading the board again (1 of 2)" (a third stop shows the
@@ -5963,6 +5979,7 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `conversation.json` | The last 24 hours of the conversation (at most 100 entries: your requests, Jarvis's answers and results as the Transcript showed them, each with its time; never your memory lines), shown again at a start and given to Ask as `<conversation>` (a web research's question and answer are marked and never given; see [Ask remembers the conversation](#ask-remembers-the-conversation)). Written by the app a moment after the conversation changes and when it closes; older entries leave it at the start and within the hour after they turn a day old. **Clear conversation** in the Transcript deletes it; you can delete it yourself while Jarvis is closed. A broken file is ignored and replaced. Never logged. |
 | `memory.json` | The productivity bundle's memory ([Memory](#memory-the-memory-tab)): **the only file with your own text** - your notes, typed or suggestions you kept, each with an id, TOLD or SUGGESTED and when it was made or changed; and, for suggestions you dismissed, a short hash of each word (not the sentence; a common word or a name could be guessed from its hash). Written only by the app (the command line reads it without changing it). Delete it (also while Jarvis runs: the next Ask, MEMORY and any change take the file as it is), or delete the notes in MEMORY, to forget everything. If it can't be read, Jarvis never overwrites it (MEMORY says so). |
 | `standing.json` | The [standing agents and rules](#standing-agents-and-rules) as you set them up: each one's name, your own words or sentence, its filters, when it runs, what it may line up, its tidy-up (and its label's id and name), its status and cap, its dry run's counts and the Google account ids Turn on recorded. Written only by the app, on your clicks. A damaged file, or one a newer version wrote, is kept read only: nothing runs and nothing is saved over it (the Agents screen says so). Delete it to remove every agent and rule. |
+| `board_pins.json` | The [board's](#frames-on-the-canvas) pinned frames that may be kept (at most six, in your order): each one's kind, title, its words as the frame shows them, its source (such as `doc:<id>` or a table's title) and the card its amber chip opens. Never a mail's text or sender, a calendar, a page picture or a web search's results. Written by the app when a pin changes; it goes when nothing is pinned. A broken file is ignored (no pins come back) and replaced; one a newer version wrote is left as it is. |
 | `captures.json`, `captures\<id>\source.<ext>` | [Capture](#capture-pictures-pdfs-text-and-calendar-files): each capture's label, counts and cards (titles, times, places, where it came from) and the kept copy of what you dropped in. Written only by the app. A capture goes 30 days after it was made, or 7 days after its last card was decided; **Clear capture** removes one at once. A damaged file, or one a newer version wrote, is kept read only. |
 | `standing_app.json` | The app's side of them: your yes on their consent card (and on each account's tidy-up card), Pause all, the cards you withdrew, the receipts you undid, when you last cleared, which runs were told and whether the Radar card is hidden. Ids, times and that switch only. |
 | `standing_state.json` | The background check's own state: per job its last run and its last time slot, per job and account the Gmail ids it saw and how far it has read, what it proposed (stable keys, so nothing is proposed twice), a hold after a plan limit, the last check (and the last one the scheduled task started), the runs not told yet and an account it could not read. Written only by the check; no subject, sender or text. |
@@ -6158,9 +6175,10 @@ re-encoded himself. It has a private profile of its own, off the record: no
 cache, no cookies, nothing written to disk. It can't open windows, download,
 use the clipboard or ask for the microphone, camera, location or
 notifications. What it can tell Jarvis is a short list of requests about the
-frames he gave it (focus, pin, close, open big, bring back, show its card on
-Approvals) and the fixed words of its corner buttons (each one does what the
-same control does elsewhere in Jarvis); anything else is dropped and counted,
+frames he gave it (focus, pin, close, open big, bring back, the pointer or
+the keyboard on a closed frame's row, show its card on Approvals) and the
+fixed words of its corner buttons (each one does what the same control does
+elsewhere in Jarvis); anything else is dropped and counted,
 and nothing on it approves, sends or undoes anything. It never receives or
 sends what you type: the ask line is Jarvis's own control over it. Its engine
 starts with the window. It never opens Jarvis's network gate: with page
@@ -6374,7 +6392,9 @@ size, facing you, the mic level, its frame rates and paint budget;
 that keeps them quiet, never touching an audio device; `test_look_ui.py` for
 Settings > Look; `test_board.py`, `test_board_frames.py`, `test_board_feed.py`,
 `test_board_glance.py`, `test_board_ways.py`, `test_board_lit.py`,
-`test_board_big.py` and `test_board_typed.py` for the board's messages and
+`test_board_big.py`, `test_board_typed.py` and `test_board_pins.py` (the
+pins kept across a restart, and a closed row held while you are on it) for
+the board's messages and
 their caps, its frames, groups and limits, its read-only tiles, its ways (the
 strip, satellites, pin, close, Clear, parking, the keyboard), the lit frame and
 its cue line, open big and Ask's frames on it; `test_ask_frames.py` for Ask's
@@ -7014,7 +7034,7 @@ briefing_reader/board/        the board: its own address scheme (scheme), the me
                               (protocol), the one web view with its fallback and read-only tiles (view), the frames
                               from what Jarvis already knows (frames) and from Ask (ask_frames), what it holds (feed),
                               a satellite's fact (facts), which frame a sentence is about (lit), the glance painter
-                              (glance); board/assets: its page, style and script
+                              (glance), the pins kept across a restart (pins); board/assets: its page, style and script
 briefing_reader/desk_view.py  Home as a desk: its geometry, the conversation column and its ring head, the cue line's native part, the hint line
 briefing_reader/desk_ui.py    the desk's controller: makes and feeds the board, its ways, parking
 briefing_reader/canvas_ui.py  Home as the canvas: starts its page with the window, tells it the orb and the corners, takes its buttons' words

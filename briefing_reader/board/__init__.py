@@ -31,7 +31,8 @@ Part 5a, the board on Home:
 
 Part 5b, the board's ways:
 
-* ``feed`` is the source of truth for pins (6 at most), close and Bring back (the frame leaves 8 s later), Clear and its
+* ``feed`` is the source of truth for pins (6 at most), close and Bring back (the frame leaves 8 s later; not while the
+  owner's pointer or keyboard focus is on its row - the page's hold - and 8 s again once neither is), Clear and its
   Bring back (out of sight 8 s, then gone), and parking (an answer that comes while the owner reads waits under "New
   answer above · Show" and lands after 8 quiet seconds; ``ReadingWatch`` is the reading rule); ``facts`` makes a
   satellite's one fact from a frame's data.
@@ -48,6 +49,12 @@ Part 6, Ask's typed frames:
 * ``protocol`` gains the four kinds' bodies; the page renders each with createElement and textContent only (maths from
   its checked tree); ``glance`` paints them (private: a table's headline, maths' answer); ``facts``, ``lit`` and
   ``feed`` know them.
+
+Pins across a restart:
+
+* ``pins`` (Qt-free): board_pins.json in the data folder - the pinned frames that may be kept on this PC (Jarvis's own
+  answers and what Jarvis keeps here already; never mail, the calendar, a page picture, a web search's results or the
+  follow-ups), each checked again on reading; the desk puts them back pinned, in their order, when the board is made.
 
 desk_ui.DeskController makes the one board (only while ``[look] board`` is on) and feeds it; desk_view and
 ui.ReadingView put it on Home beside the conversation. Importing this package imports nothing of the web engine; only

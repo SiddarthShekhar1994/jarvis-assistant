@@ -134,6 +134,9 @@ Out (page -> app): check_request(kind, payload, known) -> Request
     kind's fields only; every frame id one the app sent (``known``):
         ready {"v"?} | layout {"frames": [{"id", "top", "height"}, ...], "scrolling"} | pin {"id", "on"}
         | focus, open, close, bring_back, go_approvals {"id"}   (canvas part 5A: no retry - no frame offers it)
+        | hold {"id", "on"}   a closed frame's row has the pointer over it or the keyboard focus in it (on: its Bring
+                          back stays offered, the app holds its leaving) or has neither any more (off: its CLOSE_S
+                          starts again, on the page and in the app)
       Part 5b:
         clear {}          the bar's Clear (the app takes every unpinned frame away, for CLEAR_S with Bring back)
         restore {}        the cleared row's Bring back
@@ -271,7 +274,7 @@ TODO_STATES = ("open", "waits", "done")
 CAPTURE_STATES = ("waits", "on_calendar", "decided", "past", "cant_add")
 MOTION_LEVELS = ("lively", "calm", "off")
 REQUEST_KINDS = ("ready", "layout", "focus", "open", "close", "pin", "bring_back", "go_approvals",
-                 "clear", "restore", "show_new", "reading", "focus_out", "landed", "big", "go", "chrome")
+                 "clear", "restore", "show_new", "reading", "focus_out", "landed", "big", "go", "chrome", "hold")
 _ID_KINDS = frozenset({"focus", "open", "close", "bring_back", "go_approvals"})
 _BARE_KINDS = frozenset({"clear", "restore", "show_new"})     # a payload of no field at all
 _ID = re.compile(r"[A-Za-z0-9_-]{1,%d}" % ID_CAP)
@@ -1030,9 +1033,9 @@ def check_request(kind: Any, payload: Any, known: Collection[str]) -> Request:
         if len({place[0] for place in places}) != len(places):
             raise Refused(R_ID)
         return Request("layout", places=tuple(places), scrolling=_flag(fields.get("scrolling", False)))
-    if kind == "pin":
+    if kind in ("pin", "hold"):
         fields = _fields(value, ("id", "on"), ("id", "on"))
-        return Request("pin", _known_id(fields["id"], known), on=_flag(fields["on"]))
+        return Request(kind, _known_id(fields["id"], known), on=_flag(fields["on"]))
     if kind in _BARE_KINDS:
         _fields(value, ())
         return Request(kind)

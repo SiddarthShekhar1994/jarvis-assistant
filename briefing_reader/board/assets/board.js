@@ -3,8 +3,8 @@
    no address is ever opened. The app sends board.apply(<JSON text>), checked in Python first and checked here again;
    the page answers on its web channel with bridge.post(kind, <JSON text>), the short list Python accepts (ready, layout,
    focus, open, close, pin, bring_back, go_approvals, clear, restore, show_new, reading, focus_out, landed, big,
-   go). The canvas (PLAN-canvas part 1): the same page is Home itself - the orb and the corners' controls under the
-   board (makeCanvas, at the first orb or canvas message; a board beside a conversation has none of it). Part 2: on
+   go, hold). The canvas (PLAN-canvas part 1): the same page is Home itself - the orb and the corners' controls under
+   the board (makeCanvas, at the first orb or canvas message; a board beside a conversation has none of it). Part 2: on
    the canvas the frames are laid out over the whole screen on a 12-column grid (packCanvas), in the mock's glowing
    style, with the task card, the boot of an arriving frame, Tidy and Clear view's lines into the orb.
    DESIGN-SPEC 3.1 (the bar, the groups, the index strip, "N more below" and the fades), 3.2 (the frame), 3.3 (the kinds
@@ -38,7 +38,9 @@
   var MAX_PINS = 6;                            // a 7th pin says why in the frame's meta (board.protocol.MAX_PINS)
   var MAX_ANIMATED = 6;                        // frames of one arrival that draw in; the rest are there at once
   var STAGGER_MS = 80, DRAW_MS = 800, LAP_MS = 900, FADE_MS = 160, HEIGHT_MS = 200;
-  var CLOSED_MS = 8000;                        // a closed frame's row offers Bring back this long (the app removes it)
+  var CLOSED_MS = 8000;                        // a closed frame's row offers Bring back this long (the app removes it);
+                                               // never while the row has the pointer or the focus (hold), and its time
+                                               // starts again once it has neither
   var NOTE_MS = 4000;                          // the 7th pin's note stays this long
   var ROOM_MS = 220;                           // a group arrives: room is made for it ...
   var ROOM_WAIT_MS = 40;                       // ... once the frames that came with it are in
@@ -1166,6 +1168,7 @@
     var art = make('article', 'frame');
     var rec = {id: id, el: art, kind: '', data: null, pinned: false, closed: false, picture: null,
                closedTimer: 0, drawTimer: 0, outlineTimer: 0, lapTimer: 0, noteTimer: 0, group: '', fact: '',
+               closedRow: null, hover: false, held: false,
                sat: false, expanded: false, cleared: false, away: false, paired: '', mates: null, ix: null,
                ixGlyph: null, ixKind: '', fold: false, fx: false, rev: 0, nat: null, booting: false, wantBoot: false,
                folding: false};
@@ -1237,6 +1240,19 @@
     rec.bringBack.textContent = WORDS.bringBack;
     closedRow.append(glyph('close'), rec.closedWhat, rec.bringBack);
     art.appendChild(closedRow);
+    rec.closedRow = closedRow;                 // the owner on it (the pointer, the focus) holds its Bring back
+    closedRow.addEventListener('pointerenter', function () {
+      rec.hover = true;
+      checkHold(rec);
+    });
+    closedRow.addEventListener('pointerleave', function () {
+      rec.hover = false;
+      checkHold(rec);
+    });
+    closedRow.addEventListener('focusin', function () { checkHold(rec); });
+    closedRow.addEventListener('focusout', function () {
+      setTimeout(function () { checkHold(rec); }, 0);   // (the focus is between two elements now)
+    });
 
     // The satellite (DESIGN-SPEC 3.3): an older answer's unpinned frame as one 48 px row - its glyph in a 30 px
     // square, its title and one fact - that a click or Enter expands in place.
@@ -1694,25 +1710,69 @@
     }
   }
 
+  // Bring back is offered CLOSED_MS; the app takes the frame away then (it is the source of truth). The keyboard on
+  // its Bring back moves to the frame itself first (the same frame: no focus or reading report, no scroll): hidden,
+  // the button would drop it to <body>, and the app's remove (which hands a leaving frame's keyboard to a staying one)
+  // comes a few ms later.
+  function armClosed(rec) {
+    var el = rec.el;
+    clearTimeout(rec.closedTimer);
+    rec.closedTimer = setTimeout(function () {
+      if (el.contains(document.activeElement)) {
+        el.focus({preventScroll: true});
+      }
+      el.classList.add('expired');
+    }, CLOSED_MS);
+  }
+
+  // The owner is on a closed frame's row: the pointer over it, or the keyboard focus in it while the page has the
+  // focus. Then its Bring back stays (its CLOSED_MS waits) and the app is told (hold on: its removal waits too); once
+  // the row has neither, both start their 8 s again (hold off; board.feed.CLOSE_S is the app's same 8 s).
+  function onClosedRow(rec) {
+    var active = document.activeElement;
+    return rec.hover || (document.hasFocus() && !!active && !!rec.closedRow && rec.closedRow.contains(active));
+  }
+
+  function checkHold(rec) {
+    if (!rec.closed || rec.el.classList.contains('expired') || frames.get(rec.id) !== rec) {
+      rec.held = false;                        // (brought back, gone, or its Bring back already hidden)
+      return;
+    }
+    var held = onClosedRow(rec);
+    if (held === rec.held) {
+      return;
+    }
+    rec.held = held;
+    if (held) {
+      clearTimeout(rec.closedTimer);
+    } else {
+      armClosed(rec);
+    }
+    post('hold', {id: rec.id, on: held});
+  }
+
+  function watchHolds() {                      // the window losing the focus lets a focused row go (and back: holds)
+    ['blur', 'focus'].forEach(function (name) {
+      window.addEventListener(name, function () {
+        setTimeout(function () { frames.forEach(checkHold); }, 0);
+      });
+    });
+  }
+
   function setClosed(rec, closed, byOwner) {
     var el = rec.el;
     var from = el.getBoundingClientRect().height;
     var hadFocus = el.contains(document.activeElement);
     clearTimeout(rec.closedTimer);
     rec.closed = closed;
+    rec.held = false;
+    if (!closed) {
+      rec.hover = false;
+    }
     el.classList.toggle('closed', closed);
     el.classList.remove('expired');
     if (closed) {
-      // Bring back is offered CLOSED_MS; the app takes the frame away then (it is the source of truth). The keyboard on
-      // its Bring back moves to the frame itself first (the same frame: no focus or reading report, no scroll): hidden,
-      // the button would drop it to <body>, and the app's remove (which hands a leaving frame's keyboard to a staying
-      // one) comes a few ms later.
-      rec.closedTimer = setTimeout(function () {
-        if (el.contains(document.activeElement)) {
-          el.focus({preventScroll: true});
-        }
-        el.classList.add('expired');
-      }, CLOSED_MS);
+      armClosed(rec);
     }
     refresh();
     if (closed) {
@@ -1729,8 +1789,8 @@
 
   function close(rec) {
     if (!rec.closed) {
+      post('close', {id: rec.id});             // first: its row's hold (Bring back takes the focus) comes after it
       setClosed(rec, true, true);
-      post('close', {id: rec.id});
     }
   }
 
@@ -1757,6 +1817,7 @@
       frames.delete(rec.id);
     }
     clearTimeout(rec.closedTimer);
+    rec.held = false;
     clearTimeout(rec.drawTimer);
     clearTimeout(rec.outlineTimer);
     clearTimeout(rec.lapTimer);
@@ -5944,6 +6005,7 @@
       scheduleMaths();
     });
     watchReading();
+    watchHolds();
     easeOut = token('--ease-out') || easeOut;
     setMotion(motion);
     connect();
