@@ -1,4 +1,4 @@
-"""Microsoft (Outlook) sign-in per account: read only, first stage.
+"""Microsoft (Outlook) sign-in per account.
 
 An ``[accounts.<alias>]`` table with ``backend = "microsoft"`` is an Outlook / Microsoft account (a work or school
 account, or a personal outlook.com one). Jarvis signs in to it with the owner's own free app registration (its client
@@ -7,24 +7,36 @@ alias, beside the Google ones:
 
     token_path(data_dir, alias)       %LOCALAPPDATA%\\briefing-reader\\ms_token_<alias>.json
     MicrosoftAccount(alias, ...)      one account's saved sign-in: is_configured(), is_signed_in(), sign_in(),
-                                      access_token(), forget(), disconnect(), problem()
+                                      access_token(), forget(), disconnect(), problem(), address(),
+                                      write_problem(what) (may Jarvis change its calendar / send its mail?)
     make_verifier() / challenge(v)    PKCE (RFC 7636, S256)
     authorize_url(...)                the sign-in page the browser opens
 
 The sign-in is OAuth 2.0's authorization code flow with PKCE for a public client (no client secret) on the Microsoft
 identity platform's v2.0 endpoints (login.microsoftonline.com/<tenant>; ``[microsoft] tenant``, "common" by default),
 with a loopback redirect: Jarvis listens on http://localhost:<a free port>/ for the one answer, the browser shows the
-sign-in, and the code that comes back is traded for the tokens. It asks only for MICROSOFT_SCOPES (offline_access for
-the refresh token, User.Read, Mail.Read, Calendars.Read): nothing here can send, change or delete anything. The token
-is refreshed with its refresh token a minute before it runs out (Microsoft may hand back a new refresh token; it is
-kept). A refresh Microsoft rejects (invalid_grant: expired or revoked) deletes the token file, so the next Connect
-starts fresh; disconnect() deletes it too.
+sign-in, and the code that comes back is traded for the tokens. It asks for MICROSOFT_SCOPES: offline_access for the
+refresh token, User.Read (the sign-in itself, and the account's own address, read once right after it with GET /me and
+kept in the token file: a card's From line and the "never to yourself" check), Mail.Read and Calendars.ReadWrite (the
+Day view and the unread frame; a calendar card the owner approves), and Mail.Send (a reply or email the owner sends
+from its card). Nothing here changes anything: outlook.py makes those calls, only after the owner's click.
+
+A sign-in of the first, read-only version (Mail.Read and Calendars.Read only) keeps working read only: the token is
+always refreshed with the permissions it was granted (asking for more there would make Microsoft refuse the refresh
+and the sign-in would be lost), and ``write_problem`` says "Sign in again to let Jarvis change this account" until a
+new sign-in grants the rest (WRITE_SCOPES). The token is refreshed with its refresh token a minute before it runs out
+(Microsoft may hand back a new refresh token; it is kept). A refresh Microsoft rejects (invalid_grant: expired or
+revoked) deletes the token file, so the next Connect starts fresh; disconnect() deletes it too.
 
 Everything is blocking (the browser sign-in waits up to ``open_timeout_s``), so callers use a worker thread. Only
 ``sign_in()`` and a refresh talk to Microsoft, through ``requests`` (an injected session in tests: the tests never
 sign in and never reach the network). The tokens are registered with :func:`config.register_secret` as soon as they
 are read; the log names an account as "work", "personal" or "other" (google_auth.logged_alias) and never writes a
 token, an address, a code or a URL's query. Qt-free.
+
+What each write needs (``write_problem``): WRITE_CALENDAR -> Calendars.ReadWrite granted; WRITE_MAIL -> Mail.Send
+granted and the account's address known. ("", "") when it may, else (PROBLEM_SIGNED_OUT / PROBLEM_SETUP / PROBLEM_SCOPE,
+the card's words).
 """
 
 from __future__ import annotations
@@ -53,6 +65,7 @@ from .google_auth import (
     PROBLEM_DENIED,
     PROBLEM_EXPIRED,
     PROBLEM_FAILED,
+    PROBLEM_SCOPE,
     PROBLEM_SETUP,
     PROBLEM_SIGNED_OUT,
     PROBLEM_TIMEOUT,
@@ -68,8 +81,17 @@ logger = logging.getLogger(__name__)
 
 AUTHORITY = "https://login.microsoftonline.com"
 GRAPH_ROOT = "https://graph.microsoft.com/v1.0"
-# Delegated permissions, read only: offline_access gives the refresh token; User.Read is the sign-in itself.
-MICROSOFT_SCOPES = ("offline_access", "User.Read", "Mail.Read", "Calendars.Read")
+# Delegated permissions: offline_access gives the refresh token; User.Read is the sign-in itself (and GET /me).
+MICROSOFT_SCOPES = ("offline_access", "User.Read", "Mail.Read", "Calendars.ReadWrite", "Mail.Send")
+# What the first, read-only version asked for: a sign-in with only these refreshes with them and stays read only.
+READ_SCOPES = ("offline_access", "User.Read", "Mail.Read", "Calendars.Read")
+WRITE_CALENDAR = "calendar"     # write_problem's what: add, move, answer or cancel an event
+WRITE_MAIL = "mail"             # ... send a reply or an email
+WRITE_SCOPES = {WRITE_CALENDAR: ("Calendars.ReadWrite",), WRITE_MAIL: ("Mail.Send",)}
+SIGN_IN_AGAIN_MESSAGE = "Sign in again to let Jarvis change this account"
+NO_ADDRESS_MESSAGE = ("Jarvis doesn't know this Outlook account's address yet - sign in again so it can show who the "
+                      "mail is from")
+_GRAPH_SCOPE_PREFIX = "https://graph.microsoft.com/"
 TENANTS = ("common", "consumers", "organizations")
 DEFAULT_TENANT = "common"
 TOKEN_PATTERN = "ms_token_{alias}.json"
@@ -147,6 +169,34 @@ def authorize_url(client_id: str, tenant: str, redirect_uri: str, code_challenge
              "response_mode": "query", "scope": " ".join(scopes), "state": state,
              "code_challenge": code_challenge, "code_challenge_method": "S256", "prompt": "select_account"}
     return f"{authorize}?{urlencode(query)}"
+
+
+def granted_scopes(text: Any) -> frozenset[str]:
+    """The permissions a token answer's ``scope`` names, casefolded, without Graph's URL prefix ("openid" and other
+    sign-in words included); empty for anything but text."""
+    if not isinstance(text, str):
+        return frozenset()
+    names = set()
+    for word in text.split():
+        if word.casefold().startswith(_GRAPH_SCOPE_PREFIX):
+            word = word[len(_GRAPH_SCOPE_PREFIX):]
+        names.add(word.casefold())
+    return frozenset(names)
+
+
+def refresh_scopes(info: Any) -> tuple[str, ...]:
+    """The permissions a refresh asks for: the ones of MICROSOFT_SCOPES this sign-in was granted (never more: Microsoft
+    refuses a refresh that asks for a permission nobody accepted), READ_SCOPES when the saved sign-in says none."""
+    granted = granted_scopes(info.get("scope") if isinstance(info, dict) else None)
+    known = tuple(scope for scope in MICROSOFT_SCOPES if scope.casefold() in granted)
+    if not any(scope != "offline_access" for scope in known):
+        return READ_SCOPES
+    return known if "offline_access" in known else ("offline_access", *known)
+
+
+def _plain_address(value: Any) -> str:
+    text = " ".join(str(value or "").split()) if isinstance(value, str) else ""
+    return text if re.fullmatch(r"[^@\s<>,;]{1,64}@[^@\s<>,;]{1,255}", text) else ""
 
 
 def _register(info: dict[str, Any]) -> None:
@@ -263,6 +313,35 @@ class MicrosoftAccount:
         """(PROBLEM_*, message) of the last failed sign-in or rejected token; ("", "") when none."""
         return self._problem, self._problem_message
 
+    def _saved(self) -> dict[str, Any]:
+        info = self._info if self._info is not None else self._read()
+        return info if isinstance(info, dict) else {}
+
+    def address(self) -> str:
+        """The account's own address as Microsoft named it right after the sign-in (GET /me: its mail, else its
+        sign-in name); "" when unknown (a sign-in of the read-only version). Files only; shown, never logged."""
+        return _plain_address(self._saved().get("address"))
+
+    def granted(self) -> frozenset[str]:
+        """The permissions the saved sign-in was granted (casefolded; files only)."""
+        return granted_scopes(self._saved().get("scope"))
+
+    def write_problem(self, what: str) -> tuple[str, str]:
+        """Why Jarvis may not change ``what`` (WRITE_CALENDAR / WRITE_MAIL) for this account now - ("", "") when it
+        may: PROBLEM_SETUP (no client id), PROBLEM_SIGNED_OUT (no saved sign-in), PROBLEM_SCOPE (the sign-in lacks
+        the permission, or for mail Jarvis doesn't know the account's address: SIGN_IN_AGAIN_MESSAGE /
+        NO_ADDRESS_MESSAGE; a new sign-in fixes both). Files only, no network."""
+        if not self.is_configured():
+            return PROBLEM_SETUP, NO_CLIENT_ID_MESSAGE
+        if not self.is_signed_in():
+            return PROBLEM_SIGNED_OUT, f"{NOT_SIGNED_IN_MESSAGE} ({self.alias} account)"
+        granted = self.granted()
+        if any(scope.casefold() not in granted for scope in WRITE_SCOPES.get(what, ("",))):
+            return PROBLEM_SCOPE, SIGN_IN_AGAIN_MESSAGE
+        if what == WRITE_MAIL and not self.address():
+            return PROBLEM_SCOPE, NO_ADDRESS_MESSAGE
+        return "", ""
+
     def _set_problem(self, problem: str = "", message: str = "") -> None:
         self._problem, self._problem_message = problem, message
 
@@ -287,8 +366,9 @@ class MicrosoftAccount:
 
     def _refresh(self, info: dict[str, Any]) -> dict[str, Any]:
         _authorize, token_url = endpoints(self.tenant)
+        scopes = refresh_scopes(info)
         data = {"client_id": self.client_id, "grant_type": "refresh_token", "refresh_token": info["refresh_token"],
-                "scope": " ".join(MICROSOFT_SCOPES)}
+                "scope": " ".join(scopes)}
         answer = self._post(token_url, data, "refreshing the sign-in")
         if answer[0] != 200:
             error, codes = _error_words(answer[1])
@@ -303,15 +383,18 @@ class MicrosoftAccount:
                 raise AccountAuthError(message, problem=PROBLEM_EXPIRED, status=answer[0])
             raise AccountError(f"Microsoft could not refresh the {self.alias} account's sign-in just now "
                                f"({answer[0]}); try again", status=answer[0])
-        fresh = self._token_info(answer[1], keep_refresh=info.get("refresh_token"))
+        fresh = self._token_info(answer[1], keep_refresh=info.get("refresh_token"), scopes=scopes,
+                                 address=info.get("address"))
         self._save(fresh)
         self._info = fresh
         self.generation += 1
         logger.info("%s: the sign-in was refreshed", self.log_name)
         return fresh
 
-    def _token_info(self, answer: Any, *, keep_refresh: Any = None) -> dict[str, Any]:
-        """The token file's content from a token endpoint answer (a missing refresh token keeps the old one)."""
+    def _token_info(self, answer: Any, *, keep_refresh: Any = None, scopes: tuple[str, ...] = MICROSOFT_SCOPES,
+                    address: Any = None) -> dict[str, Any]:
+        """The token file's content from a token endpoint answer (a missing refresh token keeps the old one; an
+        answer without ``scope`` keeps ``scopes``, the ones asked for; ``address`` the account's, when known)."""
         if not isinstance(answer, dict) or not isinstance(answer.get("access_token"), str) \
                 or not answer["access_token"]:
             raise AccountError("Microsoft's answer had no access token")
@@ -325,10 +408,31 @@ class MicrosoftAccount:
             seconds = 0.0
         info = {"access_token": answer["access_token"], "refresh_token": refresh,
                 "expires_at": round(self._clock() + seconds, 3),
-                "scope": answer.get("scope") if isinstance(answer.get("scope"), str) else " ".join(MICROSOFT_SCOPES),
+                "scope": answer.get("scope") if isinstance(answer.get("scope"), str) else " ".join(scopes),
                 "tenant": self.tenant}
+        if _plain_address(address):
+            info["address"] = _plain_address(address)
         _register(info)
         return info
+
+    def _read_address(self, token: str) -> str:
+        """The signed-in account's address (GET /me: ``mail``, else ``userPrincipalName`` when it is an address), right
+        after a sign-in; "" when Microsoft did not say (the read cards still work; a reply then asks to sign in again).
+        Never logged."""
+        try:
+            response = self._get_session().get(f"{GRAPH_ROOT}/me", params={"$select": "mail,userPrincipalName"},
+                                               headers={"Authorization": f"Bearer {token}",
+                                                        "Accept": "application/json"},
+                                               timeout=HTTP_TIMEOUT_S)
+            status = int(getattr(response, "status_code", 0) or 0)
+            body = response.json() if status == 200 else None
+        except Exception as exc:  # noqa: BLE001 - the address stays unknown
+            logger.info("%s: reading the account's address failed (%s)", self.log_name, type(exc).__name__)
+            return ""
+        if not isinstance(body, dict):
+            logger.info("%s: Microsoft answered %d while reading the account's address", self.log_name, status)
+            return ""
+        return _plain_address(body.get("mail")) or _plain_address(body.get("userPrincipalName"))
 
     def _post(self, url: str, data: dict[str, str], what: str) -> tuple[int, Any]:
         """One POST to the token endpoint: (HTTP status, the JSON answer or None). The network's own failures are
@@ -405,6 +509,9 @@ class MicrosoftAccount:
             except AccountError as exc:
                 self._set_problem(exc.problem, str(exc))
                 raise
+            address = self._read_address(str(info["access_token"]))
+            if address:
+                info["address"] = address
             self._save(info)
             self._info = info
             self.generation += 1

@@ -1,5 +1,5 @@
 """Outlook accounts in the app: config.toml's [microsoft] and backend "microsoft", the executor's builders and its
-refusal of every card for them, Ask's account list, Settings > Accounts, the Connect without a client id, and the
+refusal of every card for them without an Outlook backend (test_microsoft_write has the backends), Ask's account list, Settings > Accounts, the Connect without a client id, and the
 agenda read (the Day view) with an Outlook account's events - all with fakes; nothing reaches the network."""
 
 from __future__ import annotations
@@ -92,7 +92,7 @@ class ExecutorTests(ConfigTests):
         self.assertIsInstance(executor.build_outlook_readers(cfg, accounts)["school"], outlook.OutlookMailReader)
         self.assertNotIn("school", executor.build_accounts(cfg, persist=False))
 
-    def test_every_card_for_an_outlook_account_is_refused(self) -> None:
+    def test_without_an_outlook_backend_every_card_for_an_outlook_account_is_refused(self) -> None:
         cfg = self.load(TOML)
         action = parse_action_line("RSVP: acct=school | event=abc123def456ghi789 | cal=primary | answer=yes | "
                                    "notify=all | title=Speaker series | at=2026-10-06 17:00-18:00")
@@ -106,11 +106,11 @@ class ExecutorTests(ConfigTests):
 
 
 class SettingsTests(ConfigTests):
-    def test_accounts_rows_say_outlook_and_read_only(self) -> None:
+    def test_accounts_rows_say_outlook(self) -> None:
         cfg = self.load(TOML)
         rows = dict(settings_view.settings_rows(cfg, "accounts", {"personal": True, "school": True}))
         self.assertEqual(rows["personal"], "Connected")
-        self.assertEqual(rows["school"], "Outlook - connected (read only)")
+        self.assertEqual(rows["school"], "Outlook - connected")
         rows = dict(settings_view.settings_rows(cfg, "accounts", {"school": False}))
         self.assertEqual(rows["school"], "Outlook - not connected")
 

@@ -109,7 +109,7 @@ class PkceTests(NoNetwork):
             with self.assertRaises(ValueError):
                 ms_auth.challenge(bad)  # type: ignore[arg-type]
 
-    def test_authorize_url_asks_for_a_code_with_pkce_and_read_scopes(self) -> None:
+    def test_authorize_url_asks_for_a_code_with_pkce_and_the_scopes(self) -> None:
         url = ms_auth.authorize_url(CLIENT_ID, "consumers", "http://localhost:51234/", "chal", "st8")
         parts = urlsplit(url)
         self.assertEqual((parts.scheme, parts.netloc, parts.path),
@@ -121,7 +121,8 @@ class PkceTests(NoNetwork):
         self.assertEqual(query["code_challenge"], "chal")
         self.assertEqual(query["code_challenge_method"], "S256")
         self.assertEqual(query["state"], "st8")
-        self.assertEqual(query["scope"].split(), ["offline_access", "User.Read", "Mail.Read", "Calendars.Read"])
+        self.assertEqual(query["scope"].split(), ["offline_access", "User.Read", "Mail.Read", "Calendars.ReadWrite",
+                                                  "Mail.Send"])
         self.assertNotIn("client_secret", query)
 
     def test_a_bad_tenant_falls_back_to_common(self) -> None:

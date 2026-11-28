@@ -1443,7 +1443,7 @@ class FieldValidationTests(unittest.TestCase):
         self.assertEqual(quoted, '"' + "x" * 19 + "..." + "y" * 18 + '"')
 
     def test_gmail_ids_and_message_ids(self) -> None:
-        self.assertEqual(example("Reply", thread="x").error, 'thread=: "x" is not a Gmail id')
+        self.assertEqual(example("Reply", thread="x").error, 'thread=: "x" is not a Gmail or Outlook id')
         for written in ("CAExample0001@mail.example.com", "<CAExample0001@mail.example.com>"):
             with self.subTest(msgid=written):
                 self.assertEqual(example("Reply", msgid=written).field("msgid"), "<CAExample0001@mail.example.com>")
@@ -1453,7 +1453,7 @@ class FieldValidationTests(unittest.TestCase):
         only_gmid = example("Reply", msgid="", gmid="18c0ffee00000002")
         self.assertEqual((only_gmid.error, only_gmid.field("gmid"), only_gmid.field("msgid")),
                          ("", "18c0ffee00000002", ""))
-        self.assertEqual(example("Reply", msgid=None, gmid="bad id!").error, 'gmid=: "bad id!" is not a Gmail id')
+        self.assertEqual(example("Reply", msgid=None, gmid="bad id!").error, 'gmid=: "bad id!" is not a Gmail or Outlook id')
         self.assertEqual(example("Reply", msgid="", gmid="").error, "missing msgid= (or gmid=)")
 
     def test_addresses_are_normalized(self) -> None:
@@ -1821,7 +1821,7 @@ class KindSchemaTests(unittest.TestCase):
 
     def test_the_first_error_in_key_order_wins(self) -> None:
         action = example("Reply", thread="x", to="bob@")
-        self.assertEqual(action.error, 'thread=: "x" is not a Gmail id')
+        self.assertEqual(action.error, 'thread=: "x" is not a Gmail or Outlook id')
         self.assertEqual(action.account, "work")   # what was read before the error is kept
 
     def test_block_after_the_due_time_warns(self) -> None:

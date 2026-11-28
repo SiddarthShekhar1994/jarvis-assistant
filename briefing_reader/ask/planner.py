@@ -833,8 +833,9 @@ class GoogleSources:
         self._recent: dict[tuple[Any, ...], tuple[float, int, tuple[EventBrief, ...]]] = {}
 
     def aliases(self) -> list[str]:
-        """The Google accounts Ask may know of. An Outlook account (backend "microsoft") is never one: it is read
-        only in this version, so no card is ever offered for it."""
+        """The Google accounts Ask may know of. An Outlook account (backend "microsoft") is never one: what Ask reads
+        (Gmail threads, Google's event briefs and time zone) and how it checks its cards (the Gmail and Google event ids
+        it was shown) are Google's, so it never proposes a card for one; an Outlook card comes from a briefing line."""
         names = [alias for alias, account in self.config.accounts.items()
                  if getattr(account, "backend", "google") != "microsoft"]
         for group in (self.calendars, self.senders, self.readers):
