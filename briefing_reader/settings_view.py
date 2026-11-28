@@ -12,7 +12,8 @@ Public API
     config.toml tables; either way a restart), ``config_path`` with Open config.toml (``config_button``,
     ``openConfig``) and ``data_path`` with Open the data folder (``data_button``, ``openDataFolder``;
     ``set_paths(config_path, data_dir)``). Accounts show only their names and whether they are connected
-    (``set_connected({alias: True | False})``, from the app's own sign-in check; "Not checked yet" before it).
+    (``set_connected({alias: True | False})``, from the app's own sign-in check; "Not checked yet" before it); an
+    Outlook account's row says "Outlook - ..." and its Connect / Disconnect is outlook_ui's part under the rows.
     LIVE and privacy also says whether other AI apps may read the board (``MCP_LABEL``: [mcp] enabled, set in
     config.toml only - it widens who reads what Jarvis keeps, so it never has a Change).
 
@@ -273,9 +274,13 @@ def settings_rows(config: Any, group: str, connected: Mapping[str, bool] | None 
                 ("Undo after a calendar change", "10 minutes")]
     if group == "accounts":
         connected = connected or {}
-        aliases = list(getattr(config, "accounts", {}) or {})
+        found = getattr(config, "accounts", {}) or {}
+        accounts = dict(found) if isinstance(found, Mapping) else {alias: None for alias in found}
         words = {True: "Connected", False: "Not connected"}
-        return [(str(alias), words.get(connected.get(alias), NOT_CHECKED)) for alias in aliases]
+        # An Outlook account (backend "microsoft") says so: it is read only (its Connect is in the part under the rows).
+        outlook = {True: "Outlook - connected (read only)", False: "Outlook - not connected"}
+        return [(str(alias), (outlook if getattr(account, "backend", "") == "microsoft" else words).get(
+            connected.get(alias), NOT_CHECKED)) for alias, account in accounts.items()]
     if group == "quiet":
         if not prod_on:
             return [("Quiet hours", "Not used - offers are off on this PC")]

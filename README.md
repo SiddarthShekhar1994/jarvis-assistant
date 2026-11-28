@@ -1004,6 +1004,96 @@ cd "<project folder>"
    cards only), and remove `"gmail_tidy"` from the account to stop it for
    good.
 
+   **8e. Microsoft / Outlook accounts (read only, optional).** Jarvis can
+   also read an Outlook account: a work or school Microsoft account, or a
+   personal outlook.com, hotmail.com or live.com one. This first stage only
+   reads; nothing is ever sent, answered, moved or changed for it.
+
+   What works:
+
+   - **The Day view.** The account's calendar events show in TODAY (and
+     TOMORROW, the deadlines, the canvas's "Today" frame and instant answers
+     about your time) beside your personal Google calendar's, in your PC's
+     time. They are read with the same timing and the same rules as the
+     Google ones: never while the window is hidden, never a sign-in by
+     itself. An Outlook account that can't be read just now leaves its events
+     out; the Google rows stay. If the personal Google calendar is not set
+     up or not signed in, TODAY shows the Outlook rows with Google's line and
+     its **Connect** under them. The LIVE step names the calendars it read
+     ("Agenda: read the calendars (personal, school)").
+   - **Its unread mail on the canvas.** Right after each Day view read,
+     Jarvis reads the inbox's unread messages of the last two days (at most
+     10; who from, to, the subject, the date and Outlook's short preview line;
+     never the whole message or an attachment). The canvas's resting "Now"
+     group then has an "Unread · school" frame (the account's name) with the
+     sender, subject and age of each; the preview line is never shown. They
+     are kept in memory only, never written to disk, and leave with a
+     Disconnect. A Google account has no such frame (Jarvis keeps no unread
+     list for Gmail).
+
+   What doesn't yet:
+
+   - No card is ever offered for an Outlook account: no reply or email, no
+     invitation answer, move or cancel, no standing agent or rule and no
+     tidy-up. Ask Jarvis is not told about it, so it never proposes one; a
+     briefing line that names it anyway shows "Jarvis only reads its calendar
+     and mail in this version" and keeps Copy and Open.
+   - Its mail is not read aloud or summarised anywhere yet: the briefing's
+     mail is the page your briefing task writes, and Ask, follow-ups and
+     meeting prep still read Gmail only.
+   - The account named `personal` is always the Google one.
+
+   Registering the app (free, once; you need a Microsoft account to sign in
+   to the portal):
+
+   1. Open the Microsoft Entra admin center (entra.microsoft.com) and go to
+      **Applications > App registrations > New registration**. (For a personal
+      outlook.com account with no work directory, the same page is under
+      **App registrations** in the Azure portal, portal.azure.com; signing in
+      there with that account is enough.)
+   2. **Name**: anything, for example "Jarvis on my PC". **Supported account
+      types**: "Accounts in any organizational directory and personal
+      Microsoft accounts" (or "Personal Microsoft accounts only" if you only
+      have an outlook.com one). **Redirect URI**: pick the platform **Public
+      client/native (mobile & desktop)** and type `http://localhost`. Click
+      **Register**.
+   3. On the app's **Authentication** page, set **Allow public client flows**
+      to **Yes** and **Save**. There is no client secret: Jarvis never needs
+      one.
+   4. On **API permissions**, **Add a permission > Microsoft Graph >
+      Delegated permissions**, and tick `offline_access`, `User.Read`,
+      `Mail.Read` and `Calendars.Read`, then **Add permissions**. Nothing
+      else: none of these can send or change anything.
+   5. Copy the **Application (client) ID** from the app's **Overview** page
+      (it looks like `00000000-0000-0000-0000-000000000000`).
+   6. In `config.toml` add (the repository's file has no such table):
+
+      ```toml
+      [microsoft]
+      client_id = "00000000-0000-0000-0000-000000000000"   # your Application (client) ID
+      tenant = "common"        # "consumers" for outlook.com accounts only
+
+      [accounts.school]        # any name but "personal"
+      backend = "microsoft"
+      features = ["calendar", "mail_read"]   # both by default; leave one out to stop it
+      ```
+
+      and restart Jarvis.
+   7. **Settings > Accounts** now lists the account as "Outlook - not
+      connected", with **Connect** under the rows. Click it: Microsoft's
+      sign-in opens in your browser (Jarvis listens on `http://localhost` for
+      the answer, up to 5 minutes). Pick the right account and accept the
+      permissions. The row then says "Outlook - connected (read only)" and
+      the Day view reads its calendar from the next read.
+
+   Without a client id, **Connect** opens nothing and says that the app id
+   is needed first and where it goes. A work or school administrator may not
+   allow apps like this one; the sign-in then says so. The sign-in is kept in
+   `%LOCALAPPDATA%\briefing-reader\ms_token_<account>.json` (refreshed by
+   itself; never logged). **Disconnect** in the same place deletes it; so
+   does a sign-in Microsoft no longer accepts (expired or revoked: click
+   Connect again).
+
 9. **Uninstall**
 
    ```powershell
@@ -3815,6 +3905,8 @@ start time ("9:00 AM", or "ALL DAY" for all-day events), the title and a short
 line: "now", "in 20 min" (up to an hour ahead) or "ended", and the place. A
 place that is only a meeting link is left out. Point at a row for its full
 text. The calendars are `[agenda] calendars` (your main calendar by default).
+A connected Outlook account's events are listed with them, read only (setup
+step 8e, "Microsoft / Outlook accounts").
 
 The panel reads your calendar when the reading screen opens, every 10 minutes
 while it is visible (never while it is hidden or minimized), after you sign in
@@ -5637,6 +5729,8 @@ file to go back to `config.toml` for all of them.
 | `[agent] search_engine` | `"duckduckgo"` | Where his searches go first: `"duckduckgo"`, `"bing"` or `"google"`, then the others if a page gives nothing or shows a wall. The words of each search go there, and the Turn on card names it. |
 | `[docs] enabled` | `true` | [Documents and datasheets](#documents-and-datasheets): the Dock's Documents (Ctrl+0). `false`: none of it shows (what is kept in the data folder stays). The repository's `config.toml` has no `[docs]` table: these defaults hold until you add one. |
 | `[docs] export_folder` | `""` | Where an export's picker starts: `""` = `Jarvis\Exports` in your user folder, else a full folder path. A folder OneDrive syncs is asked about before a file is saved there. |
+| `[microsoft] client_id` | `""` | The Application (client) ID of your own app registration for Outlook accounts (setup step 8e). `""`: none yet, and an Outlook account's Connect says so. Not a secret: there is no client secret. |
+| `[microsoft] tenant` | `"common"` | Which Microsoft accounts may sign in: `"common"` (work, school and personal), `"consumers"` (personal outlook.com ones only), `"organizations"`, or your directory id. |
 | `[mcp] enabled` | `false` | [Other AI apps](#use-jarvis-from-other-ai-apps-mcp) on this PC may read the board through `--mcp`, read only (the waiting cards, to-dos, captures, documents, agents and rules with their reports, the last day's conversation). Set here only: not from Settings' Change and not from `.env`. The repository's `config.toml` has no `[mcp]` table, so it stays off until you add one. |
 | `[agent] workspace` | `""` | The tasks' folder: `""` = `Jarvis\Workspace` in your user folder, else a full folder path. Never under OneDrive: a task refuses to start there. |
 | `[agent] private` | `["calendar", "contacts", "memory", "mail", "files"]` | What a task may read of your things, when it needs them and only while it is connected. A shorter list narrows it (`"memory"` covers your notes and what you said before the task); an entry that is none of these grants nothing, and so does something that is not a list. |
@@ -6078,6 +6172,7 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `standing_usage.json` | Claude runs, rule checks and tidy-ups by local date and job id, for the caps (the last 8 days; counts only), shared by the app's setup and dry runs and the background check (`standing_usage.json.lock` next to it only takes turns between processes). |
 | `standing_tidy.jsonl` | The check's tidy-up journal: one line per step ("doing" written before Gmail is called, then "done" with the labels after, or "failed"), with the rule's id, the account name and Gmail's message, thread and label ids only. An entry left at "doing" shows on the Agents screen as "Not known". |
 | `standing_tidy_undo.jsonl` | The same journal for the app's **Undo** of a tidy-up. |
+| `ms_token_<account>.json` | An Outlook account's sign-in (setup step 8e): its access and refresh tokens and when the access token runs out; read permissions only. Private: never share it. Disconnect in Settings > Accounts deletes it (so does deleting the file). |
 | `google_token_<account>.tidy.json` | An account's tidy-up sign-in (`"gmail_tidy"`, setup step 8d): `gmail.modify` and who the account is, nothing else. Private: never share it. Delete it to sign the tidy-up out on this PC (the rule then makes cards only). |
 | `standing-run\`, `standing-app\` | The empty folders Claude Code runs in for the background check and for the app's setup and dry runs; a run refuses to start while anything is in them. |
 
@@ -6127,6 +6222,13 @@ change anything through Jarvis.
 The app talks to these services, all free:
 
 - the Notion API: it only reads the one page, with a read-only integration;
+- Microsoft's sign-in and Microsoft Graph, only for an Outlook account you
+  connected (setup step 8e): the sign-in when you click Connect, a token
+  refresh about once an hour, and read-only reads of that account's calendar
+  (whenever the Day view reads yours) and, right after, of its unread inbox
+  headers and preview lines (the canvas's "Unread" frame; memory only).
+  Nothing is saved but the sign-in, and the log holds only counts and
+  statuses;
 - Hugging Face, once, when you click **Download the local voice** in Settings >
   Voice: the voice's files (about 346 MB, pinned revisions); nothing of yours is
   sent, and the voice then runs offline on this PC - the briefing and
@@ -7103,6 +7205,9 @@ briefing_reader/agenda.py     TODAY / TOMORROW rows, the "Deadlines" section, ca
 briefing_reader/google_auth.py  Google sign-in per account (one token per account, which Google account it is), single-send HTTP
 briefing_reader/gcal.py       Google Calendar: duplicate check, event creation, reading events, answer / move / cancel
 briefing_reader/gmail.py      Gmail: sending (gmail.send only; the message exactly as the card shows it, one send per approval) and Ask's read-only thread reader (gmail.readonly)
+briefing_reader/ms_auth.py    Outlook sign-in per account (read only): PKCE with a localhost redirect, ms_token_<account>.json, refresh
+briefing_reader/outlook.py    Outlook through Microsoft Graph, read only: calendar events as the Day view's, inbox headers as Gmail's
+briefing_reader/outlook_ui.py Settings > Accounts' Outlook part: Connect / Disconnect per Outlook account
 briefing_reader/recipients.py never to the sending account itself (any spelling); the NEW RECIPIENT check: trusted domains, addresses sent to before (hashed)
 briefing_reader/executor.py   carrying out an approved proposal per account ("running" first), the cards' check lines
 briefing_reader/ask/          Ask Jarvis (no Qt): Claude Code checks and runs (cli), its output (stream), the planner's

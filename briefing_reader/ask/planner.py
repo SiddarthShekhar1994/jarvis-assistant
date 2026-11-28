@@ -812,7 +812,10 @@ class GoogleSources:
         self._recent: dict[tuple[Any, ...], tuple[float, int, tuple[EventBrief, ...]]] = {}
 
     def aliases(self) -> list[str]:
-        names = list(self.config.accounts)
+        """The Google accounts Ask may know of. An Outlook account (backend "microsoft") is never one: it is read
+        only in this version, so no card is ever offered for it."""
+        names = [alias for alias, account in self.config.accounts.items()
+                 if getattr(account, "backend", "google") != "microsoft"]
         for group in (self.calendars, self.senders, self.readers):
             names += [alias for alias in group if alias not in names]
         return names
