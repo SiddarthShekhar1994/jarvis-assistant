@@ -187,13 +187,15 @@ STANDING_READ = "standing.read"           # what the run read (counts), or why i
 STANDING_RUN = "standing.run"             # the run itself: how long, how it ended (a reason word, never content)
 STANDING_MADE = "standing.made"           # what it made: each card, answer or tidy-up as the Agents screen says it
 STANDING_STEP_KINDS = (STANDING_START, STANDING_READ, STANDING_RUN, STANDING_MADE)
+LOCAL_ANSWER = "local.answer"             # an answer made on this PC by the simpler model (local_llm): the model, why,
+                                          # what it was given (counts), its tokens, device and time; never the prompt
 STEP_KINDS = (ASK_REQUEST, ASK_CHECKS, CALENDAR_READ, MAIL_THREAD, MAIL_SEARCH, PLANNER_RUN, ASK_VALIDATE,
               ASK_CARDS, ACTION_APPROVED, ACTION_PAYLOAD, ACTION_HOLD, ACTION_SIGNIN, ACTION_CHECKS,
               ACTION_CALL, BRIEFING_FETCH, AGENDA_READ, EVENT_CHECK, ACCOUNT_SIGNIN, CLAUDE_CHECK, WEB_SEARCH,
               WEB_FETCH, WEB_SOURCE, RESEARCH_INPUT, RESEARCH_RUN, RESEARCH_VALIDATE, MEMORY_SAVE, MODE_REQUEST,
               PLAN_FREE, PLAN_VALIDATE, PREP_MEETING, PREP_PEOPLE, PREP_VALIDATE, CALENDAR_DAY, OFFER_MADE,
               MAIL_SCAN, MEETING_INPUT, MEETING_VALIDATE, CAPTURE_INPUT, CAPTURE_VALIDATE, *DESKTOP_STEP_KINDS,
-              *AGENT_STEP_KINDS, *STANDING_STEP_KINDS)
+              *AGENT_STEP_KINDS, *STANDING_STEP_KINDS, LOCAL_ANSWER)
 
 # Internal link ids a Field may carry besides a Jarvis-made Google result link: "tab:jarvis" (a tab),
 # "live:3" (a task), "picture:12" (step 12's picture shown larger; the step itself while it has none).

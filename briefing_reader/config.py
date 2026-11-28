@@ -121,7 +121,7 @@ _MISSING = object()
 _KNOWN_TABLES = ("voice", "prompt", "polling", "sections", "notion", "calendar", "actions",
                  "accounts", "schedule", "hotkey", "agenda", "display", "ask", "research", "assistant", "live",
                  "productivity", "ui", "meetings", "desktop", "agent", "talk", "instant", "standing", "look",
-                 "docs", "wake", "mcp", "microsoft")
+                 "docs", "wake", "mcp", "microsoft", "local_model")
 # Library loggers kept at WARNING, also under --debug. The Google sign-in libraries log the
 # authorization code, the access token and the refresh token at DEBUG (requests_oauthlib),
 # before Jarvis could register them for redaction, so they never get DEBUG here.
@@ -649,6 +649,22 @@ class MicrosoftConfig:
 
 
 @dataclass(frozen=True)
+class LocalModelConfig:
+    """``[local_model]``: plain answers made on this PC by a simpler model (owner decision 2026-11-28; on by default;
+    the table may be absent from config.toml: these defaults hold). ``fallback``: when Ask can't use Claude (Claude
+    Code missing or signed out, a plan limit, offline, a failed run) and the model is installed, it answers instead;
+    "local: ..." asks it directly either way. It only answers in words: never cards, mail search, web research or
+    actions. ``max_tokens`` caps one answer, ``timeout_seconds`` its time, and ``idle_minutes`` how long the model
+    stays loaded after its last answer (then its memory goes back to the voice models)."""
+
+    enabled: bool = True
+    fallback: bool = True
+    max_tokens: int = 512             # 64..1024
+    timeout_seconds: int = 90         # 15..300
+    idle_minutes: int = 5             # 1..120
+
+
+@dataclass(frozen=True)
 class Config:
     notion_token: str = field(repr=False)   # "" when missing; NEVER logged
     page_id: str                            # normalized 32-hex, no dashes; "" when missing or invalid
@@ -688,6 +704,7 @@ class Config:
     mcp: McpConfig = field(default_factory=McpConfig)
     wake: WakeConfig = field(default_factory=WakeConfig)
     microsoft: MicrosoftConfig = field(default_factory=MicrosoftConfig)
+    local_model: LocalModelConfig = field(default_factory=LocalModelConfig)
     # Settings changed in the app (overrides.py: settings.json in the data folder, merged before the parsers): the
     # "table.key" names in use here, and what config.toml alone gives each of them. hash=False keeps Config hashable.
     overridden: frozenset[str] = frozenset()
@@ -841,6 +858,7 @@ def load_config(project_root: Path | None = None, *,
         mcp=_parse_mcp(doc),
         wake=_parse_wake(doc),
         microsoft=_parse_microsoft(doc),
+        local_model=_parse_local_model(doc),
         overridden=overridden,
         toml_values=MappingProxyType(toml_values),
     )
@@ -1627,6 +1645,16 @@ def _parse_wake(doc: Mapping[str, Any]) -> WakeConfig:
     d = WakeConfig()
     r = _TableReader(doc, "wake", _field_names(WakeConfig))
     return WakeConfig(only_my_voice=r.boolean("only_my_voice", d.only_my_voice))
+
+
+def _parse_local_model(doc: Mapping[str, Any]) -> LocalModelConfig:
+    """``[local_model]`` from config.toml, or the defaults when the table is absent (the repo's config.toml has none)."""
+    d = LocalModelConfig()
+    r = _TableReader(doc, "local_model", _field_names(LocalModelConfig))
+    return LocalModelConfig(enabled=r.boolean("enabled", d.enabled), fallback=r.boolean("fallback", d.fallback),
+                            max_tokens=r.integer("max_tokens", d.max_tokens, 64, 1024),
+                            timeout_seconds=r.integer("timeout_seconds", d.timeout_seconds, 15, 300),
+                            idle_minutes=r.integer("idle_minutes", d.idle_minutes, 1, 120))
 
 
 def _parse_docs(doc: Mapping[str, Any]) -> DocsConfig:

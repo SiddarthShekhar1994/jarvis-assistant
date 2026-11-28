@@ -20,6 +20,9 @@ raises for odd data; only a frame id that is not one raises ValueError (the call
     from_research(answer, *, frame_id, title="")
         a web research answer (ask.research.ResearchAnswer): the answer as text, its sources as rows (title and host,
         never a link)
+    from_local(answer, *, frame_id)
+        an answer made on this PC by the simpler model (local_llm): its words as text, titled "On this PC" with
+        "simpler model" as the meta (its label on the board)
     from_todos(actions, deadlines, *, frame_id, now, statuses=None)
         to-dos: each Todo card (actions.ProposedAction, kind "todo") - it waits while it still waits on the owner's OK,
         is done when ``statuses`` (action id -> actions.STATUS_*, as actions.ActionStore keeps them) says so, else open;
@@ -610,6 +613,18 @@ def from_research(answer: Any, *, frame_id: str, title: str = "") -> Built:
     body = {"text": clean(getattr(answer, "answer", ""), protocol.TEXT_CAP), "rows": _capped(rows, _text_more)}
     return Built((_frame(frame_id, "text", clean(title, protocol.TITLE_CAP) or RESEARCH_TITLE,
                          meta=_plural(len(rows), "source"), body=body),))
+
+
+LOCAL_TITLE = "On this PC"
+LOCAL_META = "simpler model"
+
+
+def from_local(answer: Any, *, frame_id: str) -> Built:
+    """An answer made on this PC by the simpler model (local_llm): its words as text under "On this PC", "simpler
+    model" as the meta - the label that it is not Claude's. Never rows, a link or a chip."""
+    frame_id = _check_id(frame_id)
+    body = {"text": clean(answer if isinstance(answer, str) else "", protocol.TEXT_CAP), "rows": []}
+    return Built((_frame(frame_id, "text", LOCAL_TITLE, meta=LOCAL_META, body=body),))
 
 
 def _title_key(title: Any) -> str:

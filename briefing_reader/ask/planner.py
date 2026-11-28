@@ -29,6 +29,14 @@ ask.research.build_research_prompt's: the question, the date and time zone and J
 never the calendar, mail, contacts, briefing, accounts or addresses. Its answer becomes cards
 through ask.research_validate (AskOutcome.research holds the answer and the sources).
 
+Answers on this PC (local_llm, owner decision 2026-11-28): with ``AskPlanner.local`` set (the app's
+local_llm.LocalModel), a request that starts with "local:" goes to the simpler model on this PC only, and an Ask that
+ends with a LOCAL_FALLBACK kind (Claude Code missing or signed out, a limit, a failed run) is answered there instead
+while [local_model] fallback is on and the model is ready. It is given today's calendar lines (the read Ask made, or
+one made now) and the owner's notes, as data; never mail, the briefing, the conversation, cards, a search, web
+research or an action. Its outcome is ok with ``local`` (LocalReport), its words as ``say`` and its label
+(local_llm.label_note) as ``message``; when the model can't answer either, Claude's own failure stands.
+
 An Ask: caps and readiness first (refused without a run), then the context: the calendar of every
 signed-in account, the briefing, and the text of briefing threads the request clearly names (on
 accounts with "gmail_read"). The first run may ask to search mail instead of planning
@@ -160,6 +168,7 @@ from ..live import (
     DESKTOP_PLAN,
     DESKTOP_STEP,
     DESKTOP_VALIDATE,
+    LOCAL_ANSWER,
     MAIL_SEARCH,
     MAIL_THREAD,
     MEETING_INPUT,
@@ -185,6 +194,7 @@ from ..live import (
     elapsed_text,
 )
 from ..live import quiet as _quiet
+from .. import local_llm
 from ..persona import with_address
 from ..pictures import CalendarRead, email_picture, plan_picture, week_picture
 from .context import (
@@ -273,6 +283,7 @@ STAGE_RESEARCH = "research"        # the web research run
 STAGE_DAY = "day"                  # a day plan: reading the day being planned
 STAGE_PREP_MAIL = "prep_mail"      # a meeting brief: Jarvis's own searches and reads of the guests' threads
 STAGE_THREAD = "thread"            # a follow-up draft: reading the one thread the owner clicked
+STAGE_LOCAL = "local"              # the simpler model on this PC answers (local_llm)
 
 # Refusals before any run (AskOutcome.kind), besides stream's failure kinds.
 EMPTY = "empty"
@@ -285,6 +296,16 @@ NOT_READY = "not_ready"
 RESEARCH_OFF = "research_off"                  # web: while [research] enabled = false
 RESEARCH_LIMIT = "research_limit"              # the web research caps refuse it (the Ask caps allow it)
 RESEARCH_UNSUPPORTED = "research_unsupported"  # Readiness.problem: this Claude Code lacks --allowedTools
+LOCAL_OFF = "local_off"                        # local: while [local_model] enabled = false
+LOCAL_NOT_READY = "local_not_ready"            # local: while the model is not installed (or could not load)
+LOCAL_FAILED = "local_failed"                  # local: and the model gave no answer
+# An Ask that ends with one of these kinds could not use Claude: with [local_model] fallback on and the model ready, the
+# simpler model on this PC answers it instead (plain words only). Claude Code missing, not ready or signed out, a plan
+# limit or the extra-usage pause (LIMIT), Jarvis's own Ask limits (CAPS), and a run that failed - offline included
+# (Claude Code then fails or times out). Never a Cancel, an empty request, Ask off, busy, or web research's own refusals.
+LOCAL_FALLBACK = frozenset({NOT_SIGNED_IN, NOT_SUBSCRIPTION, CLI_MISSING, "cli_unsupported", WORKDIR, NOT_READY,
+                            "error", "limit", CAPS, "timeout", "garbled", "schema_retries", "max_turns", GUARD,
+                            "server_busy"})
 
 AUTH_FRESH_S = 5.0        # run() trusts an auth status this recent; older, it asks again
 # A meeting summary reads a long transcript and writes the overview and the key points by topic (a 90-minute talk:
@@ -1038,9 +1059,17 @@ class AskOutcome:
     doc_name: str = field(default="", repr=False)
     doc_words: str = field(default="", repr=False)
     doc_proposal: Any = field(default=None, repr=False, compare=False)
+    # Answered on this PC by the simpler model (LocalReport: the model, why, counts and times; never words). Its
+    # answer is ``say``, its label ``message``; it never has cards, frames, a search, a task or a note to keep.
+    local: Any = field(default=None, repr=False, compare=False)
 
     def summary(self) -> str:
         """For the log: kinds and counts only."""
+        if self.local is not None:
+            local = self.local
+            return (f"{self.kind}: answered on this PC ({local.reason}), {local.prompt_tokens} prompt token(s), "
+                    f"{local.output_tokens} output token(s), {local.ms / 1000:.1f} s, {local.device or '-'}, "
+                    f"{self.runs} Claude run(s)")
         if self.doc_job:
             return f"{self.kind}: handed to a {self.doc_job}, {self.runs} run(s)"
         if self.agent_task:
@@ -1075,6 +1104,27 @@ class AskOutcome:
                 valid = sum(1 for card in self.cards if not card.error)
                 text += f", slots {self.slots}, blocks {valid}/{self.blocks_max}"
         return text
+
+
+@dataclass(frozen=True)
+class LocalReport:
+    """An answer made on this PC (AskOutcome.local): the model, why it answered (an Ask failure kind, or
+    local_llm.REASON_FORCED for "local:"), the tokens in and out, how long it took (and loading, when this answer loaded
+    it), the device, and how many calendar lines and notes it was given (agenda -1: the calendar was not read)."""
+
+    model: str
+    reason: str
+    prompt_tokens: int = 0
+    output_tokens: int = 0
+    ms: int = 0
+    load_ms: int = 0
+    device: str = ""
+    agenda: int = -1
+    notes: int = 0
+
+    @property
+    def forced(self) -> bool:
+        return self.reason == local_llm.REASON_FORCED
 
 
 def _seconds(value: float | None) -> str:
@@ -1159,6 +1209,10 @@ class AskPlanner:
     # the ask thread). None - every test's and the command line's unless they ask -: no word of it in any schema or
     # prompt.
     agent_allowed: Callable[[], bool] | None = None
+    # The simpler model on this PC (local_llm.LocalModel; the app's, from [local_model]): answers "local: ..." and,
+    # with its ``fallback`` on, an Ask that could not use Claude (LOCAL_FALLBACK). None - every test's and the command
+    # line's unless they set one -: neither.
+    local: Any = None
 
     def __init__(self, config: Config, engine: ClaudeEngine, sources: Sources, *, usage: UsageLog | None = None,
                  clock: Callable[[], datetime] | None = None, monotonic: Callable[[], float] = time.monotonic,
@@ -1387,15 +1441,25 @@ class AskPlanner:
             return AskOutcome(False, "busy", BUSY_MESSAGE)
         started = self._monotonic()
         self._reads.calendar = None
+        self._reads.ctx = None
         self._reads.timing = _AskTiming(started)
+        words = " ".join((command or "").split())[:COMMAND_CAP]
         try:
-            outcome = self._plan(" ".join((command or "").split())[:COMMAND_CAP], briefing, page_ids, cancel,
-                                 on_stage, task, tuple(conversation or ()), on_words)
-        except Exception as exc:  # noqa: BLE001 - an Ask must never take the app down
-            logger.warning("Ask: stopped by an unexpected error (%s)", type(exc).__name__)
+            try:
+                outcome = self._plan(words, briefing, page_ids, cancel, on_stage, task, tuple(conversation or ()),
+                                     on_words)
+            except Exception as exc:  # noqa: BLE001 - an Ask must never take the app down
+                logger.warning("Ask: stopped by an unexpected error (%s)", type(exc).__name__)
+                task.current().done(STATUS_FAILED, summary=f"unexpected error ({type(exc).__name__})")
+                outcome = AskOutcome(False, "error", "Ask stopped because of an unexpected error; nothing was proposed")
+            if self._local_fallback(outcome, cancel):
+                outcome = self._local_answer(words, outcome.kind, cancel, on_stage, task, failed=outcome)
+        except Exception as exc:  # noqa: BLE001 - the answer on this PC must never take the app down either
+            logger.warning("Ask: the answer on this PC stopped by an unexpected error (%s)", type(exc).__name__)
             task.current().done(STATUS_FAILED, summary=f"unexpected error ({type(exc).__name__})")
             outcome = AskOutcome(False, "error", "Ask stopped because of an unexpected error; nothing was proposed")
         finally:
+            self._reads.ctx = None
             self._busy.release()
         read, self._reads.calendar = getattr(self._reads, "calendar", None), None
         timing, self._reads.timing = getattr(self._reads, "timing", None), None
@@ -1457,10 +1521,16 @@ class AskPlanner:
             pool.forget(prestart.SLOT_DESKTOP)
 
     def prestart_shutdown(self) -> None:
-        """Jarvis closes: what waits is killed and nothing starts again."""
+        """Jarvis closes: what waits is killed and nothing starts again (the model on this PC too)."""
         pool = getattr(self.engine, "prestart", None)
         if pool is not None:
             pool.shutdown()
+        local = self.local
+        if local is not None:
+            try:
+                local.close()
+            except Exception as exc:  # noqa: BLE001 - shutting down goes on
+                logger.warning("Local model: could not be closed (%s)", type(exc).__name__)
 
     def read_ahead(self) -> None:
         """The owner started typing: the calendars an Ask's context would read, read now (GoogleSources.
@@ -1574,6 +1644,9 @@ class AskPlanner:
         if not command:
             live.step(ASK_CHECKS, CHECKS_TITLE, status=STATUS_BLOCKED, summary=EMPTY_MESSAGE)
             return AskOutcome(False, EMPTY, EMPTY_MESSAGE)
+        local_question = local_llm.forced_question(command)
+        if local_question is not None:   # "local:": the simpler model on this PC only, never Claude
+            return self._local_only(local_question, cancel, on_stage, live)
         question = forced_question(command)
         if question is not None:   # "web:" / "research:": web research only, nothing read from the accounts
             return self._research_only(question, page_ids, cancel, on_stage, live)
@@ -1587,6 +1660,8 @@ class AskPlanner:
             ahead()                                   # alongside the context: the run asks again only if it is old
         timing = getattr(self._reads, "timing", None)
         ctx, notes = self._context(command, briefing, now, on_stage, cancel, live, shown, conversation)
+        self._reads.ctx = ctx                         # an answer on this PC after a failed run reads it again: no
+                                                      # second calendar read (it takes the calendar and notes only)
         if cancel is not None and cancel.is_set():
             return AskOutcome(False, CANCELLED, "Cancelled; nothing was proposed")
 
@@ -1752,6 +1827,119 @@ class AskPlanner:
             logger.info("Memory: a suggestion was dropped (%s)", reason)
             return "", reason
         return text, ""
+
+    # ---- answers on this PC (local_llm) -----------------------------------------------------
+
+    def _local_fallback(self, outcome: AskOutcome, cancel: threading.Event | None) -> bool:
+        """Should the simpler model on this PC answer this Ask? Only one Claude could not answer (LOCAL_FALLBACK, never
+        a Cancel), with [local_model] fallback on and the model ready (file reads only); never raises."""
+        local = self.local
+        if local is None or outcome.ok or outcome.kind not in LOCAL_FALLBACK or not getattr(local, "fallback", True):
+            return False
+        if cancel is not None and cancel.is_set():
+            return False
+        try:
+            return bool(local.ready())
+        except Exception:  # noqa: BLE001 - unknown: Claude's own failure stands
+            return False
+
+    def _local_only(self, question: str, cancel: threading.Event | None, on_stage: Callable[[str], None],
+                    live: LiveTask = NO_TASK) -> AskOutcome:
+        """A "local:" request: the simpler model on this PC answers, never Claude (no caps: nothing of the plan's is
+        used). Refused with Jarvis's own words while it is off or not installed."""
+        if not question:
+            live.step(ASK_CHECKS, CHECKS_TITLE, status=STATUS_BLOCKED, summary=local_llm.EMPTY_MESSAGE)
+            return AskOutcome(False, EMPTY, local_llm.EMPTY_MESSAGE)
+        if self.local is None:
+            live.step(ASK_CHECKS, CHECKS_TITLE, status=STATUS_BLOCKED, summary=local_llm.OFF_MESSAGE)
+            return AskOutcome(False, LOCAL_OFF, local_llm.OFF_MESSAGE)
+        reason = self.local.reason()
+        if reason:
+            message = local_llm.NOT_READY_MESSAGES.get(reason.split(":", 1)[0],
+                                                       local_llm.NOT_READY_MESSAGES[local_llm.ERR_MODEL])
+            live.step(ASK_CHECKS, CHECKS_TITLE, status=STATUS_BLOCKED, summary=message)
+            logger.info("Local model: not asked (%s)", reason)
+            return AskOutcome(False, LOCAL_NOT_READY, message)
+        return self._local_answer(question, local_llm.REASON_FORCED, cancel, on_stage, live)
+
+    def _local_answer(self, command: str, reason: str, cancel: threading.Event | None,
+                      on_stage: Callable[[str], None], live: LiveTask = NO_TASK, *,
+                      failed: AskOutcome | None = None) -> AskOutcome:
+        """The simpler model on this PC answers ``command`` in plain words: given today's calendar lines (from the
+        calendar Ask read, or read now) and the owner's notes, as data; never mail, the briefing, the conversation,
+        cards, a search, web research or an action. ``failed``: Claude's own outcome, which stands when the model
+        can't answer either. The LIVE view gets one step (never the prompt); the log counts and times only."""
+        on_stage(STAGE_LOCAL)
+        now = self.clock()
+        ctx = getattr(self._reads, "ctx", None)
+        if ctx is None:
+            try:   # Claude refused before any read (or "local:"): the calendar is read now, the briefing never
+                ctx, _notes = self._context(command, None, now, lambda _stage: None, cancel, live, None, ())
+            except Exception as exc:  # noqa: BLE001 - it answers without the calendar
+                logger.info("Local model: the calendar could not be read (%s)", type(exc).__name__)
+                ctx = None
+        if cancel is not None and cancel.is_set():
+            return AskOutcome(False, CANCELLED, "Cancelled; nothing was answered")
+        agenda: list[str] | None = None
+        notes: Sequence[str] = ()
+        zone = self._research_zone()
+        if ctx is not None:
+            if any(account.calendar == "yes" for account in ctx.accounts):
+                agenda = local_llm.agenda_lines(ctx.events, ctx.now, hour24=self._hour24())
+            notes, zone, now = ctx.memory, ctx.time_zone or zone, ctx.now
+        else:
+            notes = self._memory_notes()
+        shown = local_llm.notes_shown(notes, command)
+        system, user = local_llm.build_messages(command, now=now, time_zone=zone, agenda=agenda, notes=shown,
+                                                address=self._owner())
+        step = live.step(LOCAL_ANSWER, local_llm.LIVE_TITLE)
+        step.field("Model", f"{local_llm.MODEL_WORDS}, on this PC")
+        step.field("Why", "You asked with local:" if reason == local_llm.REASON_FORCED
+                   else f"{local_llm.reason_words(reason)[:1].upper()}{local_llm.reason_words(reason)[1:]}")
+        if failed is not None and failed.message:
+            step.field("Claude's answer", failed.message)
+        step.field("Given", ("today's calendar not read" if agenda is None
+                             else f"today's calendar ({len(agenda)} event{'' if len(agenda) == 1 else 's'})")
+                   + f", {len(shown)} note{'' if len(shown) == 1 else 's'}")
+        step.field("Never given", "your mail, the briefing, the conversation, web research or any action")
+        if len(command) > local_llm.MAX_QUESTION_CHARS:
+            step.field("Your words", f"the first {local_llm.MAX_QUESTION_CHARS:,} characters")
+        began = self._monotonic()
+        try:
+            answer = self.local.answer(system, user, cancel=cancel)
+        except local_llm.LocalModelError as exc:
+            code = exc.code.split(":", 1)[0]
+            took = self._monotonic() - began
+            logger.info("Local model: no answer (%s; %s) after %.1f s", reason, exc.code, took)
+            if code == local_llm.ERR_CANCELLED or (cancel is not None and cancel.is_set()):
+                step.done(STATUS_CANCELLED, summary="Cancelled")
+                return AskOutcome(False, CANCELLED, "Cancelled; nothing was answered")
+            words = local_llm.FAILED_MESSAGES.get(code) or local_llm.NOT_READY_MESSAGES.get(code) \
+                or local_llm.FAILED_MESSAGE
+            step.done(STATUS_FAILED, summary=f"{words} ({exc.code})")
+            if failed is not None:
+                return failed                          # Claude's own failure stands: it says what to fix
+            return AskOutcome(False, LOCAL_FAILED, words)
+        finally:
+            del system, user
+        device = local_llm.DEVICE_WORDS.get(answer.device, "this PC")
+        step.field("Device", device)
+        step.field("Loaded", elapsed_text(answer.load_ms / 1000) if answer.load_ms else "already loaded")
+        step.field("Tokens", f"{answer.prompt_tokens:,} in, {answer.output_tokens:,} out")
+        step.field("Took", elapsed_text(answer.ms / 1000))
+        if answer.stopped == "max_tokens":
+            step.field("Stopped", "at the answer's length limit ([local_model] max_tokens)")
+        step.done(STATUS_WARN if answer.stopped == "max_tokens" else STATUS_OK,
+                  summary=f"{answer.output_tokens:,} tokens on the {device} in {answer.ms / 1000:.1f} s")
+        report = LocalReport(local_llm.MODEL_NAME, reason, answer.prompt_tokens, answer.output_tokens, answer.ms,
+                             answer.load_ms, answer.device, -1 if agenda is None else len(agenda), len(shown))
+        logger.info("Local model: answered (%s; %d prompt token(s), %d output token(s), %.1f s, loaded in %.1f s, %s)",
+                    reason, answer.prompt_tokens, answer.output_tokens, answer.ms / 1000, answer.load_ms / 1000,
+                    answer.device or "-")
+        if failed is None:
+            return AskOutcome(True, "ok", local_llm.label_note(reason), say=answer.text, local=report)
+        return AskOutcome(True, "ok", local_llm.label_note(reason), say=answer.text, runs=failed.runs,
+                          init=failed.init, stats=failed.stats, mail=failed.mail, local=report)
 
     # ---- planner modes (the productivity bundle) ---------------------------------------------
 

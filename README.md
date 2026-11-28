@@ -5233,6 +5233,64 @@ background, every step visible in LIVE. If you are unsure, set `[research]
 enabled = false`; `web:` then says web research is off and the planner never
 hands anything over.
 
+### Answers on this PC when Claude can't
+
+When Ask can't use Claude - Claude Code is not installed or not signed in,
+your plan's limit or the extra-usage pause is reached, Ask's own hourly or
+daily limit is reached, the PC is offline, or a run failed - a simpler model
+that runs on this PC answers your question instead. Start a request with
+`local:` (for example `local: what's a good way to start a cover letter?`) to
+ask it directly, even when Claude is there.
+
+What it does:
+
+- It answers in plain words only. The answer is always labelled **Answered on
+  this PC by a simpler model** (with why: "Claude Code isn't signed in", "your
+  Claude plan's limit is reached", "you asked with local:" ...) in the bar and
+  the conversation, "on this PC, simpler model" under it, and as an "On this
+  PC · simpler model" frame on the board. Jarvis says first that the answer is
+  from the simpler model.
+- It may be given today's calendar lines (each event's time and title, today
+  only) and your notes from MEMORY, marked as data, never as instructions.
+- LIVE shows it as one step, "Answered on this PC": the model, why it
+  answered, what it was given (counts), the device, the tokens in and out and
+  the time. Never the text it was given.
+
+What it doesn't do: it never makes a card, never searches or reads mail, never
+sees the briefing or the earlier conversation, never runs web research, never
+starts a task and never does anything on your accounts or your desktop. Its
+answer is not given to a later Ask as the conversation. It is a smaller model
+than Claude: it can be wrong, so check what matters. When it can't answer
+either, you see Claude's own reason, as before.
+
+**The model.** Phi-3.5-mini-instruct by Microsoft, released under the MIT
+licence, converted to run quickly on a PC (8-bit weights). It is not
+downloaded by Jarvis and has no Download button: it is put in by hand, as the
+folder `phi-3.5-mini-instruct-int8` inside the `models` folder of the data
+folder (`%LOCALAPPDATA%\briefing-reader\models\phi-3.5-mini-instruct-int8`),
+with `model.bin`, `config.json`, `tokenizer.json` and `vocabulary.json` in it.
+It needs two add-ons, installed once:
+
+```powershell
+py -3.13 -m pip install ctranslate2 tokenizers
+```
+
+Settings > Ask says whether it answers ("Answers on this PC") and whether the
+model is ready and its size ("Model on this PC"), or that it is not installed.
+
+**Memory.** The folder is about 3.8 GB on disk. It loads on the first answer
+(seconds from a fast disk), in its own process, on the graphics card when
+there is room (about 4 GB of graphics memory while it is loaded), else on the
+processor (about 4 GB of RAM, and slower). After `[local_model] idle_minutes`
+(5) without an answer it ends, so that memory goes back to the voice and
+speech models. An answer is at most `[local_model] max_tokens` (512) tokens and
+`[local_model] timeout_seconds` (90) long; Cancel ends it at once.
+
+**Off.** `[local_model] fallback = false` keeps it to `local:` requests only;
+`[local_model] enabled = false` turns it off (`local:` then says so). The logs
+hold only counts, times, devices and reason words, never a question or an
+answer.
+
 ## "Proposed actions" format
 
 The proposals go under a heading named "Proposed actions" (any heading level;
@@ -5808,6 +5866,11 @@ file to go back to `config.toml` for all of them.
 | `[look] sounds` | `"soft"` | The [soft sounds](#soft-sounds): `"soft"` or `"off"` (`true` / `false` mean `"soft"` / `"off"`). `"off"` here wins: Settings > Look then says they are off in config.toml and has no button for them. With `"soft"`, Settings > Look can turn them off on this PC. The "Hey Jarvis" chime keeps its own rules either way. |
 | `[look] board` | `true` | Home as the [canvas](#the-look-the-canvas), with its [frames](#frames-on-the-canvas) (Settings > Look calls it "Home as the canvas"). `false`: Home is the hologram look as it was before the board (no frames, no Board button, no hint line, no desk), the web view is never made, and the second screen shows only its counts. |
 | `[look] second_screen` | `false` | [Jarvis on your second screen](#jarvis-on-your-second-screen), by default. Once you use its switch in Settings > Look, your choice there wins over this key on this PC (it is kept in `assistant.json`). |
+| `[local_model] enabled` | `true` | [Answers on this PC when Claude can't](#answers-on-this-pc-when-claude-cant): the simpler model on this PC may answer. `false`: never (`local:` says it is off). |
+| `[local_model] fallback` | `true` | It answers when Ask can't use Claude. `false`: only `local:` requests. |
+| `[local_model] max_tokens` | `512` | The longest answer, in tokens (64-1024). |
+| `[local_model] timeout_seconds` | `90` | One answer may take this long (15-300); then it is stopped and nothing is answered. |
+| `[local_model] idle_minutes` | `5` | The model stays loaded this long after its last answer (1-120), then its memory is freed. |
 
 The offline voice uses the same `rate` and `volume`: the rate scales Windows'
 default 200 words per minute, and a volume above `+0%` cannot get louder than
@@ -7270,6 +7333,8 @@ briefing_reader/tts.py        speech synthesis: the local voice or edge-tts, Win
 briefing_reader/local_voice.py  the voice made on this PC, the app's side (no Qt): its pinned download, add-ons, text into requests, the shared client
 briefing_reader/local_voice_worker.py  the local voice's own process: misaki's word-to-sound, Kokoro-82M in onnxruntime, WAVs with word times
 briefing_reader/local_voice_ui.py  Settings > Voice's own part: whether the local voice can run, its Download, the add-ons' lines
+briefing_reader/local_llm.py  answers on this PC when Claude can't (no Qt): the model's folder check, the prompt, the client of its process
+briefing_reader/local_llm_worker.py  the simpler model's own process: loads it on the graphics card (else the processor), answers, ends when idle
 briefing_reader/player.py     QtMultimedia player that plays sections in order with pauses
 briefing_reader/hud.py        Jarvis HUD widget kit: colours, fonts, chamfered panels, orb, buttons, cards, agenda, command bar, tabs, conversation, the LIVE log, its pictures and the picture viewer
 briefing_reader/ui.py         assistant screen (JARVIS / BRIEFING / LIVE / MEMORY tabs), the LIVE pop-out window, classic prompt, tray icon, approvals, TODAY / DEADLINES, app controller (launch kinds, NEW, greeting, announcement)
@@ -7340,6 +7405,11 @@ The bundled fonts in `fonts\` are not covered by that licence: Chakra Petch,
 Sora and JetBrains Mono are each licensed under the SIL Open Font License,
 Version 1.1, and their licence files are next to them (`fonts\OFL-ChakraPetch.txt`,
 `fonts\OFL-Sora.txt`, `fonts\OFL-JetBrainsMono.txt`; see [Fonts](#fonts)).
+
+The model for [answers on this PC](#answers-on-this-pc-when-claude-cant),
+Phi-3.5-mini-instruct, is copyright Microsoft Corporation and licensed under
+the MIT License; it is not included in this repository (its licence file comes
+with it, in its folder).
 
 "Hey Jarvis" (`briefing_reader\wake.py`) follows the streaming pipeline of
 [openWakeWord](https://github.com/dscripka/openWakeWord) (code under the Apache

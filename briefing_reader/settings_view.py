@@ -14,6 +14,8 @@ Public API
     ``set_paths(config_path, data_dir)``). Accounts show only their names and whether they are connected
     (``set_connected({alias: True | False})``, from the app's own sign-in check; "Not checked yet" before it); an
     Outlook account's row says "Outlook - ..." and its Connect / Disconnect is outlook_ui's part under the rows.
+    Ask also says whether the simpler model on this PC answers when Claude can't, and whether it is installed and
+    its size (local_llm.settings_rows: file reads only; it is put in by hand, so there is no Download).
     LIVE and privacy also says whether other AI apps may read the board (``MCP_LABEL``: [mcp] enabled, set in
     config.toml only - it widens who reads what Jarvis keeps, so it never has a Change), and has "Sites Jarvis may use
     signed in" as its own part under the rows (site_signins_ui.SitesPanel: kept in site_signins.json, never in
@@ -81,7 +83,7 @@ GROUPS: tuple[tuple[str, str], ...] = (("voice", "Voice"), ("times", "Briefing t
                                        ("live", "LIVE and privacy"))
 GROUP_TABLES: dict[str, tuple[str, ...]] = {
     "voice": ("voice", "assistant"), "times": ("schedule", "polling", "display", "ui"),
-    "ask": ("ask", "research", "hotkey", "actions"), "accounts": ("accounts",), "quiet": ("productivity",),
+    "ask": ("ask", "research", "local_model", "hotkey", "actions"), "accounts": ("accounts",), "quiet": ("productivity",),
     "live": ("live", "productivity", "mcp"),
 }
 # Other AI apps reading the board (mcp_server; [mcp] enabled in config.toml only: it widens who reads what Jarvis keeps,
@@ -264,7 +266,9 @@ def settings_rows(config: Any, group: str, connected: Mapping[str, bool] | None 
         research_on = enabled and bool(getattr(research, "enabled", False))
         research_words = ("On" if getattr(research, "planner_may_ask", True) else "Only when you ask for it") \
             if research_on else "Off"
-        return [("Ask Jarvis", _on(enabled)),
+        from . import local_llm
+
+        rows = [("Ask Jarvis", _on(enabled)),
                 ("Model", str(getattr(ask, "model", "") or "")),
                 ("Reads the mail a request is about", _yes(getattr(ask, "read_mail", True))),
                 ("Web research", research_words),
@@ -274,6 +278,8 @@ def settings_rows(config: Any, group: str, connected: Mapping[str, bool] | None 
                  else "Off"),
                 ("Undo after Send or Cancel event", f"{getattr(actions, 'undo_seconds', 5)} seconds"),
                 ("Undo after a calendar change", "10 minutes")]
+        # Answers on this PC when Claude can't (local_llm): whether the model is there and its size (file reads only).
+        return rows + local_llm.settings_rows(config)
     if group == "accounts":
         connected = connected or {}
         found = getattr(config, "accounts", {}) or {}
