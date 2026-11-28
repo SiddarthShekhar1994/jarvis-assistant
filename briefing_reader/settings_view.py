@@ -285,8 +285,8 @@ def settings_rows(config: Any, group: str, connected: Mapping[str, bool] | None 
         found = getattr(config, "accounts", {}) or {}
         accounts = dict(found) if isinstance(found, Mapping) else {alias: None for alias in found}
         words = {True: "Connected", False: "Not connected"}
-        # An Outlook account (backend "microsoft") says so: it is read only (its Connect is in the part under the rows).
-        outlook = {True: "Outlook - connected (read only)", False: "Outlook - not connected"}
+        # An Outlook account (backend "microsoft") says so (its Connect is in the part under the rows).
+        outlook = {True: "Outlook - connected", False: "Outlook - not connected"}
         return [(str(alias), (outlook if getattr(account, "backend", "") == "microsoft" else words).get(
             connected.get(alias), NOT_CHECKED)) for alias, account in accounts.items()]
     if group == "quiet":

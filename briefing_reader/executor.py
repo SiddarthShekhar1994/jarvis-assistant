@@ -54,10 +54,15 @@ Composio is a seam only: ``backend = "composio"`` is accepted by config.py and
 answered here with "Composio is not built into this version"; a later backend
 implements the same small protocol and nothing else changes.
 
-An Outlook / Microsoft account (``backend = "microsoft"``) is read only in this version: ``readiness`` answers every
-proposal for it with OUTLOOK_NOTE (nothing is sent or changed for it), and its sign-in and readers are built apart from
-the Google ones (``microsoft_aliases``, ``build_microsoft_accounts``, ``build_outlook_calendars``,
-``build_outlook_readers``; ms_auth.py, outlook.py).
+An Outlook / Microsoft account (``backend = "microsoft"``) has backends of its own named "microsoft"
+(outlook_actions.OutlookCalendarBackend, OutlookMailBackend; build_executor's ``outlook_calendars`` /
+``outlook_senders``): an RSVP, Move, Cancel, Reply or Email whose acct= is an Outlook account, and a Calendar card
+that names one (``account_of``: a Calendar card's own account when it has one, else "personal"), go there through
+the same Approve / Send, hold, Undo and recipient checks. Without such a backend (an Executor built without them)
+``readiness`` answers OUTLOOK_NOTE and nothing is sent or changed. Its sign-in and readers are built apart from the
+Google ones (``microsoft_aliases``, ``build_microsoft_accounts``, ``build_outlook_calendars``,
+``build_outlook_readers``, ``build_outlook_senders``; ms_auth.py, outlook.py). A Todo's block always goes to the
+personal Google calendar, as before.
 
 Qt-free and blocking (callers use the worker thread). Logs name only action
 ids, kinds, account aliases ("work", "personal", else "other"), statuses and
@@ -101,6 +106,8 @@ from .actions import (
     ProposedAction,
     edit_action,
     edit_mail,
+    is_gmail_id,
+    is_google_event_id,
     link_host,
     mail_problem,
     open_text,
@@ -189,12 +196,15 @@ OUTCOME_FAILED = "failed"        # certainly not done (the card keeps Deny / Ret
 OUTCOME_UNKNOWN = "unknown"      # may have happened: check before retrying, never retried by itself
 CALENDAR_SETUP_NOTE = "Google Calendar is not set up yet - see README step 8"
 COMPOSIO_NOTE = "Composio is not built into this version"
-# Any proposal for an Outlook account (read only in this version): nothing is sent or changed for it.
-OUTLOOK_NOTE = ("The {alias} account is an Outlook account: Jarvis only reads its calendar and mail in this version, so "
-                "it can't do this - use Copy or Open")
+# A proposal for an Outlook account Jarvis has no Outlook backend for: nothing is sent or changed for it.
+OUTLOOK_NOTE = ("The {alias} account is an Outlook account: Jarvis can't do this for it here, so it changes nothing - "
+                "use Copy or Open")
 NOT_SAVED_MESSAGE = "Could not save the decision before sending, so nothing was sent"
 CLOSING_MESSAGE = "Jarvis was closing when the sign-in finished, so nothing was sent - click again"
 NOTHING_TO_DO = "There is nothing for Jarvis to carry out on this card"
+# A line's event= / thread= may hold an Outlook id (actions.py); a Google account's card refuses one.
+NOT_GOOGLE_EVENT_NOTE = "This event id is not a Google Calendar one, so Jarvis won't change it - open it instead"
+NOT_GMAIL_THREAD_NOTE = "This reply's thread is not a Gmail one, so Jarvis won't send it - use Copy or Open"
 MAIL_SETUP_NOTE = "Sending email is not set up yet - see README step 8b"
 # A Reply or Email goes out only through run_action(writes_running=True): at the end of its Send's
 # hidden hold, with "running" saved first.
@@ -236,11 +246,17 @@ ACCOUNT_KINDS = EVENT_KINDS | MAIL_KINDS
 
 def account_of(action: ProposedAction) -> str:
     """The alias that acts for ``action``: its ``acct=`` for an RSVP, Move, Cancel, Reply or Email;
-    a Calendar event and a Todo's block always go to the personal calendar (as in earlier
-    versions)."""
-    if action.kind in ACCOUNT_KINDS:
+    a Calendar event goes to the personal calendar unless the card itself names an account (only
+    a card Jarvis builds for an Outlook account does: no briefing line or capture sets one), and a
+    Todo's block always goes to the personal calendar (as in earlier versions)."""
+    if action.kind in ACCOUNT_KINDS or (action.kind == CALENDAR and action.account):
         return action.account
     return DEFAULT_ACCOUNT
+
+
+def _by_account(action: ProposedAction) -> bool:
+    """The card's own account picks its backend (acct=, or a Calendar card that names one)."""
+    return action.kind in ACCOUNT_KINDS or (action.kind == CALENDAR and bool(action.account))
 
 
 # --------------------------------------------------------------------------
@@ -463,6 +479,8 @@ class CalendarBackend:
         calendar = self._calendars.get(account_of(action))
         if calendar is None or not _call_bool(calendar, "is_configured"):
             return CALENDAR_SETUP_NOTE
+        if action.kind in EVENT_KINDS and not is_google_event_id(action.field("event")):
+            return NOT_GOOGLE_EVENT_NOTE
         return ""
 
     def signed_in(self, action: ProposedAction) -> bool:
@@ -701,6 +719,8 @@ class GmailBackend:
         sender = self._senders.get(action.account)
         if sender is None or not _call_bool(sender, "is_configured"):
             return MAIL_SETUP_NOTE
+        if action.kind == REPLY and not is_gmail_id(action.field("thread")):
+            return NOT_GMAIL_THREAD_NOTE
         return mail_problem(action)
 
     def signed_in(self, action: ProposedAction) -> bool:
@@ -972,7 +992,7 @@ class Executor:
         earlier versions); an RSVP, Move or Cancel uses its account's ``backend``.
         """
         name = BACKEND_GOOGLE
-        if action.kind in ACCOUNT_KINDS:
+        if _by_account(action):
             account = self._accounts.get(action.account)
             if account is None:
                 return None
@@ -984,7 +1004,7 @@ class Executor:
         """"" when ``action`` can be carried out now, else why not (no network, no sign-in)."""
         if not action.actionable:
             return NOTHING_TO_DO
-        if action.kind in ACCOUNT_KINDS:
+        if _by_account(action):
             alias = action.account
             account = self._accounts.get(alias)
             if account is None:
@@ -992,7 +1012,11 @@ class Executor:
             if account.backend == BACKEND_COMPOSIO:
                 return COMPOSIO_NOTE
             if account.backend == BACKEND_MICROSOFT:
-                return OUTLOOK_NOTE.format(alias=alias)
+                if action.kind not in MAIL_KINDS and CALENDAR_FEATURE not in account.features:
+                    return (f"The {alias} account is not set up for calendar actions "
+                            f"(config.toml [accounts.{alias}] features)")
+                outlook = self.backend_for(action)
+                return OUTLOOK_NOTE.format(alias=alias) if outlook is None else outlook.readiness(action)
             if action.kind in MAIL_KINDS:
                 if GMAIL_FEATURE not in account.features:
                     return (f"The {alias} account is not set up for sending email "
@@ -1888,17 +1912,35 @@ UNSUBSCRIBE_FAILED_WORDS = {
 }
 
 
+def build_outlook_senders(config: Config, accounts: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """One outlook.OutlookSender per Outlook alias (its sign-in asks for Mail.Send; a card sends only on Send)."""
+    from .outlook_actions import build_outlook_senders as build
+
+    if accounts is None:
+        accounts = build_microsoft_accounts(config)
+    return build(accounts)
+
+
 def build_executor(config: Config, calendars: Mapping[str, Any], senders: Mapping[str, Any] | None = None, *,
                    history: RecipientHistory | None = None,
-                   now: Callable[[], datetime] | None = None) -> Executor:
+                   now: Callable[[], datetime] | None = None,
+                   outlook_calendars: Mapping[str, Any] | None = None,
+                   outlook_senders: Mapping[str, Any] | None = None) -> Executor:
     """The Executor of the app: Google Calendar for ``calendars`` and Gmail for ``senders``,
-    ``[actions] trusted_domains`` and the recipient history (default: recipient_history(config)), and an Unsubscribe
-    card's one POST (UnsubscribeBackend)."""
+    ``[actions] trusted_domains`` and the recipient history (default: recipient_history(config)), an Unsubscribe
+    card's one POST (UnsubscribeBackend), and, when there is an Outlook account, Outlook's calendar and mail for
+    ``outlook_calendars`` / ``outlook_senders`` (outlook_actions; the same history and trusted domains)."""
     if history is None:
         history = recipient_history(config)
     backends: list[Any] = [CalendarBackend(calendars, now=now)]
     backends.append(GmailBackend(senders or {}, history=history, trusted_domains=config.actions.trusted_domains))
     backends.append(UnsubscribeBackend())
+    if outlook_calendars is not None or outlook_senders is not None:
+        from .outlook_actions import OutlookCalendarBackend, OutlookMailBackend
+
+        backends.append(OutlookCalendarBackend(outlook_calendars or {}, now=now))
+        backends.append(OutlookMailBackend(outlook_senders or {}, history=history,
+                                           trusted_domains=config.actions.trusted_domains))
     return Executor(backends, config.accounts)
 
 
@@ -1950,7 +1992,8 @@ def check_event(action: ProposedAction, details: EventDetails, today: date) -> E
     if identity:
         parts.append(f"as {identity}")
     mismatch = event_mismatch(action, details)
-    head = f"Google ({_MISMATCH_WORDS[mismatch]})" if mismatch else "Google"
+    service = getattr(details, "service", "") or "Google"   # whose view it is (an Outlook account's: "Outlook")
+    head = f"{service} ({_MISMATCH_WORDS[mismatch]})" if mismatch else service
     rest = _SEPARATOR.join(part for part in parts if part)
     text = f"{head}: {title}{_SEPARATOR}{rest}"
     tips = [f"{head}: {details.title}{_SEPARATOR}{rest}"]

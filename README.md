@@ -1004,10 +1004,11 @@ cd "<project folder>"
    cards only), and remove `"gmail_tidy"` from the account to stop it for
    good.
 
-   **8e. Microsoft / Outlook accounts (read only, optional).** Jarvis can
-   also read an Outlook account: a work or school Microsoft account, or a
-   personal outlook.com, hotmail.com or live.com one. This first stage only
-   reads; nothing is ever sent, answered, moved or changed for it.
+   **8e. Microsoft / Outlook accounts (optional).** Jarvis can also use an
+   Outlook account: a work or school Microsoft account, or a personal
+   outlook.com, hotmail.com or live.com one. It reads its calendar and its
+   unread mail, and carries out the cards you approve for it - exactly as
+   for a Google account, and never without your click.
 
    What works:
 
@@ -1030,14 +1031,50 @@ cd "<project folder>"
      are kept in memory only, never written to disk, and leave with a
      Disconnect. A Google account has no such frame (Jarvis keeps no unread
      list for Gmail).
+   - **Its cards.** A briefing line whose `acct=` names the Outlook account
+     works like a Google one, through the same Approve or Send, the same
+     check line, the same hidden hold before a Send or a Cancel really goes
+     (Undo on the card meanwhile sends nothing) and the same Undo for
+     10 minutes after an answer or a move:
+     - **RSVP** answers the invitation in Outlook. "Who gets an email" set to
+       nobody (`notify=none`) answers without telling the organizer; anything
+       else tells them. Undo puts your earlier answer back; an invitation you
+       had not answered before has no Undo (Outlook can't go back to "not
+       answered").
+     - **Move** gives an event you organise its new time; **Cancel** cancels
+       it, with the card's note sent to the guests. Outlook always tells every
+       guest of a move or a cancellation, so a card whose "Who gets an email"
+       is not everyone is refused for an event that has guests (Edit sets it
+       to everyone, or open the event in Outlook). Undo moves the event back
+       unless it changed since.
+     - **Reply** answers the Outlook message the line names: `thread=` is its
+       conversation and `gmid=` the message itself (both are Outlook's ids;
+       a reply without `gmid=` keeps Copy and Open). The card's text is the
+       whole reply (Outlook writes its own "RE:" subject; nothing is quoted
+       below it), to exactly the card's To and Cc. Right before it goes,
+       Jarvis checks that the message is still in the mailbox and in that
+       conversation; if not, nothing is sent. **Email** sends a new message
+       and keeps it in Sent Items.
+     - The recipients are checked as for Gmail: the account's own address
+       is refused, a NEW RECIPIENT is ticked on the card before Send, and
+       whoever it went to is remembered. The card's From line shows the
+       account's address, which Jarvis reads from Microsoft once, right
+       after the sign-in.
+     - The card's check line says "Outlook: ..." with Outlook's own title
+       and time of the event. Jarvis changes only the account's own
+       calendar.
+     - A Calendar card adds to the personal Google calendar as before, and
+       so does a Todo's block. An event added to an Outlook calendar (only a
+       card that names the account does that) is never a repeating one
+       there yet, and its Undo removes it.
 
    What doesn't yet:
 
-   - No card is ever offered for an Outlook account: no reply or email, no
-     invitation answer, move or cancel, no standing agent or rule and no
-     tidy-up. Ask Jarvis is not told about it, so it never proposes one; a
-     briefing line that names it anyway shows "Jarvis only reads its calendar
-     and mail in this version" and keeps Copy and Open.
+   - Ask Jarvis is not told about Outlook accounts, so it never proposes a
+     card for one: what Ask reads (Gmail threads, Google's events) and how it
+     checks its cards are Google's. Standing agents, rules and tidy-ups stay
+     Google only too; a card from Ask or a standing job that names an Outlook
+     account anyway changes nothing and keeps Copy and Open.
    - Its mail is not read aloud or summarised anywhere yet: the briefing's
      mail is the page your briefing task writes, and Ask, follow-ups and
      meeting prep still read Gmail only.
@@ -1062,8 +1099,13 @@ cd "<project folder>"
       one.
    4. On **API permissions**, **Add a permission > Microsoft Graph >
       Delegated permissions**, and tick `offline_access`, `User.Read`,
-      `Mail.Read` and `Calendars.Read`, then **Add permissions**. Nothing
-      else: none of these can send or change anything.
+      `Mail.Read`, `Calendars.ReadWrite` and `Mail.Send`, then **Add
+      permissions**. `Calendars.ReadWrite` lets an approved card add, move,
+      answer or cancel an event; `Mail.Send` lets a reply or email you Send
+      go out. Jarvis uses them only on your click. Nothing else is needed
+      (no `Mail.ReadWrite`: Jarvis never writes drafts). An app registered
+      for the first, read-only version has `Calendars.Read` instead: add
+      these two (removing `Calendars.Read` is fine).
    5. Copy the **Application (client) ID** from the app's **Overview** page
       (it looks like `00000000-0000-0000-0000-000000000000`).
    6. In `config.toml` add (the repository's file has no such table):
@@ -1083,8 +1125,17 @@ cd "<project folder>"
       connected", with **Connect** under the rows. Click it: Microsoft's
       sign-in opens in your browser (Jarvis listens on `http://localhost` for
       the answer, up to 5 minutes). Pick the right account and accept the
-      permissions. The row then says "Outlook - connected (read only)" and
-      the Day view reads its calendar from the next read.
+      permissions. The row then says "Outlook - connected" and the Day view
+      reads its calendar from the next read.
+
+   An account connected with the first, read-only version keeps reading as
+   before (its sign-in is refreshed with only the permissions it was given),
+   but Jarvis can't change anything for it: Settings > Accounts says
+   "Outlook - connected, read only" with **Sign in again**, and its cards say
+   "Sign in again to let Jarvis change this account" with **Sign in** (a
+   Reply or Email: its **Send** signs in first and sends nothing). Accept the
+   new permissions there once; nothing is sent or changed by the sign-in
+   itself.
 
    Without a client id, **Connect** opens nothing and says that the app id
    is needed first and where it goes. A work or school administrator may not
@@ -3943,8 +3994,8 @@ start time ("9:00 AM", or "ALL DAY" for all-day events), the title and a short
 line: "now", "in 20 min" (up to an hour ahead) or "ended", and the place. A
 place that is only a meeting link is left out. Point at a row for its full
 text. The calendars are `[agenda] calendars` (your main calendar by default).
-A connected Outlook account's events are listed with them, read only (setup
-step 8e, "Microsoft / Outlook accounts").
+A connected Outlook account's events are listed with them (setup step 8e,
+"Microsoft / Outlook accounts").
 
 The panel reads your calendar when the reading screen opens, every 10 minutes
 while it is visible (never while it is hidden or minimized), after you sign in
@@ -6273,7 +6324,7 @@ Other files in `%LOCALAPPDATA%\briefing-reader`:
 | `standing_usage.json` | Claude runs, rule checks and tidy-ups by local date and job id, for the caps (the last 8 days; counts only), shared by the app's setup and dry runs and the background check (`standing_usage.json.lock` next to it only takes turns between processes). |
 | `standing_tidy.jsonl` | The check's tidy-up journal: one line per step ("doing" written before Gmail is called, then "done" with the labels after, or "failed"), with the rule's id, the account name and Gmail's message, thread and label ids only. An entry left at "doing" shows on the Agents screen as "Not known". |
 | `standing_tidy_undo.jsonl` | The same journal for the app's **Undo** of a tidy-up. |
-| `ms_token_<account>.json` | An Outlook account's sign-in (setup step 8e): its access and refresh tokens and when the access token runs out; read permissions only. Private: never share it. Disconnect in Settings > Accounts deletes it (so does deleting the file). |
+| `ms_token_<account>.json` | An Outlook account's sign-in (setup step 8e): its access and refresh tokens, when the access token runs out, the permissions it was given and the account's own address (the cards' From line). Private: never share it. Disconnect in Settings > Accounts deletes it (so does deleting the file). |
 | `google_token_<account>.tidy.json` | An account's tidy-up sign-in (`"gmail_tidy"`, setup step 8d): `gmail.modify` and who the account is, nothing else. Private: never share it. Delete it to sign the tidy-up out on this PC (the rule then makes cards only). |
 | `standing-run\`, `standing-app\` | The empty folders Claude Code runs in for the background check and for the app's setup and dry runs; a run refuses to start while anything is in them. |
 
@@ -6324,12 +6375,14 @@ The app talks to these services, all free:
 
 - the Notion API: it only reads the one page, with a read-only integration;
 - Microsoft's sign-in and Microsoft Graph, only for an Outlook account you
-  connected (setup step 8e): the sign-in when you click Connect, a token
-  refresh about once an hour, and read-only reads of that account's calendar
-  (whenever the Day view reads yours) and, right after, of its unread inbox
-  headers and preview lines (the canvas's "Unread" frame; memory only).
-  Nothing is saved but the sign-in, and the log holds only counts and
-  statuses;
+  connected (setup step 8e): the sign-in when you click Connect (and one
+  read of the account's own address right after it), a token refresh about
+  once an hour, reads of that account's calendar (whenever the Day view reads
+  yours) and, right after, of its unread inbox headers and preview lines (the
+  canvas's "Unread" frame; memory only), and the one change a card you
+  approved makes (an event added, answered, moved or cancelled; a reply or an
+  email sent), each only after your click. Nothing is saved but the sign-in,
+  and the log holds only counts, kinds and statuses;
 - Hugging Face, once, when you click **Download the local voice** in Settings >
   Voice: the voice's files (about 346 MB, pinned revisions); nothing of yours is
   sent, and the voice then runs offline on this PC - the briefing and
@@ -7306,9 +7359,10 @@ briefing_reader/agenda.py     TODAY / TOMORROW rows, the "Deadlines" section, ca
 briefing_reader/google_auth.py  Google sign-in per account (one token per account, which Google account it is), single-send HTTP
 briefing_reader/gcal.py       Google Calendar: duplicate check, event creation, reading events, answer / move / cancel
 briefing_reader/gmail.py      Gmail: sending (gmail.send only; the message exactly as the card shows it, one send per approval) and Ask's read-only thread reader (gmail.readonly)
-briefing_reader/ms_auth.py    Outlook sign-in per account (read only): PKCE with a localhost redirect, ms_token_<account>.json, refresh
-briefing_reader/outlook.py    Outlook through Microsoft Graph, read only: calendar events as the Day view's, inbox headers as Gmail's
-briefing_reader/outlook_ui.py Settings > Accounts' Outlook part: Connect / Disconnect per Outlook account
+briefing_reader/ms_auth.py    Outlook sign-in per account: PKCE with a localhost redirect, ms_token_<account>.json, refresh, which changes it allows
+briefing_reader/outlook.py    Outlook through Microsoft Graph: calendar events as the Day view's, inbox headers as Gmail's, the approved changes and sends
+briefing_reader/outlook_actions.py  the executor's Outlook backends: an Outlook account's cards (event changes and Undo, replies and emails)
+briefing_reader/outlook_ui.py Settings > Accounts' Outlook part: Connect / Disconnect / Sign in again per Outlook account
 briefing_reader/recipients.py never to the sending account itself (any spelling); the NEW RECIPIENT check: trusted domains, addresses sent to before (hashed)
 briefing_reader/executor.py   carrying out an approved proposal per account ("running" first), the cards' check lines
 briefing_reader/ask/          Ask Jarvis (no Qt): Claude Code checks and runs (cli), its output (stream), the planner's

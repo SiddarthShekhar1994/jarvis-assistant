@@ -271,6 +271,7 @@ class EventDetails:
     self_comment: str = ""         # your note on your answer, if any
     organizer_email: str = ""      # the organizer's address ("" when unknown)
     stamp: str = ""                # the event's etag (else its updated time); an Undo compares it
+    service: str = "Google"        # whose view it is: "Google", or "Outlook" (outlook.details_from)
 
     @property
     def account_email(self) -> str:

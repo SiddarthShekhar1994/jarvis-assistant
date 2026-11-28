@@ -1,13 +1,16 @@
-"""Settings > Accounts' own part for the Outlook / Microsoft accounts (read only, first stage), under the Accounts rows
-while config.toml names one (``[accounts.<alias>]`` with ``backend = "microsoft"``).
+"""Settings > Accounts' own part for the Outlook / Microsoft accounts, under the Accounts rows while config.toml names
+one (``[accounts.<alias>]`` with ``backend = "microsoft"``).
 
 ``OutlookAccountsPanel(aliases, parent=None)``: a line on what Outlook accounts do here, and per account its state and
-one button - Connect (``connectClicked(alias)``) or Disconnect (``disconnectClicked(alias)``) - with a note line under
-it (why the Connect can't start: no client id yet; what the last sign-in said). ``show_state(...)`` sets them.
+one button - Connect (``connectClicked(alias)``), Disconnect (``disconnectClicked(alias)``), or Sign in again
+(``connectClicked``) for an account connected with the first version's read-only permissions (it keeps reading;
+its cards wait for the new sign-in) - with a note line under it (why the Connect can't start: no client id yet; what
+the last sign-in said). ``show_state(...)`` sets them.
 
 ``OutlookConnect(accounts, threaded=True, parent=None)``: ``attach_panel(panel)``, ``connect(alias)`` (the browser
 sign-in on a thread of its own, only on the owner's click; ms_auth.MicrosoftAccount.sign_in), ``disconnect(alias)``
-(deletes the saved sign-in), ``states()`` ({alias: signed in}, files only), ``busy(alias)``. ``finished(alias, outcome,
+(deletes the saved sign-in), ``states()`` ({alias: signed in}, files only), ``read_only()`` (the signed-in accounts
+whose sign-in may not change anything: ms_auth write_problem), ``busy(alias)``. ``finished(alias, outcome,
 message)`` runs on the GUI thread when a sign-in or a disconnect ended (outcome CONNECTED / FAILED / DISCONNECTED); the
 app then reads the Day view again. Without a client id, Connect starts nothing and the note says plainly what is
 needed. The log says only the alias word ("work", "personal", else "other") and how it ended.
@@ -24,17 +27,22 @@ from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from . import holo, hud
-from .google_auth import logged_alias
-from .ms_auth import NO_CLIENT_ID_MESSAGE
+from .google_auth import PROBLEM_SCOPE, logged_alias
+from .ms_auth import NO_CLIENT_ID_MESSAGE, SIGN_IN_AGAIN_MESSAGE, WRITE_CALENDAR, WRITE_MAIL
 
 logger = logging.getLogger(__name__)
 
 CONNECTED, FAILED, DISCONNECTED = "connected", "failed", "disconnected"
-INTRO_TEXT = ("Outlook accounts are read only for now: their calendar shows in the Day view and their mail's headers "
-              "can be read. Jarvis never sends, answers or changes anything for them.")
+INTRO_TEXT = ("Outlook accounts: their calendar shows in the Day view and their unread mail on the canvas. A card for "
+              "one (an event added, moved, answered or cancelled; a reply or an email) is carried out only when you "
+              "click it, as for Google. Standing agents, rules and tidy-ups stay Google only.")
 CONNECT_TEXT = "Connect"
 DISCONNECT_TEXT = "Disconnect"
-STATE_WORDS = {True: "Outlook - connected (read only)", False: "Outlook - not connected"}
+SIGN_IN_AGAIN_TEXT = "Sign in again"
+STATE_WORDS = {True: "Outlook - connected", False: "Outlook - not connected"}
+READ_ONLY_TEXT = "Outlook - connected, read only"
+READ_ONLY_NOTE = (f"{SIGN_IN_AGAIN_MESSAGE}: it was connected when Jarvis could only read. Until then it keeps "
+                  "reading, and its cards wait.")
 WAITING_TEXT = "Outlook - waiting for the sign-in in your browser..."
 SIGNED_IN_NOTE = "Connected. Its calendar shows in the Day view from the next read."
 DISCONNECTED_NOTE = "Disconnected: the saved sign-in was deleted from this PC."
@@ -60,6 +68,7 @@ class OutlookAccountsPanel(QWidget):
         self.buttons: dict[str, holo.HoloButton] = {}
         self.notes: dict[str, QLabel] = {}
         self._connected: dict[str, bool] = {}
+        self._read_only: set[str] = set()
         for alias in aliases:
             row = QHBoxLayout()
             row.setContentsMargins(0, 0, 0, 0)
@@ -88,23 +97,32 @@ class OutlookAccountsPanel(QWidget):
             self.states[alias], self.buttons[alias], self.notes[alias] = state, button, note
 
     def _clicked(self, alias: str) -> None:
-        (self.disconnectClicked if self._connected.get(alias) else self.connectClicked).emit(alias)
+        if self._connected.get(alias) and alias not in self._read_only:
+            self.disconnectClicked.emit(alias)
+        else:
+            self.connectClicked.emit(alias)
 
     def show_state(self, connected: Mapping[str, bool], busy: Sequence[str] = (), notes: Mapping[str, str] | None = None,
-                   *, configured: bool = True) -> None:
-        """Each account's state word, its button (Connect, or Disconnect once connected; off while its sign-in is
-        open) and its note (no client id yet: NO_CLIENT_ID_MESSAGE)."""
+                   *, configured: bool = True, read_only: Sequence[str] = ()) -> None:
+        """Each account's state word, its button (Connect; Disconnect once connected; Sign in again while it is
+        connected read only; off while its sign-in is open) and its note (no client id yet: NO_CLIENT_ID_MESSAGE;
+        read only: READ_ONLY_NOTE)."""
         notes = notes or {}
+        self._read_only = {alias for alias in read_only if connected.get(alias)}
         for alias, label in self.states.items():
             signed_in = bool(connected.get(alias))
             waiting = alias in busy
+            limited = alias in self._read_only
             self._connected[alias] = signed_in
-            label.setText(WAITING_TEXT if waiting else STATE_WORDS[signed_in])
+            label.setText(WAITING_TEXT if waiting else (READ_ONLY_TEXT if limited else STATE_WORDS[signed_in]))
             button = self.buttons[alias]
-            button.setText(DISCONNECT_TEXT if signed_in else CONNECT_TEXT)
-            button.setAccessibleName(f"{DISCONNECT_TEXT if signed_in else CONNECT_TEXT} the {alias} Outlook account")
+            word = SIGN_IN_AGAIN_TEXT if limited else (DISCONNECT_TEXT if signed_in else CONNECT_TEXT)
+            button.setText(word)
+            button.setAccessibleName(f"{word} the {alias} Outlook account")
             button.setEnabled(not waiting)
             text = notes.get(alias, "") or ("" if configured or signed_in else NO_CLIENT_ID_MESSAGE)
+            if limited and not text:
+                text = READ_ONLY_NOTE
             self.notes[alias].setText(text)
             self.notes[alias].setVisible(bool(text))
 
@@ -141,6 +159,21 @@ class OutlookConnect(QObject):
         """{alias: a usable saved sign-in} (files only)."""
         return {alias: self._safe(account, "is_signed_in") for alias, account in self._accounts.items()}
 
+    def read_only(self) -> list[str]:
+        """The signed-in accounts whose sign-in may not change their calendar or send their mail (signed in with the
+        first version's read-only permissions): Settings offers Sign in again. Files only."""
+        found = []
+        for alias, account in self._accounts.items():
+            check = getattr(account, "write_problem", None)
+            if not callable(check) or not self._safe(account, "is_signed_in"):
+                continue
+            try:
+                if any(check(what)[0] == PROBLEM_SCOPE for what in (WRITE_CALENDAR, WRITE_MAIL)):
+                    found.append(alias)
+            except Exception as exc:  # noqa: BLE001 - read as not read only
+                logger.debug("Outlook: could not check an account's permissions (%s)", type(exc).__name__)
+        return found
+
     def busy(self, alias: str | None = None) -> bool:
         return bool(self._busy) if alias is None else alias in self._busy
 
@@ -160,7 +193,8 @@ class OutlookConnect(QObject):
 
     def _show(self) -> None:
         if self._panel is not None:
-            self._panel.show_state(self.states(), sorted(self._busy), self._notes, configured=self.configured())
+            self._panel.show_state(self.states(), sorted(self._busy), self._notes, configured=self.configured(),
+                                   read_only=self.read_only())
 
     def connect(self, alias: str) -> None:
         """The owner clicked Connect: the browser sign-in, unless one is open or there is no client id yet."""

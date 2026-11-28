@@ -237,6 +237,7 @@ from .executor import (
     build_microsoft_accounts,
     build_outlook_calendars,
     build_outlook_readers,
+    build_outlook_senders,
     build_senders,
     check_event,
     check_failure,
@@ -5381,6 +5382,7 @@ _PROBLEM_LINES = {
     PROBLEM_IDENTITY: "Not the {alias} account's Google account - Sign in with that one",
 }
 _PROBLEM_LINE_OTHER = "Google sign-in for the {alias} account failed - Sign in to try again"
+OUTLOOK_SIGN_IN_LINE = "The {alias} Outlook account's sign-in needs renewing - Sign in again"
 _VERBS = {RSVP: "answer", MOVE: "move", CANCEL: "cancel"}
 # Sign-in problems of an account (google_auth PROBLEM_*): the card offers Sign in again.
 _SIGN_IN_PROBLEMS = (PROBLEM_SIGNED_OUT, PROBLEM_EXPIRED, PROBLEM_BLOCKED, PROBLEM_DENIED, PROBLEM_SCOPE,
@@ -5648,10 +5650,11 @@ class _ActionWorker:
     (``_UndoJob`` through executor.run_undo). One at a time, so nothing is read
     while a sign-in runs. Results only go through the bridge. Once stopped it
     takes no new job but a hold Jarvis sends because it is closing (``flush``).
-    ``outlook``: the Outlook accounts' calendars (outlook.OutlookCalendar, read
-    only): a signed-in one's events join the agenda's read and instant answers'
-    read; nothing else here ever touches them (their sign-in is Settings >
-    Accounts', outlook_ui).
+    ``outlook``: the Outlook accounts' calendars (outlook.OutlookCalendar): a
+    signed-in one's events join the agenda's read and instant answers' read,
+    the sign-in check reports whether its cards may change it, and a click on
+    its card's Sign in signs it in here (Settings > Accounts' Connect is
+    outlook_ui's); its cards go through the executor like Google's.
     """
 
     def __init__(self, executor: Executor, calendars: Mapping[str, Any], store: ActionStore,
@@ -5661,8 +5664,8 @@ class _ActionWorker:
         self._executor = executor
         self._tidy_token = tidy_token      # an alias's tidy-up sign-in file (google_auth.tidy_token_path)
         self._calendars = dict(calendars)
-        # The Outlook accounts' calendars (outlook.OutlookCalendar, read only): their events join the agenda's read
-        # and instant answers' (never a sign-in, never a change; executor refuses every card for them).
+        # The Outlook accounts' calendars (outlook.OutlookCalendar): their events join the agenda's read and instant
+        # answers' (never a sign-in by itself); their cards' changes go through the executor's Outlook backend.
         self._outlook = dict(outlook or {})
         # ... and their mail readers (outlook.OutlookMailReader): the unread headers, read right after the agenda's.
         self._outlook_mail = dict(outlook_mail or {})
@@ -5770,7 +5773,8 @@ class _ActionWorker:
             self._check_sign_ins()
 
     def _check_sign_ins(self) -> None:
-        """Which accounts have a usable saved sign-in, and why not (files only, no network)."""
+        """Which accounts have a usable saved sign-in, and why not (files only, no network). An Outlook account counts
+        as signed in for its cards only while its sign-in may change its calendar (_outlook_write_state)."""
         statuses: dict[str, tuple[bool, str, str]] = {}
         for alias, calendar in self._calendars.items():
             problem, message = "", ""
@@ -5781,6 +5785,9 @@ class _ActionWorker:
                 except Exception as exc:  # noqa: BLE001 - only decides what a card says
                     logger.debug("Could not read the sign-in problem (%s)", type(exc).__name__)
             statuses[alias] = (self._signed_in(calendar), problem or "", message or "")
+        for alias, calendar in self._outlook.items():
+            if alias not in statuses:
+                statuses[alias] = _outlook_write_state(calendar)
         self._emit("accountStatus", statuses)
         if self._calendar is not None:
             self._emit("calendarStatus", statuses[DEFAULT_ACCOUNT][0])
@@ -5948,8 +5955,12 @@ class _ActionWorker:
 
     def _connect(self, alias: str, *, force: bool = False) -> None:
         """One account's browser sign-in, unless a usable sign-in of a Google account Jarvis knows is
-        saved already. ``force``: always (right after "No, use another account")."""
+        saved already. ``force``: always (right after "No, use another account"). An Outlook account's (a click on
+        its card's Sign in): unless its sign-in may already change its calendar."""
         calendar = self._calendars.get(alias)
+        if calendar is None and alias in self._outlook:
+            calendar = self._outlook[alias]
+            force = force or not _outlook_write_state(calendar)[0]
         if calendar is None:
             self._emit("accountConnect", alias, _CONNECT_FAILED, CALENDAR_SETUP_NOTE, "")
             return
@@ -6060,6 +6071,20 @@ def closed_first_text(action: ProposedAction) -> str:
     if action.kind == UNSUBSCRIBE:
         return CLOSED_FIRST_UNSUBSCRIBE_MESSAGE
     return CLOSED_FIRST_CANCEL_MESSAGE if action.kind == CANCEL else CLOSED_FIRST_MESSAGE
+
+
+def _outlook_write_state(calendar: Any) -> tuple[bool, str, str]:
+    """(may its cards change it now, PROBLEM_*, why not) of an Outlook calendar (outlook.OutlookCalendar.write_problem:
+    files only). Signed in with the first version's read-only permissions it reads (PROBLEM_SCOPE, "Sign in again to
+    let Jarvis change this account"): the card's button is Sign in; the Day view keeps reading it meanwhile."""
+    try:
+        problem, message = calendar.write_problem()
+    except Exception as exc:  # noqa: BLE001 - only decides what a card says; the executor refuses anyway
+        logger.debug("Could not check an Outlook sign-in (%s)", type(exc).__name__)
+        return False, PROBLEM_FAILED, ""
+    if problem == PROBLEM_SIGNED_OUT:
+        return False, "", ""
+    return not problem, str(problem or ""), str(message or "")
 
 
 def _mail_from_problem(executor: Executor, action: ProposedAction, expected: str) -> str:
@@ -6728,14 +6753,18 @@ class AppController(QObject):
         self._senders: dict[str, Any]
         self._google_accounts: dict[str, Any] = {}   # build_accounts' (no factories): shared by Ask's readers
         self._calendars, self._senders = self._create_google(calendar_factory, sender_factory)
-        # The Outlook accounts ([accounts.<alias>] backend "microsoft"; read only): their sign-ins and calendars, kept
-        # apart from the Google ones (no card, no executor backend); their events join the agenda's read.
+        # The Outlook accounts ([accounts.<alias>] backend "microsoft"): their sign-ins, calendars, mail readers and
+        # senders, kept apart from the Google ones; their events join the agenda's read, and their cards go to the
+        # executor's Outlook backends (outlook_actions) through the same Approve / Send.
+        self._outlook_senders: dict[str, Any] = {}
         self._outlook_accounts, self._outlook_calendars, self._outlook_readers = self._create_outlook()
         self._outlook_unread: dict[str, list[Any]] = {}   # alias -> unread headers (memory only; the canvas's Now)
         self.calendar = self._calendars.get(DEFAULT_ACCOUNT)   # the agenda's and Calendar proposals'
         self._history = recipient_history(config)   # whom Jarvis sent to (recipients.json; read on use)
+        outlook_backends = ({"outlook_calendars": self._outlook_calendars, "outlook_senders": self._outlook_senders}
+                            if self._outlook_accounts else {})
         self._executor = build_executor(config, self._calendars, self._senders, history=self._history,
-                                        now=now_func)
+                                        now=now_func, **outlook_backends)
         self._calendar_worker: _ActionWorker | None = None
         self._init_fetch_state()
         self._init_script_state()
@@ -7267,8 +7296,9 @@ class AppController(QObject):
 
     def _create_outlook(self) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         """(accounts, calendars, mail readers) of the Outlook aliases (executor.build_microsoft_accounts /
-        build_outlook_calendars / build_outlook_readers); calendars and readers only while [calendar] enabled (they are
-        read on the agenda's worker). Building them opens nothing and talks to no one."""
+        build_outlook_calendars / build_outlook_readers); calendars, readers and senders (``_outlook_senders``:
+        build_outlook_senders, for the cards' Send) only while [calendar] enabled (they work on the action worker).
+        Building them opens nothing and talks to no one."""
         try:
             if not microsoft_aliases(self.config):
                 return {}, {}, {}
@@ -7276,9 +7306,11 @@ class AppController(QObject):
             enabled = bool(self.config.calendar.enabled)
             calendars = build_outlook_calendars(self.config, accounts) if enabled else {}
             readers = build_outlook_readers(self.config, accounts) if enabled else {}
+            senders = build_outlook_senders(self.config, accounts) if enabled else {}
         except Exception as exc:  # noqa: BLE001 - the app works without Outlook
             logger.warning("Could not set up the Outlook accounts (%s)", type(exc).__name__)
             return {}, {}, {}
+        self._outlook_senders = dict(senders)
         return dict(accounts), dict(calendars), dict(readers)
 
     def _on_outlook_mail(self, found: Any) -> None:
@@ -7338,12 +7370,14 @@ class AppController(QObject):
         from . import outlook_ui
 
         if outcome == outlook_ui.CONNECTED:
-            self._activity(hud.TAG_DONE, f"Connected to Outlook ({alias} account)", "read only")
+            self._activity(hud.TAG_DONE, f"Connected to Outlook ({alias} account)", "")
         elif outcome == outlook_ui.DISCONNECTED:
             self._outlook_unread.pop(alias, None)   # its unread headers go with its sign-in
             self._activity(hud.TAG_DONE, f"Disconnected Outlook ({alias} account)", "")
         else:
             self._activity(hud.TAG_STOP, f"Outlook sign-in did not finish ({alias} account)", _short(message))
+        if self._calendar_worker is not None:   # its cards' Sign in / Approve follow the new sign-in
+            self._calendar_worker.check_sign_in()
         self._update_service_chips()
         if outcome != outlook_ui.FAILED:
             self._request_agenda()
@@ -8549,6 +8583,10 @@ class AppController(QObject):
         if self._connect_alias == alias:
             return f"Waiting for the Google sign-in of the {alias} account...", "", False
         signed_in, problem, message = self._accounts_state.get(alias, (True, "", ""))
+        if not signed_in and problem and problem != PROBLEM_SIGNED_OUT and alias in getattr(self, "_outlook_calendars",
+                                                                                              {}):
+            line = message or OUTLOOK_SIGN_IN_LINE.format(alias=alias)   # Outlook's own words, never "Google"
+            return line, line, True
         if not signed_in and problem and problem != PROBLEM_SIGNED_OUT:
             line = _PROBLEM_LINES.get(problem, _PROBLEM_LINE_OTHER).format(alias=alias)
             return line, sign_in_note(alias, problem=problem, message=message, sends_mail=self._sends_mail(alias),

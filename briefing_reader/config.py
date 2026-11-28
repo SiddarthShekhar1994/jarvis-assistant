@@ -107,10 +107,12 @@ SOUNDS_CHOICES = (SOUNDS_SOFT, SOUNDS_OFF)
 ACCOUNT_FEATURES = ("calendar", "gmail_send", "gmail_read", "gmail_tidy")
 BACKEND_GOOGLE = "google"
 BACKEND_COMPOSIO = "composio"     # accepted, but not built into this version
-BACKEND_MICROSOFT = "microsoft"   # an Outlook / Microsoft account: read only in this version (ms_auth, outlook)
+BACKEND_MICROSOFT = "microsoft"   # an Outlook / Microsoft account (ms_auth, outlook, outlook_actions)
 ACCOUNT_BACKENDS = (BACKEND_GOOGLE, BACKEND_COMPOSIO, BACKEND_MICROSOFT)
-# What a Microsoft account may do (read only): "calendar" puts its events in the Day view beside the personal Google
-# calendar's; "mail_read" lets Jarvis read its inbox's headers and snippets (outlook.OutlookMailReader). Both by default.
+# What a Microsoft account may do: "calendar" puts its events in the Day view beside the personal Google calendar's and
+# lets its calendar cards change it on the owner's click; "mail_read" lets Jarvis read its inbox's headers and snippets
+# (outlook.OutlookMailReader). Both by default. Its Reply / Email cards send on Send whatever the features say (its
+# sign-in asks for Mail.Send).
 MICROSOFT_FEATURES = ("calendar", "mail_read")
 MICROSOFT_TENANTS = ("common", "consumers", "organizations")
 _GUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
@@ -221,7 +223,7 @@ class AccountConfig:
     """One ``[accounts.<alias>]`` table: which service acts for the alias and what it may do."""
 
     alias: str
-    backend: str = BACKEND_GOOGLE                     # "google"; "microsoft" (read only); "composio" is not built yet
+    backend: str = BACKEND_GOOGLE                     # "google"; "microsoft" (Outlook); "composio" is not built yet
     features: tuple[str, ...] = ("calendar",)         # ACCOUNT_FEATURES (MICROSOFT_FEATURES for "microsoft")
 
     def __post_init__(self) -> None:

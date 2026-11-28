@@ -31,7 +31,8 @@ goes through the Calendar / free-text path exactly as before.
 Jarvis carries out these kinds after Approve (CARRIED_KINDS): a Calendar line
 (create the event), a Todo with a block= time (add that block), an RSVP, Move
 or Cancel (answer the invitation, move or cancel the event; EVENT_KINDS), and a
-Reply or Email (send it through Gmail; MAIL_KINDS). There is no visible countdown
+Reply or Email (send it through Gmail, or through Outlook for an Outlook account;
+MAIL_KINDS). There is no visible countdown
 (the owner's decision of 2026-10-17). The reversible calendar kinds (UNDO_KINDS:
 Calendar, Todo block, RSVP, Move) act at once on the click and their card offers
 Undo for 10 minutes, which reverses exactly Jarvis's change. A Reply, Email or
@@ -729,6 +730,9 @@ _SYMBOL_EXTRAS = frozenset({"\ufe0e", "\ufe0f", "\u200d"})
 
 _ALIAS_RE = re.compile(r"[a-z][a-z0-9_-]{0,23}")
 _GMAIL_ID_RE = re.compile(r"[0-9A-Za-z_-]{6,64}")
+# An Outlook (Microsoft Graph) message or conversation id: URL-safe base64, up to two "=" of padding. A Reply for an
+# Outlook account names its conversation in thread= and its message in gmid= (executor / outlook_actions).
+_GRAPH_ID_RE = re.compile(r"[A-Za-z0-9_-]{16,512}={0,2}")
 # Message-ID halves: printable ASCII without "<", ">", "@" or "|" (phase 3 writes it into In-Reply-To).
 _MSGID_PART = r"[\x21-\x3b\x3d\x3f\x41-\x7b\x7d\x7e]{1,250}"
 _MSGID_RE = re.compile(rf"<?({_MSGID_PART})@({_MSGID_PART})>?")
@@ -738,7 +742,7 @@ _DISPLAY_NAME_RE = re.compile(r"[^<>]*<(?P<address>[^<>]*)>")
 _ADDRESS_SPLIT_RE = re.compile(r"[,;]")
 _DUE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})(?:(?:\s+|T)(\S.*))?")
 _ISO_DATE_RE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
-_EVENT_ID_RE = re.compile(r"[A-Za-z0-9_-]{5,1024}")
+_EVENT_ID_RE = re.compile(r"[A-Za-z0-9_-]{5,1024}={0,2}")   # Google's, or an Outlook event's (its "=" padding)
 _CAL_ID_RE = re.compile(r"primary|[\x21-\x3b\x3d\x3f-\x7b\x7d\x7e]{1,256}")   # printable ASCII but <, >, |
 _FILE_ID_RE = re.compile(r"[A-Za-z0-9_-]{10,200}")
 _SLACK_TEAM_RE = re.compile(r"[TE][A-Z0-9]{2,20}")
@@ -939,8 +943,8 @@ class _StructuredReader:
         return value
 
     def _read_gmail_id(self, name: str, text: str) -> str:
-        if not _GMAIL_ID_RE.fullmatch(text):
-            raise _LineError(f"{name}=: {_quoted(text)} is not a Gmail id")
+        if not (_GMAIL_ID_RE.fullmatch(text) or _GRAPH_ID_RE.fullmatch(text)):
+            raise _LineError(f"{name}=: {_quoted(text)} is not a Gmail or Outlook id")
         return text
 
     def _read_msgid(self, name: str, text: str) -> str:
@@ -1120,6 +1124,16 @@ def _address(name: str, item: str) -> str:
     if not address:
         raise _LineError(f"{name}=: {_quoted(item)} is not an email address")
     return address
+
+
+def is_gmail_id(text: str) -> bool:
+    """A Gmail thread or message id (a line's thread= / gmid= may also hold an Outlook one)."""
+    return isinstance(text, str) and bool(_GMAIL_ID_RE.fullmatch(text))
+
+
+def is_google_event_id(text: str) -> bool:
+    """A Google Calendar event id (a line's event= may also hold an Outlook one, which can end in "=")."""
+    return isinstance(text, str) and bool(_EVENT_ID_RE.fullmatch(text)) and "=" not in text
 
 
 def email_address(text: str) -> str:
