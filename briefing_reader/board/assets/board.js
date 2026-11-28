@@ -3,7 +3,7 @@
    no address is ever opened. The app sends board.apply(<JSON text>), checked in Python first and checked here again;
    the page answers on its web channel with bridge.post(kind, <JSON text>), the short list Python accepts (ready, layout,
    focus, open, close, pin, bring_back, go_approvals, clear, restore, show_new, reading, focus_out, landed, big,
-   go, hold). The canvas (PLAN-canvas part 1): the same page is Home itself - the orb and the corners' controls under
+   go, hold, retry - a failed frame's Try again, drawn only when the app sends the frame with "retry"). The canvas (PLAN-canvas part 1): the same page is Home itself - the orb and the corners' controls under
    the board (makeCanvas, at the first orb or canvas message; a board beside a conversation has none of it). Part 2: on
    the canvas the frames are laid out over the whole screen on a 12-column grid (packCanvas), in the mock's glowing
    style, with the task card, the boot of an arriving frame, Tidy and Clear view's lines into the orb.
@@ -23,7 +23,7 @@
               ticks: 13, tick: 8, pill: 16, topic: 40, time: 16};
   var DAY_MINUTES = 1440;
   var FRAME_FIELDS = ['type', 'id', 'kind', 'title', 'meta', 'body', 'status', 'status_text', 'status_meta', 'waits',
-                      'changed', 'pinned', 'closed', 'fact', 'group'];
+                      'changed', 'pinned', 'closed', 'fact', 'group', 'retry'];
   var MAX_GROUPS = 8;
   var DESK_STATES = ['enter', 'leave'];
   var FOCUS_PARTS = ['board', 'strip', 'next', 'prev', 'controls'];
@@ -89,7 +89,7 @@
   var FIGURE_TEXT = /^[+\-−]?[$€£]?[0-9][0-9,.]*[kMBT%]?$/;     // a big number's figure (board.protocol's)
   var SVG = 'http://www.w3.org/2000/svg';
   var WORDS = {
-    changed: 'Changed', bringBack: 'Bring back', closed: 'Closed: ',
+    changed: 'Changed', tryAgain: 'Try again', bringBack: 'Bring back', closed: 'Closed: ',
     keysFirst: 'Enter open big · P pin', keysSecond: 'Del close · Esc ask bar', dot: '·',
     approvalsKey: 'Ctrl 3', pin: 'Pin', unpin: 'Unpin', openBig: 'Open big', close: 'Close', frameWord: ' frame',
     waits: 'Waits', done: 'Done', pictureOnly: 'Picture only', unread: 'Unread',
@@ -1293,11 +1293,20 @@
     }
     KINDS[message.kind](make('div'), message);  // the kind's data is checked all the same
     if (message.status === 'failed') {
-      // Its warning and note only: nothing here can read its source again (the final review's ship-gate 1, decided:
-      // no control that does nothing - the old "Try again" was only counted).
+      // Its warning and why. Try again only when the app says one can work ("retry": a page picture that failed for
+      // a passing reason, not tried again yet): its one press asks the app to take that same page again, and the app
+      // sends the frame back ("Opening...", then the picture or the reason). Any other failure has no button.
       var row = make('div', 'f-fail');
       row.append(glyph('warning'), make('p', 'f-words t-body-sm', message.status_text));
       body.append(row);
+      if (message.retry === true) {
+        var again = button('f-act alert f-retry', '', function () {
+          again.disabled = true;               // one press: the app answers with the frame again
+          post('retry', {id: message.id});
+        });
+        again.append(glyph('replay'), make('span', '', WORDS.tryAgain));
+        body.appendChild(again);
+      }
     } else {
       var empty = make('div', 'f-empty');
       var column = make('div');
@@ -1363,6 +1372,8 @@
       && typeof message.changed === 'boolean' && typeof message.pinned === 'boolean'
       && typeof message.closed === 'boolean'
       && (message.fact === undefined || words(message.fact, CAPS.meta))     // a satellite's fact: a meta's length
+      && (message.retry === undefined || message.retry === false
+          || (message.retry === true && message.status === 'failed'))      // Try again: a failed frame's only
       && (message.group === undefined || (typeof message.group === 'string' && groups.has(message.group)))
       && !!message.body && typeof message.body === 'object' && !Array.isArray(message.body);
   }

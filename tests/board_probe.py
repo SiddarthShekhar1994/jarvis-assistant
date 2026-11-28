@@ -542,7 +542,8 @@ def main(case: str) -> dict[str, Any]:
         board.setGeometry(0, 0, 503, 700)
         board.ready.connect(lambda: seen.append(["ready"]))
         board.unavailable.connect(lambda why: seen.append(["unavailable", why]))
-        for name in ("frameFocused", "openRequested", "closeRequested", "bringBackRequested", "approvalsRequested"):
+        for name in ("frameFocused", "openRequested", "closeRequested", "bringBackRequested", "approvalsRequested",
+                     "retryRequested"):
             getattr(board, name).connect(lambda frame_id, n=name: seen.append([n, frame_id]))
         board.pinRequested.connect(lambda frame_id, on: seen.append(["pinRequested", frame_id, on]))
         board.layoutChanged.connect(lambda _layout: seen.append(["layoutChanged"]))
@@ -704,8 +705,8 @@ def main(case: str) -> dict[str, Any]:
                               main_world(board, f"document.getElementById('title-s{index}').closest('.frame')"
                                                 ".style.getPropertyValue('--i')")] for index in range(7)]
         pump(1.5)
-        # The states, as the owner meets them: waits, failed (its warning, no button: canvas part 5A), empty, then
-        # closing and Bring back.
+        # The states, as the owner meets them: waits, failed (its warning; no button unless the app sends "retry"),
+        # empty, then closing and Bring back.
         board.apply(text_frame("w1", waits="Reply waits on Approvals"))
         board.apply(text_frame("x1", status="failed", status_text="Google Calendar didn't answer."))
         board.apply(text_frame("e1", status="empty", status_text="Nothing unread, sir.", status_meta="Checked 9:44 AM"))
@@ -720,6 +721,23 @@ def main(case: str) -> dict[str, Any]:
                                        ".textContent"),
         }
         main_world(board, "document.getElementById('title-w1').closest('.frame').querySelector('.f-wait').click(); 1")
+        # The Try again brief: a failed frame the app sends with "retry" has its one button; two presses post ONE retry
+        # (the button is spent, and the view takes one per offer); sent again without it, the button is gone.
+        board.apply(text_frame("x2", status="failed", status_text="the page did not load within 15 s", retry=True))
+        pump(0.8)
+        retry_frame = "document.getElementById('title-x2').closest('.frame')"
+        report["retry"] = {"buttons": main_world(board, f"{retry_frame}.querySelectorAll('.f-body button').length"),
+                           "words": main_world(board, f"{retry_frame}.querySelector('.f-retry').textContent"),
+                           "warning": main_world(board, f"{retry_frame}.querySelector('.f-fail').textContent"),
+                           "retryable": sorted(board.retryable_ids())}
+        main_world(board, f"{retry_frame}.querySelector('.f-retry').click(); {retry_frame}.querySelector('.f-retry')"
+                          ".click(); 1")
+        pump(0.4)
+        report["retry"]["disabled"] = main_world(board, f"{retry_frame}.querySelector('.f-retry').disabled")
+        report["retry"]["retryable_after"] = sorted(board.retryable_ids())
+        board.apply(text_frame("x2", status="failed", status_text="the page did not load within 15 s"))
+        pump(0.4)
+        report["retry"]["buttons_after"] = main_world(board, f"{retry_frame}.querySelectorAll('.f-body button').length")
         main_world(board, "document.getElementById('title-m1').closest('.frame').focus(); 1")
         pump(0.3)
         report["focused"] = {"keys": styled("m1", ".f-keys", "display"), "meta": styled("m1", ".f-meta", "display"),

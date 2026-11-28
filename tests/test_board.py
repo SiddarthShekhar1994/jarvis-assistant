@@ -220,13 +220,14 @@ class RequestTests(unittest.TestCase):
         # shapes); part 5c added landed and big on purpose (tests/test_board_lit.py checks them); the canvas (part 1)
         # added go on purpose (tests/test_canvas.py checks its fixed list of words and that an unknown one is refused);
         # the window brief added chrome on purpose (tests/test_window_native.py checks its fields and hostile shapes).
-        # Canvas part 5A took retry out on purpose: a failed frame offers no Try again (nothing re-reads it). The
-        # canvas-pins brief added hold on purpose (tests/test_board_pins.py checks its fields and hostile shapes).
+        # Canvas part 5A took retry out (nothing could re-read a failed picture); the canvas-pins brief added hold on
+        # purpose (tests/test_board_pins.py checks its fields and hostile shapes); the Try again brief brought retry
+        # back, taken only for a frame that offers it (RetryRequestTests below).
         self.assertEqual(protocol.REQUEST_KINDS, ("ready", "layout", "focus", "open", "close", "pin", "bring_back",
                                                   "go_approvals", "clear", "restore", "show_new", "reading",
-                                                  "focus_out", "landed", "big", "go", "chrome", "hold"))
+                                                  "focus_out", "landed", "big", "go", "chrome", "hold", "retry"))
         with self.assertRaises(protocol.Refused):
-            protocol.check_request("retry", '{"id":"f1"}', self.known)
+            protocol.check_request("retry", '{"id":"f1"}', self.known)     # f1 offers no Try again
         for kind in ("focus", "open", "close", "bring_back", "go_approvals"):
             self.assertEqual(protocol.check_request(kind, '{"id":"f1"}', self.known), protocol.Request(kind, "f1"))
         self.assertEqual(protocol.check_request("pin", '{"id":"f2","on":true}', self.known),

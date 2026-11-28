@@ -19,7 +19,10 @@ ReadingView.set_board_count), restore (that Bring back), show_new and reading (p
 while the owner reads the board - the pointer over it, the focus in it, a scroll or key in it within QUIET_S - parks
 under the pill "New answer above · Show" and lands after QUIET_S quiet seconds or on Show; only then do older groups
 fold), focus_out (Esc and F6 back to the ask bar or the conversation); F6 into the board (``focus_board``). Focus is
-counted only (canvas part 5A: a failed frame offers no Try again, and the page has no retry request).
+counted only. retry: a failed page picture's Try again (only a frame built with "retry": it failed for a passing
+reason and was not tried again) - the app takes that same page again (``host.retry_picture``: the snapshotter's checks,
+one try), the frame shows "Opening..." then the picture or the reason, with no button; when it can't be taken, the
+frame is sent again with its words and no button.
 
 Part 5c (DESIGN-SPEC 1, 3.4, 3.5, 7): ``cue`` (desk_cue.CueController: while Jarvis speaks, the frame the sentence names
 is lit, every ring's glow halves, and the cue line runs to it; ``on_speech`` / ``on_muted`` from the app), ``big``
@@ -89,7 +92,7 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from . import holo, hud
 from . import live as live_events
-from . import pictures
+from . import pictures, snapshots
 from .board import ask_frames
 from .board import feed as feed_mod
 from .board import frames as board_frames
@@ -328,6 +331,9 @@ class DeskController(QObject):
         hold = getattr(view, "holdRequested", None)
         if hold is not None:
             hold.connect(self._on_hold)
+        retry = getattr(view, "retryRequested", None)
+        if retry is not None:
+            retry.connect(self._on_retry)
         view.clearRequested.connect(self._on_clear)
         view.restoreRequested.connect(self._on_restore)
         view.showNewRequested.connect(self._on_show_new)
@@ -746,6 +752,34 @@ class DeskController(QObject):
         action_id = self.feed.approvals_for(frame_id)
         self.counts["go_approvals"] += 1
         self.reading.open_card(action_id)
+
+    def _on_retry(self, frame_id: str) -> None:
+        """A failed frame's Try again (the owner's click; the view passes one per offer): the app takes that same page
+        picture again (host.retry_picture: the snapshotter's own checks and its one retry), and the frame updates in
+        place through the LIVE feed - "Opening...", then the picture or the reason, with no other Try again. When it
+        can't be taken (the frame's answer or LIVE step is gone, the snapshotter refused), the frame is sent again
+        with its words and no button. Never a second try by itself."""
+        self.counts["retry:asked"] += 1
+        source = self.feed.retry_source(frame_id)
+        step_text = source[len("step:"):] if source.startswith("step:") else ""
+        step_id = int(step_text) if step_text.isdigit() else 0
+        kept = step_id > 0 and any(source in answer.seen for answer in self._answers.values())
+        reason = "gone"
+        if kept:
+            retry = getattr(self.host, "retry_picture", None)
+            try:
+                reason = str(retry(step_id) or "") if callable(retry) else "off"
+            except Exception as exc:  # noqa: BLE001 - a Try again never stops the board
+                logger.debug("Board: a Try again failed (%s)", type(exc).__name__)
+                reason = "error"
+        if not reason:
+            self.counts["retry:taken"] += 1
+            logger.info("Board: a failed frame is tried again")
+            return
+        self.counts["retry:refused"] += 1
+        logger.info("Board: a Try again could not be taken (%s)",
+                    reason if reason in ("gone", "off", "error") else snapshots.reason_kind(reason))
+        self._send(self.feed.drop_retry(frame_id))
 
     # ---- answers ---------------------------------------------------------------------------------------------------
 

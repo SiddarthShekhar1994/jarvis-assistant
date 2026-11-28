@@ -385,9 +385,19 @@ class ShellTests(BoardProbeCase):
     def test_waits_failed_empty_focused_closed_and_brought_back(self) -> None:
         report = self.report("shell")
         self.assertEqual(report["states"], {"waits": ["12px", "inline-flex"],          # radius 12: a shape cue
-                                            # TILE_ALERT, its warning and NO button (canvas part 5A: no Try again)
+                                            # TILE_ALERT, its warning and NO button: sent without "retry"
                                             "failed": ["rgb(23, 15, 18)", "Google Calendar didn't answer.", 0],
                                             "empty": "Checked 9:44 AM"})
+        # The Try again brief: sent with "retry", its one button; two presses post one retry; sent again without it,
+        # no button (its warning stays).
+        retry = report["retry"]
+        self.assertEqual(retry["buttons"], 1)
+        self.assertEqual(retry["words"], "Try again")
+        self.assertEqual(retry["warning"], "the page did not load within 15 s")
+        self.assertEqual(retry["retryable"], ["x2"])
+        self.assertTrue(retry["disabled"])
+        self.assertEqual(retry["retryable_after"], [])
+        self.assertEqual(retry["buttons_after"], 0)
         focused = report["focused"]
         self.assertEqual((focused["keys"], focused["meta"], focused["controls"]), ("flex", "none", "flex"))
         self.assertIn("ENTER OPEN BIG · P PIN", focused["footer"])
@@ -396,7 +406,7 @@ class ShellTests(BoardProbeCase):
         self.assertEqual(report["closed"]["row"].split("\n"), ["Closed: Frame m1", "Bring back"])
         self.assertNotIn("closed", report["brought_back"])
         # Each control asked the app, by its own typed signal.
-        self.assertEqual(report["seen"], [["ready"], ["approvalsRequested", "w1"],
+        self.assertEqual(report["seen"], [["ready"], ["approvalsRequested", "w1"], ["retryRequested", "x2"],
                                           ["closeRequested", "m1"], ["bringBackRequested", "m1"]])
 
     def test_titles_wrap_and_no_text_is_cut_in_a_narrow_board(self) -> None:

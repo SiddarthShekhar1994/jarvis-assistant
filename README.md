@@ -1125,8 +1125,17 @@ LIVE keeps them.
   ([below](#tables-charts-timelines-and-maths-from-ask)). A frame boots: its
   outline draws itself, a scan line wipes down, the heading decodes, numbers
   count up. What waits on you is amber, with corner ticks. A frame that could
-  not be made shows its warning and why, in coral. Every word in a frame is
-  plain text. What cannot fit folds to a tile (its title and one fact),
+  not be made shows its warning and why, in coral. When a page picture failed
+  for a reason that may pass (the page did not load in time, did not load,
+  showed nothing or stopped working), the frame also has **Try again**: one
+  click opens that same page once more, with every rule of the first time
+  (public https only, the network gate, your `[live]` settings), and the frame
+  shows "Opening..." and then the picture, or the reason again. Each failed
+  picture gets one Try again, only ever from your click; a failure a retry
+  cannot change (a rule refused the page, the site turns automated browsers
+  away, the research was cancelled) has no button and keeps its words. Every
+  word in a frame is plain text. What cannot fit folds to a tile (its title
+  and one fact),
   oldest answer first; nothing scrolls off and nothing is cut.
 - **Tidy, Clear view, pin, close.** **Tidy** packs the frames again (it shows
   only after a close left a gap). **Clear view** folds every unpinned frame to
@@ -1908,7 +1917,10 @@ public https pages: never a link from your email or the briefing, never a
 card's link other than the research's own sources (planner Ask cards
 included), never a search results page; at most 4 per research (the pages it
 read first, then its sources in the order it cites them), one at a time, at
-most 15 seconds each. Jarvis opens the page on this PC (once
+most 15 seconds each, each page once (the one exception: your **Try again** on
+the board's frame of a picture that failed for a passing reason opens that page
+one more time; it never counts against the 4 and never happens by itself).
+Jarvis opens the page on this PC (once
 more, for a page the research read) in a private window you never see: none
 of your browsers' sign-ins or cookies, nothing saved, no pop-ups, downloads,
 camera, microphone, location, notifications, clipboard or Windows Hello,

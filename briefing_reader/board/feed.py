@@ -72,6 +72,9 @@ raises for odd data.
         turn_frames(entry_id) -> (group id, count) its group and how many of its frames are on the board now (cleared
                                                    ones are not; ("", 0): none - its token goes)
         approvals_for(frame_id) -> str             the card a frame's go_approvals opens ("" none)
+        retry_source(frame_id) -> str              the source a failed frame's Try again takes again ("" none: it
+                                                   offers no Try again); drop_retry(frame_id) -> list[dict]: its Try
+                                                   again can't be taken - the frame again, its words and no button
         frames(), waits(), pinned(), cleared(), parked_groups(), groups(), group_of(frame_id), group_for(answer),
         frame_ids(), flags(frame_id), counts(), frame_message(frame_id), picture_message(frame_id), key_of(frame_id),
         mark() (the board as it shows now: equal while nothing on it changed)
@@ -465,6 +468,32 @@ class BoardFeed:
     def approvals_for(self, frame_id: str) -> str:
         frame = self._frames.get(frame_id)
         return frame.shown()[2] if frame is not None else ""
+
+    def retry_source(self, frame_id: str) -> str:
+        """The source whose failed build the frame shows with Try again (its "retry": board.frames' failed page
+        picture), "" when it offers none (not on the board, closed, taken by a Clear, or in another state)."""
+        frame = self._frames.get(frame_id)
+        if frame is None or frame.closed or frame.cleared or not frame.parts:
+            return ""
+        read = [part for part in sorted(frame.parts.values(), key=lambda part: part.seq) if not part.frame.get("waits")]
+        if not read or read[-1].frame.get("retry") is not True or read[-1].frame.get("status") != "failed":
+            return ""
+        return read[-1].source
+
+    def drop_retry(self, frame_id: str) -> list[dict[str, Any]]:
+        """The frame's Try again can't be taken: its build keeps its words with no button; the frame message again
+        when that changed what the page has ([] otherwise)."""
+        frame = self._frames.get(frame_id)
+        if frame is None:
+            return []
+        for part in frame.parts.values():
+            part.frame.pop("retry", None)
+        shown = self._shown(frame)
+        text = _same(shown)
+        if text == frame.sent:
+            return []
+        frame.sent = text
+        return [shown]
 
     def key_of(self, frame_id: str) -> str:
         """The source key the frame was built from ("" none): what made it (part 7 fixes: the second screen leaves a

@@ -26,7 +26,11 @@ hidden private window may load, how many pictures a research gets, and the words
                                       one a public IPv4 address, else refused: DNS rebinding)
     reason_kind(reason)               the one word a log line may carry for a reason ("timeout")
     over_cap_reason(cap)              the refusal past a research's picture cap, with that cap's number
-    RunBudget                         at most MAX_PER_RUN pictures per research, one per page (thread-safe)
+    retryable(reason)                 a failure the owner's Try again may get past (RETRY_REASONS: a page that
+                                      did not load in time, did not load, showed nothing or stopped working)
+    RunBudget                         at most MAX_PER_RUN pictures per research, one per page (thread-safe);
+                                      retry(): the owner's Try again on a page whose picture failed (MAX_RETRIES
+                                      each, never counted against the cap: it re-does that page's one picture)
     ShotResult                        what one shot gave: the JPEG bytes and sizes, or a reason
 
 Rules: nothing here touches the network, Qt, a file or the log; every function is pure, fast and
@@ -59,7 +63,7 @@ __all__ = [
     "NOTE_OPENING", "NOTE_OPENED", "snapshot_url_problem", "request_problem", "final_host_note",
     "chromium_flags", "flag_tokens", "sandbox_problem", "engine_flags_problem", "tunnel_target",
     "resolved_problem", "reason_kind", "over_cap_reason", "RunBudget", "ShotResult", "GATE_FLAGS", "GATE_PORT",
-    "RESOLVER_RULES",
+    "RESOLVER_RULES", "MAX_RETRIES", "RETRY_REASONS", "retryable",
 ]
 
 MAX_PER_RUN = 4                 # pictures per research run (the fetch cap); min(4, [research] max_fetches)
@@ -103,7 +107,9 @@ R_NOT_PUBLIC_HTTPS = "Jarvis opens only public https pages"   # + the rule's own
 R_SEARCH_PAGE = "a search results page is not opened"
 R_OVER_CAP = "at most 4 page pictures per research"   # over_cap_reason(MAX_PER_RUN); a lower cap says its own
 R_NO_PICTURES = "no page pictures for a research that reads no pages ([research] max_fetches = 0)"
-R_SAME_PAGE = "the same page as an earlier picture"
+R_SAME_PAGE = "the same page as an earlier picture"   # a research's own second ask (the owner's Try again aside)
+R_RETRIED = "it was already tried again"                # the one Try again of a page was used (MAX_RETRIES)
+R_NO_RETRY = "it can't be tried again"                  # nothing Jarvis holds to try again (gone, or never failed)
 R_TIMEOUT = "the page did not load within 15 s"
 R_LOAD_FAILED = "the page did not load on this PC"
 R_SITE_REFUSED = "the site refuses automated browsers"    # HTTP 401, 403 or 429 (ShotResult.http_status)
@@ -119,7 +125,14 @@ R_TEST_RUN = "no page is opened in a test run"
 R_TEXT_OFF = "not kept ([live] text = false)"
 R_SHUTDOWN = "Jarvis closed"
 
+# The failures a Try again may get past: the page itself, this time (a slow or flaky site, a renderer that stopped).
+# Never a rule's refusal (not public https, a search page, the cap, [live] text off, a sandbox or flags problem), a
+# site that refuses automated browsers, a picture too large, a cancel or Jarvis closing: trying again changes nothing.
+RETRY_REASONS = frozenset({R_TIMEOUT, R_LOAD_FAILED, R_BLANK, R_CRASHED})
+MAX_RETRIES = 1                 # the owner's Try again per failed page picture (never automatic)
+
 _REASON_KINDS = {
+    R_RETRIED: "retried", R_NO_RETRY: "no_retry",
     R_TIMEOUT: "timeout", R_LOAD_FAILED: "load_failed", R_SITE_REFUSED: "site_refused", R_TOO_LARGE: "too_large",
     R_BLANK: "blank",
     R_CRASHED: "crashed", R_NO_ENGINE: "no_engine", R_ENGINE_FAILED: "engine_failed", R_SANDBOX_OFF: "sandbox",
@@ -510,11 +523,17 @@ def over_cap_reason(cap: Any) -> str:
 
 def reason_kind(reason: Any) -> str:
     """The one word a log line may carry for a reason: timeout / load_failed / too_large / blank /
-    crashed / no_engine / engine_failed / sandbox / cancelled / test_run / shutdown, else refused
-    ("" for no reason)."""
+    crashed / no_engine / engine_failed / sandbox / cancelled / test_run / shutdown / retried /
+    no_retry, else refused ("" for no reason)."""
     if not isinstance(reason, str):
         return "refused"
     return _REASON_KINDS.get(reason, "refused") if reason else ""
+
+
+def retryable(reason: Any) -> bool:
+    """The failure is one the owner's Try again may get past (RETRY_REASONS: the page did not load within
+    15 s, did not load, showed nothing or stopped working); never a rule's refusal. Never raises."""
+    return isinstance(reason, str) and reason in RETRY_REASONS
 
 
 # --------------------------------------------------------------------------
@@ -538,11 +557,18 @@ class _Run:
     count: int = 0
     ended: bool = False
     cancelled: bool = False
+    retried: dict[str, int] = field(default_factory=dict)   # page key -> the owner's Try agains of it
 
 
 class RunBudget:
     """How many pictures each research run (keyed by its LIVE task id) got, and which pages:
-    at most ``cap`` per run, one per page. Thread-safe; memory only (page keys, never logged)."""
+    at most ``cap`` per run, one per page. Thread-safe; memory only (page keys, never logged).
+
+    Why one per page (R_SAME_PAGE): a research reads a page and may cite it too, and a model may ask
+    for the same page again and again - Jarvis opens each page once, so no page is opened for nothing
+    and no run can loop on one. The one exception is the owner's own click: ``retry`` lets a page
+    whose picture failed be taken again, MAX_RETRIES times at most, never by itself (the snapshotter
+    asks it only for a failed picture it holds, on the owner's Try again)."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -576,6 +602,29 @@ class RunBudget:
                 return over_cap_reason(cap)
             run.pages.add(key)
             run.count += 1
+            return ""
+
+    def retry(self, task_id: int, url: str) -> str:
+        """The owner's Try again on ``url``, a page of the run whose picture failed: "" and the try
+        counted, or why not - R_CANCELLED (the owner cancelled the run), R_NO_RETRY (the run never
+        admitted that page), R_RETRIED (its MAX_RETRIES are used). The same page again is the point
+        here, so R_SAME_PAGE does not apply, and a try takes no place under the cap (it re-does the
+        page's one picture). A run already let go (its view closed) is held again, ended: it asks no
+        more pages of its own."""
+        key = _page_key(url) if isinstance(url, str) else ""
+        with self._lock:
+            run = self._runs.get(task_id)
+            if run is None:
+                run = self._run(task_id)
+                run.ended = True
+                run.pages.add(key)
+            if run.cancelled:
+                return R_CANCELLED
+            if key not in run.pages:
+                return R_NO_RETRY
+            if run.retried.get(key, 0) >= MAX_RETRIES:
+                return R_RETRIED
+            run.retried[key] = run.retried.get(key, 0) + 1
             return ""
 
     def taken(self, task_id: int) -> int:

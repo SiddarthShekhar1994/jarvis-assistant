@@ -9,7 +9,8 @@ its place when it can't be.
                           made and Python accepted - ready, layoutChanged(BoardLayout), frameFocused(id),
                           openRequested(id), closeRequested(id), pinRequested(id, on), bringBackRequested(id),
                           approvalsRequested(id), holdRequested(id, on) (a closed frame's row has the pointer or the
-                          keyboard focus: its Bring back stays offered). When the web engine is missing (no
+                          keyboard focus: its Bring back stays offered), retryRequested(id) (a failed frame's Try
+                          again: only one the app sent with "retry", once per sending). When the web engine is missing (no
                           QtWebEngine 6.8+, no scheme), refuses to start (a sandbox turned off, unsafe flags), the page
                           does not say it is ready within READY_TIMEOUT_MS, or its renderer stops more than
                           MAX_RESTARTS times, it shows
@@ -80,6 +81,7 @@ RESTARTS_FORGIVEN_S = 600.0   # ... counted again from none once the page has be
 QUEUE_CAP = 64                # messages kept while the page is not ready yet (the oldest go first)
 POSTS_PER_S = 40              # requests of the page a second, at most ...
 LAYOUTS_PER_S = 12            # ... layout ones among them (the page sends at most 10; a little slack for timing)
+RETRIES_PER_S = 2             # ... Try again ones among them (each is the owner's click on a failed frame)
 PAD = 15                      # the view's inner pad (DESIGN-SPEC 2.1): the fallback tile keeps the frames' left edge
 STRIP = 40                    # the index strip and its gap at the frames' right (the desk; the fallback has no strip)
 BAR_HEIGHT = 32               # the board bar on the desk (DESIGN-SPEC 2.1: frames start 44 px down) ...
@@ -225,16 +227,20 @@ class BoardBridge(QObject):
     """The one object the page sees on its web channel, as "bridge": one slot, post(kind, payload).
 
     Each post is checked (board.protocol.check_request: a kind on the list, a small JSON payload of its fields, frame ids
-    the app sent - ``known()``) and handed to ``deliver`` as a protocol.Request; anything else is dropped and counted, as
-    are posts past POSTS_PER_S a second (LAYOUTS_PER_S for layout). The web channel offers every QObject's public slots,
+    the app sent - ``known()``; a retry's also one that offers Try again now - ``retryable()``) and handed to
+    ``deliver`` as a protocol.Request; anything else is dropped and counted, as are posts past POSTS_PER_S a second
+    (LAYOUTS_PER_S for layout, RETRIES_PER_S for retry). The web channel offers every QObject's public slots,
     deleteLater among them: a deleteLater the page asks for is refused (counted) until release(). Nothing else of
     Jarvis's is on the channel: no property or signal of its own; ``counts`` and ``deliver`` are plain Python."""
 
     def __init__(self, parent: QObject | None = None, *, known: Callable[[], Collection[str]] = frozenset,
                  deliver: Callable[[protocol.Request], None] | None = None, counts: Counter[str] | None = None,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic,
+                 retryable: Callable[[], Collection[str]] = frozenset) -> None:
         super().__init__(parent)
         self._known = known
+        self._retryable = retryable
+        self._retries: deque[float] = deque()
         self._deliver = deliver
         self._clock = clock
         self._counts: Counter[str] = counts if counts is not None else Counter()
@@ -265,7 +271,8 @@ class BoardBridge(QObject):
             if not self._admit(kind):
                 self._drop(word, "rate")
                 return
-            request = protocol.check_request(kind, payload, self._known())
+            request = protocol.check_request(kind, payload, self._known(),
+                                             self._retryable() if kind == "retry" else ())
         except protocol.Refused as refused:
             self._drop(word, refused.reason)
             return
@@ -285,6 +292,8 @@ class BoardBridge(QObject):
         windows = [(self._posts, POSTS_PER_S)]
         if kind == "layout":
             windows.append((self._layouts, LAYOUTS_PER_S))
+        elif kind == "retry":
+            windows.append((self._retries, RETRIES_PER_S))
         for window, cap in windows:
             while window and now - window[0] >= 1.0:
                 window.popleft()
@@ -507,6 +516,7 @@ class BoardView(QWidget):
     bringBackRequested = Signal(str)
     approvalsRequested = Signal(str)
     holdRequested = Signal(str, bool)      # a closed frame's row has the pointer or the focus (True), or no longer
+    retryRequested = Signal(str)           # a failed frame's Try again (only a frame the app sent with "retry", once)
     # Part 5b: the bar's Clear, the cleared row's Bring back, the pill's Show, the owner at the board (the pointer over
     # it, the focus in it), and the keyboard focus out of it (Esc, F6: "ask" / "conversation").
     clearRequested = Signal()
@@ -538,6 +548,7 @@ class BoardView(QWidget):
         self._phase = _IDLE
         self._reason = ""
         self._known: set[str] = set()
+        self._retryable: set[str] = set()    # frames sent with "retry" whose Try again was not asked for since
         # The app's frames as the page has them, in the order they came: each frame's last message and its picture's
         # data: URL. The read-only tiles show them if the board falls back (also after messages were queued or sent).
         self._frames: dict[str, dict[str, Any]] = {}
@@ -640,6 +651,10 @@ class BoardView(QWidget):
         """The ids of the frames the app sent (the page's requests must name one of them)."""
         return frozenset(self._known)
 
+    def retryable_ids(self) -> frozenset[str]:
+        """The failed frames that offer Try again now (a retry request must name one of them)."""
+        return frozenset(self._retryable)
+
     def known_groups(self) -> frozenset[str]:
         """The ids of the groups the app sent (part 5a)."""
         return frozenset(self._groups)
@@ -701,12 +716,17 @@ class BoardView(QWidget):
         if kind == "frame":
             self._known.add(frame_id)
             self._frames[frame_id] = json.loads(checked.text)     # an update keeps its place
+            if self._frames[frame_id].get("retry") is True:
+                self._retryable.add(frame_id)
+            else:
+                self._retryable.discard(frame_id)
             if group_id:
                 self._frame_group.setdefault(frame_id, group_id)
         elif kind == "remove":
             self._forget(frame_id)
         elif kind == "clear":
             self._known.clear()
+            self._retryable.clear()
             self._frames.clear()
             self._pictures.clear()
             self._groups.clear()
@@ -728,6 +748,7 @@ class BoardView(QWidget):
 
     def _forget(self, frame_id: str) -> None:
         self._known.discard(frame_id)
+        self._retryable.discard(frame_id)
         self._frames.pop(frame_id, None)
         self._pictures.pop(frame_id, None)
         self._frame_group.pop(frame_id, None)
@@ -929,7 +950,8 @@ class BoardView(QWidget):
         page.setAudioMuted(True)
         self._connect(page, profile)
         channel = QWebChannel(page)
-        bridge = BoardBridge(page, known=lambda: self._known, deliver=self._on_request, counts=self._requests)
+        bridge = BoardBridge(page, known=lambda: self._known, deliver=self._on_request, counts=self._requests,
+                             retryable=lambda: self._retryable)
         channel.registerObject("bridge", bridge)
         page.setWebChannel(channel, self._main_world)
         view.setPage(page)
@@ -1070,6 +1092,12 @@ class BoardView(QWidget):
             self.holdRequested.emit(request.frame_id, request.on)
         elif kind == "go_approvals":
             self.approvalsRequested.emit(request.frame_id)
+        elif kind == "retry":
+            if request.frame_id in self._retryable:
+                self._retryable.discard(request.frame_id)   # one Try again per offer: the app sends the frame again
+                self.retryRequested.emit(request.frame_id)
+            else:
+                self._counts["dropped:retry_again"] += 1
         elif kind == "clear":
             self.clearRequested.emit()
         elif kind == "restore":
