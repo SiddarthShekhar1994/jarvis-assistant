@@ -20,6 +20,10 @@
     find_by_name(data_dir, name, kind="") / read_columns(data_dir, sheet_id)
                                                    read-only looks for the standing setup and runner: they never
                                                    write here
+    listed(data_dir) / read_doc_text(data_dir, doc_id) / read_sheet_rows(data_dir, sheet_id)
+                                                   read-only looks for other AI apps (mcp_server): the items not
+                                                   deleted, a document's kept text, a sheet's kept columns and rows
+                                                   (never what waits); nothing is written, not even a version
 
 Files: index.json ``{"version": 1, "items": [{id, kind, name, created, changed, words, rows, columns, pending,
 trashed, hash}], "imported": [...]}``; ``d-<12 hex>\\doc.md`` (UTF-8, LF) and ``pending.json``; ``s-<12 hex>\\
@@ -943,5 +947,64 @@ def read_columns(data_dir: Path, sheet_id: str) -> tuple[list[model.Column], lis
     return list(sheet.columns), list(sheet.keys)
 
 
+def listed(data_dir: Path) -> list[ItemInfo]:
+    """The documents and sheets not deleted, newest change first, read without writing anything (a damaged, newer or
+    too-large index lists none)."""
+    entries = [entry for entry in _read_index(data_dir) if not entry["trashed"]]
+    entries.sort(key=lambda entry: entry["changed"], reverse=True)
+    return [ItemInfo(entry["id"], entry["kind"], entry["name"], entry["created"], entry["changed"], entry["words"],
+                     entry["rows"], entry["columns"], entry["pending"], "", True) for entry in entries]
+
+
+def _listed_entry(data_dir: Path, item_id: str, kind: str) -> dict[str, Any] | None:
+    if model.kind_of(item_id) != kind:
+        return None
+    for entry in _read_index(data_dir):
+        if entry["id"] == item_id and not entry["trashed"]:
+            return entry
+    return None
+
+
+def read_doc_text(data_dir: Path, doc_id: str) -> DocData | None:
+    """A listed document's kept text (doc.md; never its pending changes), read without writing anything - no version
+    is made for a change made outside Jarvis. None when it is not listed, is deleted or can't be read."""
+    entry = _listed_entry(data_dir, doc_id, model.KIND_DOC)
+    if entry is None:
+        return None
+    try:
+        raw = _read_bytes(Path(data_dir) / DOCS_FOLDER / doc_id / DOC_FILE, model.MAX_DOC_BYTES)
+    except _Unreadable:
+        return None
+    if raw is None:
+        return DocData(doc_id, entry["name"], "", [], True)
+    if len(raw) > model.MAX_DOC_BYTES:
+        return None
+    try:
+        text = model.clean_doc_text(raw.decode("utf-8"))
+    except UnicodeDecodeError:
+        return None
+    return DocData(doc_id, entry["name"], text, [], True)
+
+
+def read_sheet_rows(data_dir: Path, sheet_id: str) -> SheetData | None:
+    """A listed sheet's kept columns and rows (never what waits: ``pending`` is empty), read without writing anything.
+    None when it is not listed, is deleted or can't be read."""
+    entry = _listed_entry(data_dir, sheet_id, model.KIND_SHEET)
+    if entry is None:
+        return None
+    try:
+        raw = _read_bytes(Path(data_dir) / DOCS_FOLDER / sheet_id / SHEET_FILE, model.MAX_SHEET_BYTES)
+        if not raw or len(raw) > model.MAX_SHEET_BYTES:
+            return None
+        sheet = _sheet_from(_load_json(raw), sheet_id, entry["name"])
+    except (_Unreadable, ValueError, RecursionError, UnicodeDecodeError):
+        return None
+    if sheet is None:
+        return None
+    sheet.pending, sheet.read_only = [], True
+    return sheet
+
+
 __all__ = ["DocsStore", "ItemInfo", "DocData", "SheetData", "Row", "VersionInfo", "write_export", "synced_folder",
-           "guard_cell", "find_by_name", "read_columns", "sheet_csv", "default_export_folder"]
+           "guard_cell", "find_by_name", "read_columns", "sheet_csv", "default_export_folder", "listed",
+           "read_doc_text", "read_sheet_rows"]

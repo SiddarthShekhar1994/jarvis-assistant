@@ -13,6 +13,8 @@ Public API
     ``openConfig``) and ``data_path`` with Open the data folder (``data_button``, ``openDataFolder``;
     ``set_paths(config_path, data_dir)``). Accounts show only their names and whether they are connected
     (``set_connected({alias: True | False})``, from the app's own sign-in check; "Not checked yet" before it).
+    LIVE and privacy also says whether other AI apps may read the board (``MCP_LABEL``: [mcp] enabled, set in
+    config.toml only - it widens who reads what Jarvis keeps, so it never has a Change).
 
 ``SettingsStage.set_store(store)``, ``EDIT_ROWS``, ``edit_keys(config, group, label)``
     Changing a comfort setting here (Smaller items, part 4): with the app's ``overrides.SettingsStore`` (settings.json
@@ -77,8 +79,14 @@ GROUPS: tuple[tuple[str, str], ...] = (("voice", "Voice"), ("times", "Briefing t
 GROUP_TABLES: dict[str, tuple[str, ...]] = {
     "voice": ("voice", "assistant"), "times": ("schedule", "polling", "display", "ui"),
     "ask": ("ask", "research", "hotkey", "actions"), "accounts": ("accounts",), "quiet": ("productivity",),
-    "live": ("live", "productivity"),
+    "live": ("live", "productivity", "mcp"),
 }
+# Other AI apps reading the board (mcp_server; [mcp] enabled in config.toml only: it widens who reads what Jarvis keeps,
+# so it is never a Change here).
+MCP_LABEL = "Other AI apps (MCP)"
+MCP_ON = ("On - an AI app you set up can read your waiting cards, to-dos, captures, documents, agents' reports and "
+          "the last day's conversation; it can't send, approve or change anything")
+MCP_OFF = "Off - no other app can read the board"
 GROUP_NOTES: dict[str, str] = {
     "voice": "How Jarvis sounds and when he speaks.",
     "times": "The scheduled tasks keep their own times; these are used when no task gives one.",
@@ -295,6 +303,8 @@ def settings_rows(config: Any, group: str, connected: Mapping[str, bool] | None 
                          if getattr(prod, "memory_suggestions", False) else "Off"))
         rows.append(("Follow-ups", "On - message headers only" if prod_on and getattr(prod, "followups", False)
                      else "Off"))
+        rows.append((MCP_LABEL, MCP_ON if getattr(getattr(config, "mcp", None), "enabled", False) is True
+                     else MCP_OFF))
         return rows
     return []
 

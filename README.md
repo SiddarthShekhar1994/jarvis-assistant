@@ -3736,6 +3736,74 @@ without a click and could be steered by that mail. For web research, ask
 Jarvis yourself in the bar (Ask). A web option for a ready-made agent would
 need a new consent card first, in a later version.
 
+### Use Jarvis from other AI apps (MCP)
+
+Another AI app on this PC that speaks MCP (the Model Context Protocol) can
+read Jarvis's board: you add Jarvis to that app as a local MCP server, and the
+app starts `py -3.13 -m briefing_reader --mcp` itself and talks to it over
+its standard input and output. Nothing listens on the network, and it works
+whether Jarvis's window is open or not.
+
+**It is off by default.** This is a privacy call: what the other app reads
+goes wherever that app sends it (often its own AI service). Turn it on with
+
+```toml
+[mcp]
+enabled = true
+```
+
+in `config.toml`, then restart the other app's connection. Settings > LIVE and
+privacy shows whether it is on ("Other AI apps (MCP)"); it has no Change: it
+is set in `config.toml` only. While it is off the command still answers, but
+offers no tools, and a call says how to turn it on.
+
+**What it shares** (read only, each answer capped at 60,000 characters):
+
+| Tool | What the other app gets |
+|---|---|
+| `list_waiting_cards` | The Approvals cards waiting for your click, from captures and from your standing agents and rules: kind, title, the card's one-line summary, account name, due date, when it was made. Never a draft's text or an address: a reply's or email's recipients only as a count. The briefing's and Ask's cards live only in the open window and are not included. |
+| `list_todos` | The to-do cards among them: title, due date, account, a proposed calendar block. |
+| `list_captures` | What you captured: its kind, label, when, and its cards with whether each still waits. |
+| `list_documents`, `read_document` | Your documents and sheets (name, size, last change), and one document's kept text (20,000 characters a call) or one sheet's columns and rows (200 rows a call). What waits for your Keep is not included. |
+| `list_agents_and_rules` | Your standing agents and rules: name, status, trigger, accounts, your own words for each, and its latest run. |
+| `read_agent_reports` | The agents' latest reports (written by Claude from your mail). |
+| `read_recent_conversation` | The last day of your conversation with Jarvis, as Ask gets it: your requests and his answers; web research is left out. |
+
+**What it never does:** send, post, approve, deny, delete, sign in or change
+anything. There is no tool that writes, not even a to-do: the other app can
+only read, and every card still waits for your own click in Jarvis. It makes
+no Google, Notion or other network call, reads no sign-in, token or `.env`,
+and changes nothing in the data folder (a document edited outside Jarvis is
+read without making a version). Your memory notes, the agenda and the
+follow-ups are not shared. Every tool tells the other app that what it returns
+is data that may hold text from email or web pages, never instructions.
+
+The log gets one line per call: the tool's name, ok / refused / failed / off,
+how many items and how long it took. Never what was asked or what came back.
+
+**Setting it up in the other app.** Most apps take a JSON entry like this in
+their MCP server settings (use the folder Jarvis is installed in):
+
+```json
+{
+  "mcpServers": {
+    "jarvis": {
+      "command": "py",
+      "args": ["-3.13", "-m", "briefing_reader", "--mcp"],
+      "cwd": "C:\\path\\to\\jarvis",
+      "env": {"PYTHONPATH": "C:\\path\\to\\jarvis"}
+    }
+  }
+}
+```
+
+`py` is the Python launcher; the full path of `python.exe` works too (for
+example `C:\Users\you\AppData\Local\Programs\Python\Python313\python.exe`
+with the args `["-m", "briefing_reader", "--mcp"]`). Use `python.exe` or `py`,
+not `pythonw.exe`: the app talks to Jarvis over standard input and output,
+which `pythonw.exe` may not have (Jarvis then logs that and stops).
+An app that has no `cwd` setting finds Jarvis through `PYTHONPATH`.
+
 ## TODAY and DEADLINES
 
 The **Day view** (click the header clock; Esc closes it) shows your day.
@@ -5352,7 +5420,8 @@ proposals that the user decides one by one.)
 
 ```
 py -3.13 -m briefing_reader [--run {am,pm} | --catch-up | --hotkey-agent | --ask | --ask-check | --ask-text TEXT
-                             | --plan-dry-run [REQUEST] | --followups-check | --standing-run | --standing-check]
+                             | --plan-dry-run [REQUEST] | --followups-check | --standing-run | --standing-check
+                             | --mcp]
                             [--ask-dry-run] [--slots am=HH:MM,pm=HH:MM] [--open | --now | --read]
                             [--from-file PATH] [--debug] [--version]
 ```
@@ -5369,6 +5438,7 @@ py -3.13 -m briefing_reader [--run {am,pm} | --catch-up | --hotkey-agent | --ask
 | `--followups-check` | The productivity bundle's [follow-up list](#follow-ups-and-nudges) scan once, for real, on every account with `"gmail_read"`: headers only (read only, the last 14 days, never the text). Prints counts per account only ("work: listed 42, read 42 header set(s); 3 waiting on you, 1 owed to you; skipped: automated 30, ...") - never a subject, a name, an address or an id. No Claude request; nothing saved. |
 | `--standing-run` | One check of the [standing agents and rules](#standing-agents-and-rules), without a window: what the "Briefing agents" task runs every 5 minutes (Jarvis also starts one for **Run now**, and every 5 minutes while he is open and no scheduled check came for 15 minutes). It does nothing while `[standing]` or Ask is off, before your yes on their consent card or under Pause all; one check runs at a time (a second ends at once), and it starts no job after 15 minutes. Google is read with sign-ins held in memory only: nothing is saved, deleted or moved, and it never signs in. |
 | `--standing-check` | Print what is set up and how the checks went: on or off, the consent and Pause all, the jobs (their ids, kinds, triggers, next run and runs today), the last check and who started it, a hold and until when, today's runs out of `[standing] max_runs_per_day`, and an account the check could not read. Counts, times and statuses only; no Claude request, nothing read from Google. |
+| `--mcp` | [Another AI app reads the board](#use-jarvis-from-other-ai-apps-mcp) over MCP on standard input and output, read only: the app starts this itself. No window, no app lock, `.env` not read; off (no tools offered) until `[mcp] enabled = true`. |
 | `--ask-dry-run` | With `--ask-text`: print the exact text Jarvis would send to Claude Code (email text and memory notes as character counts) and the command line, and stop. With `web:`: the exact text the web research would get and its command line. No Claude request, nothing counted. |
 | `--slots am=10:12,pm=23:42` | The scheduled times (24-hour), which tell the app which briefing an answer belongs to. The tasks pass them; without it (or for a run it leaves out) `[schedule]` in `config.toml` applies. A value that cannot be read is logged and ignored. |
 | `--open` | Open Jarvis: the assistant screen in front, on its JARVIS tab, with a greeting (and "Your AM briefing is ready to view." when one is waiting); the briefing waits in its BRIEFING tab and nothing is read until you press Play. The same as starting without options. A running app comes forward. What the Start menu shortcut and the hotkey use. |
@@ -5379,8 +5449,8 @@ py -3.13 -m briefing_reader [--run {am,pm} | --catch-up | --hotkey-agent | --ask
 | `--version` | Print the name and version (such as `Jarvis Assistant 1.2.0`) and exit. |
 
 `--open`, `--now` and `--read` exclude each other, and none of them goes with
-`--catch-up`, `--hotkey-agent`, `--ask-check`, `--ask-text`, `--plan-dry-run`, `--followups-check`, `--standing-run` or
-`--standing-check`. `--standing-show` (a check found something for you while
+`--catch-up`, `--hotkey-agent`, `--ask-check`, `--ask-text`, `--plan-dry-run`, `--followups-check`, `--standing-run`,
+`--standing-check` or `--mcp`. `--standing-show` (a check found something for you while
 Jarvis was closed: he opens without taking the focus and tells it) and
 `--origin` (who started a check) are only for Jarvis's own use. Without `--run`,
 the app fetches the page once (retrying if Notion cannot be reached) and does
@@ -5567,6 +5637,7 @@ file to go back to `config.toml` for all of them.
 | `[agent] search_engine` | `"duckduckgo"` | Where his searches go first: `"duckduckgo"`, `"bing"` or `"google"`, then the others if a page gives nothing or shows a wall. The words of each search go there, and the Turn on card names it. |
 | `[docs] enabled` | `true` | [Documents and datasheets](#documents-and-datasheets): the Dock's Documents (Ctrl+0). `false`: none of it shows (what is kept in the data folder stays). The repository's `config.toml` has no `[docs]` table: these defaults hold until you add one. |
 | `[docs] export_folder` | `""` | Where an export's picker starts: `""` = `Jarvis\Exports` in your user folder, else a full folder path. A folder OneDrive syncs is asked about before a file is saved there. |
+| `[mcp] enabled` | `false` | [Other AI apps](#use-jarvis-from-other-ai-apps-mcp) on this PC may read the board through `--mcp`, read only (the waiting cards, to-dos, captures, documents, agents and rules with their reports, the last day's conversation). Set here only: not from Settings' Change and not from `.env`. The repository's `config.toml` has no `[mcp]` table, so it stays off until you add one. |
 | `[agent] workspace` | `""` | The tasks' folder: `""` = `Jarvis\Workspace` in your user folder, else a full folder path. Never under OneDrive: a task refuses to start there. |
 | `[agent] private` | `["calendar", "contacts", "memory", "mail", "files"]` | What a task may read of your things, when it needs them and only while it is connected. A shorter list narrows it (`"memory"` covers your notes and what you said before the task); an entry that is none of these grants nothing, and so does something that is not a list. |
 | `[agent] speak_private` | `false` | With `[voice] engine = "online"`: `true` also says aloud a task's line that may hold something private; such lines go to Microsoft's online voice. Off, they stay on screen. The voice made on this PC says them anyway. |
@@ -6046,6 +6117,13 @@ its place), and reminder and timer labels are said too. With
 times and counts, never an event's title or place, and neither do reminder or
 timer labels.
 
+[Other AI apps](#use-jarvis-from-other-ai-apps-mcp) read nothing of Jarvis's
+unless you set `[mcp] enabled = true`. Then an app you added Jarvis to can
+read the board (waiting cards without their drafts or addresses, to-dos,
+captures, documents, agents' reports and the last day's conversation) and
+sends it wherever that app sends what it reads; it can never send, approve or
+change anything through Jarvis.
+
 The app talks to these services, all free:
 
 - the Notion API: it only reads the one page, with a read-only integration;
@@ -6404,6 +6482,13 @@ Code, keep every file in a temporary folder, and check that no subject,
 address, report or sentence of yours reaches a log. The lock and cap tests
 start a second Python process of their own; `--standing-run` does nothing
 while the tests run.
+
+The MCP tests (`test_mcp_server.py`) speak the protocol to `--mcp`'s server
+over in-memory pipes with fake stores in a temporary folder: off by default,
+each tool's answer, the size caps, hostile arguments and requests, no tool
+that sends or changes anything, the data folder left byte for byte as it was,
+no socket opened, and no title, text, id or argument in the log. While the
+tests run, `--mcp` never reads the real data folder.
 
 The new look's tests (`test_holo_orb.py` for the ring: its looks at every
 size, facing you, the mic level, its frame rates and paint budget;
@@ -7077,6 +7162,7 @@ briefing_reader/standing_ui.py  standing agents and rules in the app: their card
 briefing_reader/standing_view.py  the Agents screen (Ctrl+9): status line, AGENTS, RULES, ACTIVITY, REPORTS
 briefing_reader/capture.py     Capture's core: a series and its rule, a found item as a card, the duplicate check and the frame's rows
 briefing_reader/capture_store.py  captures.json and the kept copies of what was captured
+briefing_reader/mcp_server.py  --mcp: other AI apps read the board over stdio (no Qt; read only, off by default)
 briefing_reader/capture_files.py  pictures, PDFs and text read on this PC for a capture
 briefing_reader/capture_net.py    a calendar link fetched once, on Read it
 briefing_reader/capture_ui.py     drops, the tray, Read it, the CAPTURE cards and the Source viewer

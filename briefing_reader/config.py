@@ -13,7 +13,8 @@ Settings come from four places:
   "work" / "personal" and what it may do), schedule, hotkey,
   agenda, display, Ask Jarvis (``[ask]``, off by default), assistant (``[assistant]``: how
   Jarvis speaks on his own), LIVE view (``[live]``: the tab that shows every step Jarvis
-  takes, on screen only) and screen (``[ui]``: how much the hologram moves) options. Which
+  takes, on screen only), screen (``[ui]``: how much the hologram moves) and other AI apps (``[mcp]``: the
+  read-only ``--mcp`` mode, off by default) options. Which
   Google account an alias is never goes here: the sign-ins live in %LOCALAPPDATA%\\briefing-reader;
 * ``settings.json`` in that data folder (overrides.py): the comfort settings changed in the app's Settings, merged
   into config.toml's values before the parsers run (config.toml < settings.json; never an ``enabled``).
@@ -113,7 +114,7 @@ _MISSING = object()
 _KNOWN_TABLES = ("voice", "prompt", "polling", "sections", "notion", "calendar", "actions",
                  "accounts", "schedule", "hotkey", "agenda", "display", "ask", "research", "assistant", "live",
                  "productivity", "ui", "meetings", "desktop", "agent", "talk", "instant", "standing", "look",
-                 "docs", "wake")
+                 "docs", "wake", "mcp")
 # Library loggers kept at WARNING, also under --debug. The Google sign-in libraries log the
 # authorization code, the access token and the refresh token at DEBUG (requests_oauthlib),
 # before Jarvis could register them for redaction, so they never get DEBUG here.
@@ -618,6 +619,17 @@ class DocsConfig:
 
 
 @dataclass(frozen=True)
+class McpConfig:
+    """``[mcp]``: other AI apps on this PC reading the board through ``py -3.13 -m briefing_reader --mcp`` (mcp_server;
+    off by default, set only in config.toml: never from Settings' Change or .env). On, an app the owner set up with
+    that command can read what Jarvis keeps on this PC - the cards that wait, the to-dos, captures, documents, the
+    agents and rules with their reports, the last day's conversation - and nothing else: no tool sends, changes or
+    signs in to anything. Off, the command answers but offers no tools."""
+
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
 class Config:
     notion_token: str = field(repr=False)   # "" when missing; NEVER logged
     page_id: str                            # normalized 32-hex, no dashes; "" when missing or invalid
@@ -654,6 +666,7 @@ class Config:
     standing: StandingConfig = field(default_factory=StandingConfig)
     look: LookConfig = field(default_factory=LookConfig)
     docs: DocsConfig = field(default_factory=DocsConfig)
+    mcp: McpConfig = field(default_factory=McpConfig)
     wake: WakeConfig = field(default_factory=WakeConfig)
     # Settings changed in the app (overrides.py: settings.json in the data folder, merged before the parsers): the
     # "table.key" names in use here, and what config.toml alone gives each of them. hash=False keeps Config hashable.
@@ -805,6 +818,7 @@ def load_config(project_root: Path | None = None, *,
         standing=_parse_standing(doc, environ),
         look=_parse_look(doc),
         docs=_parse_docs(doc),
+        mcp=_parse_mcp(doc),
         wake=_parse_wake(doc),
         overridden=overridden,
         toml_values=MappingProxyType(toml_values),
@@ -1601,6 +1615,13 @@ def _parse_docs(doc: Mapping[str, Any]) -> DocsConfig:
         logger.warning("config.toml: docs.export_folder is not a full folder path; using the default (Jarvis\\Exports "
                        "in your user folder)")
     return DocsConfig(enabled=r.boolean("enabled", d.enabled), export_folder=folder)
+
+
+def _parse_mcp(doc: Mapping[str, Any]) -> McpConfig:
+    """``[mcp]`` from config.toml, or the defaults (off) when the table is absent (the repo's config.toml has none)."""
+    d = McpConfig()
+    r = _TableReader(doc, "mcp", _field_names(McpConfig))
+    return McpConfig(enabled=r.boolean("enabled", d.enabled))
 
 
 def _parse_assistant(doc: Mapping[str, Any]) -> AssistantConfig:
