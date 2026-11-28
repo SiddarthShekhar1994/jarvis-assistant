@@ -54,6 +54,11 @@ Composio is a seam only: ``backend = "composio"`` is accepted by config.py and
 answered here with "Composio is not built into this version"; a later backend
 implements the same small protocol and nothing else changes.
 
+An Outlook / Microsoft account (``backend = "microsoft"``) is read only in this version: ``readiness`` answers every
+proposal for it with OUTLOOK_NOTE (nothing is sent or changed for it), and its sign-in and readers are built apart from
+the Google ones (``microsoft_aliases``, ``build_microsoft_accounts``, ``build_outlook_calendars``,
+``build_outlook_readers``; ms_auth.py, outlook.py).
+
 Qt-free and blocking (callers use the worker thread). Logs name only action
 ids, kinds, account aliases ("work", "personal", else "other"), statuses and
 HTTP status codes. The LIVE view (``live=``) only shows what happens: with or
@@ -103,7 +108,7 @@ from .actions import (
     stated_when,
     when_text,
 )
-from .config import BACKEND_COMPOSIO, BACKEND_GOOGLE, DEFAULT_ACCOUNT, AccountConfig
+from .config import BACKEND_COMPOSIO, BACKEND_GOOGLE, BACKEND_MICROSOFT, DEFAULT_ACCOUNT, AccountConfig
 from .gcal import (
     EVENT_FOOTER,
     NO_TITLE,
@@ -184,6 +189,9 @@ OUTCOME_FAILED = "failed"        # certainly not done (the card keeps Deny / Ret
 OUTCOME_UNKNOWN = "unknown"      # may have happened: check before retrying, never retried by itself
 CALENDAR_SETUP_NOTE = "Google Calendar is not set up yet - see README step 8"
 COMPOSIO_NOTE = "Composio is not built into this version"
+# Any proposal for an Outlook account (read only in this version): nothing is sent or changed for it.
+OUTLOOK_NOTE = ("The {alias} account is an Outlook account: Jarvis only reads its calendar and mail in this version, so "
+                "it can't do this - use Copy or Open")
 NOT_SAVED_MESSAGE = "Could not save the decision before sending, so nothing was sent"
 CLOSING_MESSAGE = "Jarvis was closing when the sign-in finished, so nothing was sent - click again"
 NOTHING_TO_DO = "There is nothing for Jarvis to carry out on this card"
@@ -983,6 +991,8 @@ class Executor:
                 return f'No account named "{alias}" in config.toml [accounts]'
             if account.backend == BACKEND_COMPOSIO:
                 return COMPOSIO_NOTE
+            if account.backend == BACKEND_MICROSOFT:
+                return OUTLOOK_NOTE.format(alias=alias)
             if action.kind in MAIL_KINDS:
                 if GMAIL_FEATURE not in account.features:
                     return (f"The {alias} account is not set up for sending email "
@@ -1741,6 +1751,46 @@ def build_readers(config: Config, accounts: Mapping[str, GoogleAccount] | None =
         accounts = build_accounts(config)
     return {alias: GmailReader(account, service_factory=service_factory)
             for alias, account in accounts.items() if GMAIL_READ_FEATURE in account.features}
+
+
+def microsoft_aliases(config: Config) -> list[str]:
+    """Every ``[accounts.<alias>]`` with ``backend = "microsoft"``, in config order (never "personal"'s Google one)."""
+    return [alias for alias, account in config.accounts.items()
+            if account.backend == BACKEND_MICROSOFT and alias != DEFAULT_ACCOUNT]
+
+
+def build_microsoft_accounts(config: Config, *, session: Any = None, opener: Callable[[str], Any] | None = None,
+                             persist: bool = True) -> dict[str, Any]:
+    """One ms_auth.MicrosoftAccount per Outlook alias, all with ``[microsoft] client_id`` / ``tenant``; tokens in
+    ``config.data_dir`` (ms_token_<alias>.json). Nothing here opens the browser or talks to Microsoft."""
+    from .ms_auth import MicrosoftAccount
+
+    settings = getattr(config, "microsoft", None)
+    client_id = str(getattr(settings, "client_id", "") or "")
+    tenant = str(getattr(settings, "tenant", "common") or "common")
+    return {alias: MicrosoftAccount(alias, client_id=client_id, tenant=tenant, data_dir=config.data_dir,
+                                    session=session, opener=opener, persist=persist)
+            for alias in microsoft_aliases(config)}
+
+
+def build_outlook_calendars(config: Config, accounts: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """One outlook.OutlookCalendar per Outlook alias with the "calendar" feature (read only: the Day view)."""
+    from .outlook import OutlookCalendar
+
+    if accounts is None:
+        accounts = build_microsoft_accounts(config)
+    return {alias: OutlookCalendar(account) for alias, account in accounts.items()
+            if CALENDAR_FEATURE in getattr(config.accounts.get(alias), "features", ())}
+
+
+def build_outlook_readers(config: Config, accounts: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """One outlook.OutlookMailReader per Outlook alias with the "mail_read" feature (headers and snippets only)."""
+    from .outlook import OutlookMailReader
+
+    if accounts is None:
+        accounts = build_microsoft_accounts(config)
+    return {alias: OutlookMailReader(account) for alias, account in accounts.items()
+            if "mail_read" in getattr(config.accounts.get(alias), "features", ())}
 
 
 def recipient_history(config: Config) -> RecipientHistory:

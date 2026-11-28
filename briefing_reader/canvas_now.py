@@ -10,9 +10,11 @@ topic "Now", built only from what the app already holds (no read, no run, no mod
   only while there are some;
 * "waits for your OK" (``approvals``): the Approvals screen's waiting cards (board.resting), only while some wait;
 * Agents (``agents``): the standing agents (standing_ui.StandingController.agent_lines), only while the owner has one;
-* mail: the app holds no list of unread mail for an account (the briefing's mail is spoken words, follow-ups are
-  waiting / owed threads, not unread ones), so the group has no mail frame: ``mail_entries`` is where it would come
-  from, and it gives nothing.
+* mail (``mail-<account>``): one "Unread · <account>" frame per account whose unread mail the app holds - today the
+  connected Outlook accounts' (``host._outlook_unread``: read with the agenda by the calendar worker, headers and
+  snippet only, memory only; board.frames.from_unread shows the sender, subject and age, never the snippet). The app
+  holds no unread list for a Google account (the briefing's mail is spoken words, follow-ups are waiting / owed
+  threads), so a Google account has no such frame.
 
 While the group is on the canvas it is kept current (every SYNC_MS): a frame whose source says something else is sent
 again with the changed light (board.feed's ``again``; its sound is kept quiet), a source that has something new adds
@@ -139,8 +141,18 @@ class NowController(QObject):
         return found
 
     def mail_entries(self) -> dict[str, Callable[[str], Any]]:
-        """Mail, only while the app holds unread mail for a signed-in account: it holds none (see the module doc)."""
-        return {}
+        """Mail, only while the app holds unread mail for a signed-in account (see the module doc): source
+        "mail-<account>" -> its "Unread" frame; nothing for an account with none."""
+        held = getattr(self.host, "_outlook_unread", None) or {}
+        found: dict[str, Callable[[str], Any]] = {}
+        now = self._now()
+        for alias, messages in dict(held).items():
+            messages = [message for message in messages or () if isinstance(message, dict)]
+            if not messages:
+                continue
+            found[f"mail-{alias}"] = (lambda frame_id, alias=alias, messages=messages:
+                                      board_frames.from_unread(alias, messages, frame_id=frame_id, now=now))
+        return found
 
     def _approvals(self) -> Callable[[str], Any] | None:
         from .approvals_view import WAITING

@@ -234,11 +234,15 @@ from .executor import (
     build_accounts,
     build_calendars,
     build_executor,
+    build_microsoft_accounts,
+    build_outlook_calendars,
+    build_outlook_readers,
     build_senders,
     check_event,
     check_failure,
     hand_off_tools,
     mail_note,
+    microsoft_aliases,
     recipient_history,
     run_action,
     run_undo,
@@ -5583,6 +5587,7 @@ class _Bridge(QObject):
     eventPeek = Signal(int, object)                   # request id, {action id: (EventDetails | None, error | None)}
     agendaResult = Signal(int, object, str, str)      # request id, events | None, _PROBLEM_* or "", message
     instantCalendar = Signal(int, object, object)     # request id, {alias: events}, {alias: _PROBLEM_*} (round 2)
+    outlookMail = Signal(object)                      # {alias: unread messages | [] | None}: Outlook's unread headers
     accountConnect = Signal(str, str, str, str)       # alias, _CONNECT_* stage, failure message, PROBLEM_*
     sayResult = Signal(int, object, object)           # utterance seq, SectionAudio | None, error | None ("tts-say")
 
@@ -5642,14 +5647,24 @@ class _ActionWorker:
     (``_UndoJob`` through executor.run_undo). One at a time, so nothing is read
     while a sign-in runs. Results only go through the bridge. Once stopped it
     takes no new job but a hold Jarvis sends because it is closing (``flush``).
+    ``outlook``: the Outlook accounts' calendars (outlook.OutlookCalendar, read
+    only): a signed-in one's events join the agenda's read and instant answers'
+    read; nothing else here ever touches them (their sign-in is Settings >
+    Accounts', outlook_ui).
     """
 
     def __init__(self, executor: Executor, calendars: Mapping[str, Any], store: ActionStore,
                  bridge: _Bridge, stop: threading.Event,
-                 tidy_token: Callable[[str], Path] | None = None) -> None:
+                 tidy_token: Callable[[str], Path] | None = None,
+                 outlook: Mapping[str, Any] | None = None, outlook_mail: Mapping[str, Any] | None = None) -> None:
         self._executor = executor
         self._tidy_token = tidy_token      # an alias's tidy-up sign-in file (google_auth.tidy_token_path)
         self._calendars = dict(calendars)
+        # The Outlook accounts' calendars (outlook.OutlookCalendar, read only): their events join the agenda's read
+        # and instant answers' (never a sign-in, never a change; executor refuses every card for them).
+        self._outlook = dict(outlook or {})
+        # ... and their mail readers (outlook.OutlookMailReader): the unread headers, read right after the agenda's.
+        self._outlook_mail = dict(outlook_mail or {})
         self._calendar = self._calendars.get(DEFAULT_ACCOUNT)
         self._store = store
         self._bridge = bridge
@@ -5770,16 +5785,31 @@ class _ActionWorker:
             self._emit("calendarStatus", statuses[DEFAULT_ACCOUNT][0])
 
     def _list(self, job: _AgendaJob) -> None:
-        """Read the events for the agenda; a missing sign-in is reported, never started."""
+        """Read the events for the agenda; a missing sign-in is reported, never started. The signed-in Outlook
+        accounts' events join a Google read that worked (outlook_events), stand alone when there is no Google
+        calendar here at all, and come with the Google problem when Google is not set up or not signed in (TODAY then
+        shows the Outlook rows above Google's Connect line). Then the Outlook accounts' unread mail (_read_unread)."""
+        try:
+            self._list_events(job)
+        finally:
+            self._read_unread()
+
+    def _list_events(self, job: _AgendaJob) -> None:
         problem, message, events = "", "", None
         try:
             if self._calendar is None:
+                if self._outlook_signed_in():
+                    events = self._outlook_events(job, [])
+                    self._emit("agendaResult", job.request_id, events, "", "")
+                    return
                 raise CalendarSetupError("Google Calendar is not set up")
             events = list(self._calendar.list_events(job.start, job.end, job.calendar_ids))
-        except CalendarSetupError as exc:
-            problem, message = _PROBLEM_SETUP, str(exc)
-        except CalendarAuthError as exc:   # CalendarNotSignedIn included
-            problem, message = _PROBLEM_SIGNED_OUT, str(exc)
+            events = self._outlook_events(job, events)
+        except (CalendarSetupError, CalendarAuthError) as exc:   # CalendarNotSignedIn included
+            problem = _PROBLEM_SETUP if isinstance(exc, CalendarSetupError) else _PROBLEM_SIGNED_OUT
+            message = str(exc)
+            if self._outlook_signed_in():   # the Outlook rows still show, with Google's line under them
+                events = self._outlook_events(job, [])
         except CalendarError as exc:   # gcal already logged it, with a safe message
             problem, message = _PROBLEM_ERROR, str(exc) or type(exc).__name__
         except Exception as exc:  # noqa: BLE001 - a bug must not end the worker
@@ -5788,6 +5818,52 @@ class _ActionWorker:
             problem, message = _PROBLEM_ERROR, f"unexpected error ({type(exc).__name__})"
         self._emit("agendaResult", job.request_id, events, problem, message)
 
+    def _outlook_signed_in(self) -> bool:
+        return any(self._signed_in(calendar) for calendar in self._outlook.values())
+
+    def _read_unread(self) -> None:
+        """The Outlook accounts' unread mail (outlook.OutlookMailReader.unread: headers and snippet, memory only) for
+        the canvas Now group: {alias: messages} - [] for an account that can't be read now (not connected, refused),
+        None for one whose read failed just now (what the app holds stays). Logs: counts only."""
+        if not self._outlook_mail or self._stop.is_set():
+            return
+        found: dict[str, Any] = {}
+        for alias, reader in self._outlook_mail.items():
+            try:
+                if reader.available()[0]:
+                    found[alias] = []
+                    continue
+                found[alias] = list(reader.unread())
+            except Exception as exc:  # noqa: BLE001 - outlook logged a read failure; a bug must not end the worker
+                logger.info("Unread mail: an Outlook account was not read (%s, %s)", logged_alias(alias),
+                            type(exc).__name__)
+                found[alias] = None
+        self._emit("outlookMail", found)
+
+    def _outlook_events(self, job: _AgendaJob, events: list[Any]) -> list[Any]:
+        """``events`` with every signed-in Outlook account's events of the job's span, sorted by start as gcal sorts.
+        An account that can't be read is left out (outlook logged why; the Google rows stay); one not signed in is
+        never asked. Logs: counts only."""
+        if not self._outlook:
+            return events
+        merged = list(events)
+        read = 0
+        for alias, calendar in self._outlook.items():
+            if self._stop.is_set() or not self._signed_in(calendar):
+                continue
+            try:
+                merged.extend(calendar.list_events(job.start, job.end))
+                read += 1
+            except CalendarError as exc:
+                logger.info("Agenda: an Outlook calendar was not read (%s, %s)", logged_alias(alias),
+                            type(exc).__name__)
+            except Exception as exc:  # noqa: BLE001 - a bug must not end the worker or drop the Google rows
+                logger.warning("Agenda: reading an Outlook calendar failed unexpectedly (%s)", type(exc).__name__)
+        if read:
+            merged.sort(key=_agenda_sort_key)
+            logger.debug("Agenda: %d Outlook calendar(s) read", read)
+        return merged
+
     def _read_calendars(self, job: _InstantCalendarJob) -> None:
         """Instant answers' read (round 2): each account's main calendar (``calendar_id``: [calendar] calendar_id for
         the personal one, "primary" for the others), one after another; an account that can't be read is reported
@@ -5795,7 +5871,8 @@ class _ActionWorker:
         events: dict[str, list[Any]] = {}
         problems: dict[str, str] = {}
         started = time.monotonic()
-        for alias, calendar in self._calendars.items():
+        # The Outlook accounts' calendars are read the same way (read only; one not signed in is reported, never asked).
+        for alias, calendar in [*self._calendars.items(), *self._outlook.items()]:
             if self._stop.is_set():
                 return
             try:
@@ -6009,6 +6086,25 @@ def _default_calendars(config: Config) -> dict[str, GoogleCalendar]:
 def _default_calendar(config: Config) -> GoogleCalendar:
     """The personal account's calendar."""
     return _default_calendars(config)[DEFAULT_ACCOUNT]
+
+
+def agenda_read_title(aliases: Sequence[str]) -> str:
+    """The LIVE step of an agenda read, naming the calendars it asks by account name only: "Agenda: read the personal
+    calendar (read only)", or "Agenda: read the calendars (personal, school) (read only)"."""
+    names = [str(alias) for alias in aliases if alias] or [DEFAULT_ACCOUNT]
+    if len(names) == 1:
+        return f"Agenda: read the {names[0]} calendar (read only)"
+    return f"Agenda: read the calendars ({', '.join(names)}) (read only)"
+
+
+def _agenda_sort_key(event: Any) -> tuple[datetime, int, str]:
+    """The agenda's order (gcal's): by start, an all-day event first on its day (local midnight)."""
+    title = str(getattr(event, "title", "") or "").casefold()
+    start = getattr(event, "start", None)
+    if start is not None:
+        return (start if start.utcoffset() is not None else start.astimezone()), 1, title
+    day = getattr(event, "all_day_start", None) or date(2000, 1, 1)
+    return datetime.combine(day, datetime.min.time()).astimezone(), 0, title
 
 
 def _agenda_fetch_range(now: datetime, agenda: AgendaConfig) -> tuple[datetime, datetime]:
@@ -6631,6 +6727,10 @@ class AppController(QObject):
         self._senders: dict[str, Any]
         self._google_accounts: dict[str, Any] = {}   # build_accounts' (no factories): shared by Ask's readers
         self._calendars, self._senders = self._create_google(calendar_factory, sender_factory)
+        # The Outlook accounts ([accounts.<alias>] backend "microsoft"; read only): their sign-ins and calendars, kept
+        # apart from the Google ones (no card, no executor backend); their events join the agenda's read.
+        self._outlook_accounts, self._outlook_calendars, self._outlook_readers = self._create_outlook()
+        self._outlook_unread: dict[str, list[Any]] = {}   # alias -> unread headers (memory only; the canvas's Now)
         self.calendar = self._calendars.get(DEFAULT_ACCOUNT)   # the agenda's and Calendar proposals'
         self._history = recipient_history(config)   # whom Jarvis sent to (recipients.json; read on use)
         self._executor = build_executor(config, self._calendars, self._senders, history=self._history,
@@ -6657,6 +6757,7 @@ class AppController(QObject):
         self.talk: Any = self._create_talk()            # [talk]: the talk key's listening, or None while it is off
         self.wake: Any = self._create_wake()            # "Hey Jarvis" (wake_ui) beside the talk, or None without it
         self.voice_download: Any = self._create_voice_settings()   # [voice] engine "local": Settings > Voice's part
+        self.outlook_connect: Any = self._create_outlook_settings()   # Settings > Accounts' Outlook part, or None
         self.standing: Any = self._create_standing()    # [standing]: the Agents screen and its cards, or None
         self.capture: Any = self._create_capture()      # build plan item 3: drops, pastes and the CAPTURE cards
         self.docs: Any = self._create_docs()            # build plan item 5: [docs] documents and datasheets, or None
@@ -6998,6 +7099,7 @@ class AppController(QObject):
         bridge.undoResult.connect(self._on_undo_result, queued)
         bridge.eventPeek.connect(self._on_event_peek, queued)
         bridge.agendaResult.connect(self._on_agenda_result, queued)
+        bridge.outlookMail.connect(self._on_outlook_mail, queued)
         bridge.instantCalendar.connect(self._on_instant_calendar, queued)
         bridge.accountConnect.connect(self._on_account_connect, queued)
         prompt, reading = self.window.prompt, self.window.reading
@@ -7160,6 +7262,70 @@ class AppController(QObject):
             if isinstance(built, Mapping):
                 senders = {str(alias): sender for alias, sender in built.items() if sender is not None}
         return calendars, senders
+
+    def _create_outlook(self) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        """(accounts, calendars, mail readers) of the Outlook aliases (executor.build_microsoft_accounts /
+        build_outlook_calendars / build_outlook_readers); calendars and readers only while [calendar] enabled (they are
+        read on the agenda's worker). Building them opens nothing and talks to no one."""
+        try:
+            if not microsoft_aliases(self.config):
+                return {}, {}, {}
+            accounts = build_microsoft_accounts(self.config)
+            enabled = bool(self.config.calendar.enabled)
+            calendars = build_outlook_calendars(self.config, accounts) if enabled else {}
+            readers = build_outlook_readers(self.config, accounts) if enabled else {}
+        except Exception as exc:  # noqa: BLE001 - the app works without Outlook
+            logger.warning("Could not set up the Outlook accounts (%s)", type(exc).__name__)
+            return {}, {}, {}
+        return dict(accounts), dict(calendars), dict(readers)
+
+    def _on_outlook_mail(self, found: Any) -> None:
+        """The worker read the Outlook accounts' unread mail: kept in memory for the canvas's Now group (a None keeps
+        what was held: that read failed just now)."""
+        if not isinstance(found, Mapping):
+            return
+        for alias, messages in found.items():
+            if messages is None:
+                continue
+            if messages:
+                self._outlook_unread[str(alias)] = list(messages)
+            else:
+                self._outlook_unread.pop(str(alias), None)
+
+    def _create_outlook_settings(self) -> Any:
+        """Settings > Accounts' Outlook part (outlook_ui): Connect / Disconnect per Outlook account, only on a click.
+        None without an Outlook account in config.toml."""
+        if not self._outlook_accounts:
+            return None
+        from . import outlook_ui
+
+        panel = outlook_ui.OutlookAccountsPanel(list(self._outlook_accounts))
+        connect = outlook_ui.OutlookConnect(self._outlook_accounts, parent=self)
+        connect.attach_panel(panel)
+        connect.finished.connect(self._on_outlook_connect)
+        settings = self.window.reading.settings_page
+        settings.attach_extra("accounts", panel)
+        settings.groupChanged.connect(lambda key: connect.refresh() if key == "accounts" else None)
+        return connect
+
+    def _on_outlook_connect(self, alias: str, outcome: str, message: str) -> None:
+        """An Outlook sign-in or disconnect ended: the activity line, Settings' rows, and the Day view read again."""
+        from . import outlook_ui
+
+        if outcome == outlook_ui.CONNECTED:
+            self._activity(hud.TAG_DONE, f"Connected to Outlook ({alias} account)", "read only")
+        elif outcome == outlook_ui.DISCONNECTED:
+            self._outlook_unread.pop(alias, None)   # its unread headers go with its sign-in
+            self._activity(hud.TAG_DONE, f"Disconnected Outlook ({alias} account)", "")
+        else:
+            self._activity(hud.TAG_STOP, f"Outlook sign-in did not finish ({alias} account)", _short(message))
+        self._update_service_chips()
+        if outcome != outlook_ui.FAILED:
+            self._request_agenda()
+
+    def _outlook_states(self) -> dict[str, bool]:
+        connect = getattr(self, "outlook_connect", None)
+        return connect.states() if connect is not None else {}
 
     def _create_calendars(self, factory: Callable[[Config], Any] | None) -> dict[str, Any]:
         """alias -> calendar ({} when [calendar] enabled = false or it could not be set up).
@@ -7408,11 +7574,13 @@ class AppController(QObject):
     def _start_calendar(self) -> _ActionWorker | None:
         """The action worker, started once Google Calendar or sending email is set up (it checks
         the sign-ins first)."""
-        if self._calendar_worker is None and self._any_google_configured() and not self._closing.is_set():
+        outlook = getattr(self, "_outlook_calendars", {})
+        if self._calendar_worker is None and (self._any_google_configured() or outlook) and not self._closing.is_set():
             data_dir = Path(self.config.data_dir)
             self._calendar_worker = _ActionWorker(self._executor, self._calendars, self._store, self._bridge,
                                                   self._closing,
-                                                  tidy_token=lambda alias: tidy_token_path(data_dir, alias))
+                                                  tidy_token=lambda alias: tidy_token_path(data_dir, alias),
+                                                  outlook=outlook, outlook_mail=getattr(self, "_outlook_readers", {}))
             self._calendar_worker.check_sign_in()
         return self._calendar_worker
 
@@ -7546,7 +7714,12 @@ class AppController(QObject):
         window.set_service("voice", *self._voice_chip())
         window.set_service("calendar", *self._calendar_chip())
         states = getattr(self, "_accounts_state", {})
-        window.reading.settings_page.set_connected({alias: state[0] for alias, state in states.items()})
+        connected = {alias: state[0] for alias, state in states.items()}
+        connected.update(self._outlook_states())   # the Outlook accounts' own sign-ins (files only)
+        window.reading.settings_page.set_connected(connected)
+        connect = getattr(self, "outlook_connect", None)
+        if connect is not None:
+            connect.refresh()
 
     def _notion_chip(self) -> tuple[str, str]:
         if self.startup_error:
@@ -10293,7 +10466,10 @@ class AppController(QObject):
         elif problem == _PROBLEM_ERROR:
             self._agenda_status, self._agenda_problem = _AGENDA_ERROR, message   # older rows stay
         else:
-            self._agenda_events = self._agenda_range = None
+            # Google is not set up or not signed in; a signed-in Outlook account's rows (events) still show, above
+            # Google's line (_render_agenda).
+            self._agenda_events = list(events) if events is not None else None
+            self._agenda_range = (job.start, job.end) if events is not None else None
             self._agenda_status = _AGENDA_SETUP if problem == _PROBLEM_SETUP else _AGENDA_SIGNED_OUT
             self._agenda_problem = message
             if problem == _PROBLEM_SIGNED_OUT and not self._signing_in(DEFAULT_ACCOUNT):
@@ -10336,6 +10512,13 @@ class AppController(QObject):
                                 records=records if self._record_buttons_on() else None)
             self._agenda_record = records
             self._show_agenda_rows(panel, rows)
+            if self._agenda_status in (_AGENDA_SETUP, _AGENDA_SIGNED_OUT):
+                # Outlook's rows with Google not set up / not signed in: Google's line (and its Connect) under them.
+                text, color, link, tip = self._agenda_line()
+                if rows:
+                    panel.show_note(text, color, link=link, tooltip=hud.plain_tooltip(tip))
+                else:
+                    panel.set_message(text, color, link=link, tooltip=hud.plain_tooltip(tip))
         self._show_deadlines(panel, now)
         self._look_call("on_events", self._agenda_events or ())    # the new look: the second screen's NEXT
 
@@ -10395,9 +10578,17 @@ class AppController(QObject):
         first, last = job.start, job.end
         span = (f"{_WEEKDAYS[first.weekday()]} {_MONTHS[first.month - 1]} {first.day} to "
                 f"{_WEEKDAYS[last.weekday()]} {_MONTHS[last.month - 1]} {last.day}")
-        self._live_background().step(_live.AGENDA_READ, "Agenda: read the personal calendar (read only)",
+        self._live_background().step(_live.AGENDA_READ, agenda_read_title(self._agenda_aliases()),
                                      key="agenda", fields=[("Range", span),
                                                            ("Calendars", ", ".join(job.calendar_ids))])
+
+    def _agenda_aliases(self) -> list[str]:
+        """The accounts whose calendars this agenda read asks (files only): "personal" while its Google calendar is
+        signed in (or when nothing else is: its read then says why), then each signed-in Outlook account."""
+        names = [DEFAULT_ACCOUNT] if self.calendar is not None and _ActionWorker._signed_in(self.calendar) else []
+        names += [alias for alias, calendar in getattr(self, "_outlook_calendars", {}).items()
+                  if _ActionWorker._signed_in(calendar)]
+        return names or [DEFAULT_ACCOUNT]
 
     @_live.quiet()
     def _live_agenda_done(self, events: Any, problem: str, message: str) -> None:

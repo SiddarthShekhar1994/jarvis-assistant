@@ -33,6 +33,9 @@ raises for odd data; only a frame id that is not one raises ValueError (the call
     from_followups(items, *, frame_id, now=None)
         follow-ups (followups.FollowupItem) as a mail list: sender, subject, WAITING / OWED as the row's meta, the age
         ("20h", "3d": followups.age_words) as its time when ``now`` is given
+    from_unread(alias, messages, *, frame_id, now=None)
+        one account's unread mail (the Gmail metadata shape; an Outlook account's, outlook.OutlookMailReader.unread) as
+        a mail list "Unread · <account>": sender's name, subject, age; never the snippet. Built() when none
 
 Each returns Built: ``messages`` in order (the frame, then its picture when it has one) and ``refused`` (pictures left
 out). Every string from outside goes through live.clean_line / clean_block (secrets redacted; control, bidi and invisible
@@ -48,7 +51,7 @@ import base64
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from datetime import time as clock_time
 from typing import Any
 
@@ -756,6 +759,46 @@ def from_followups(items: Iterable[Any], *, frame_id: str, now: datetime | None 
         return Built((_frame(frame_id, "mail_list", FOLLOWUPS_TITLE, status="empty",
                              status_text=persona.FOLLOWUPS_EMPTY),))
     return Built((_frame(frame_id, "mail_list", FOLLOWUPS_TITLE, meta=persona.followups_meta(waiting, owed),
+                         body={"rows": _capped(rows, _mail_more)}),))
+
+
+UNREAD_TITLE = "Unread · {alias}"
+UNREAD_META_ONE = "1 unread"
+UNREAD_META = "{count} unread"
+
+
+def _header(message: Mapping[str, Any], name: str) -> str:
+    payload = message.get("payload") if isinstance(message.get("payload"), Mapping) else {}
+    for item in payload.get("headers") or ():
+        if isinstance(item, Mapping) and str(item.get("name", "")).casefold() == name.casefold():
+            return str(item.get("value") or "")
+    return ""
+
+
+def from_unread(alias: str, messages: Iterable[Any], *, frame_id: str, now: datetime | None = None) -> Built:
+    """One account's unread mail as a mail list (the canvas Now group's mail frame): messages in the Gmail metadata
+    shape (outlook.message_from), newest first - the sender's name, the subject, the age as its time; never the
+    snippet or an address beyond a sender who has no name. Built() when there is none."""
+    frame_id = _check_id(frame_id)
+    rows: list[dict[str, Any]] = []
+    for message in messages or ():
+        if not isinstance(message, Mapping):
+            continue
+        age = ""
+        stamp = str(message.get("internalDate") or "")
+        if stamp.isdigit() and isinstance(now, datetime):
+            try:
+                age = age_words(datetime.fromtimestamp(int(stamp) / 1000, tz=timezone.utc), now)
+            except (TypeError, ValueError, OverflowError, OSError):
+                age = ""
+        sender = _name_of(_header(message, "From").strip()) or SENDER_UNKNOWN
+        rows.append({"sender": clean(sender, protocol.TITLE_CAP), "time": cut(age, protocol.META_CAP),
+                     "subject": clean(_header(message, "Subject") or pictures.NO_SUBJECT, protocol.TITLE_CAP),
+                     "meta": "", "unread": True})
+    if not rows:
+        return Built()
+    meta = UNREAD_META_ONE if len(rows) == 1 else UNREAD_META.format(count=len(rows))
+    return Built((_frame(frame_id, "mail_list", UNREAD_TITLE.format(alias=clean(alias, 24)), meta=meta,
                          body={"rows": _capped(rows, _mail_more)}),))
 
 

@@ -13,9 +13,10 @@ Settings come from four places:
   "work" / "personal" and what it may do), schedule, hotkey,
   agenda, display, Ask Jarvis (``[ask]``, off by default), assistant (``[assistant]``: how
   Jarvis speaks on his own), LIVE view (``[live]``: the tab that shows every step Jarvis
-  takes, on screen only), screen (``[ui]``: how much the hologram moves) and other AI apps (``[mcp]``: the
-  read-only ``--mcp`` mode, off by default) options. Which
-  Google account an alias is never goes here: the sign-ins live in %LOCALAPPDATA%\\briefing-reader;
+  takes, on screen only), screen (``[ui]``: how much the hologram moves), other AI apps (``[mcp]``: the
+  read-only ``--mcp`` mode, off by default) and Outlook (``[microsoft]``: the client id of the owner's own app
+  registration, for ``[accounts.<alias>]`` tables with ``backend = "microsoft"``; empty by default) options. Which
+  Google or Microsoft account an alias is never goes here: the sign-ins live in %LOCALAPPDATA%\\briefing-reader;
 * ``settings.json`` in that data folder (overrides.py): the comfort settings changed in the app's Settings, merged
   into config.toml's values before the parsers run (config.toml < settings.json; never an ``enabled``).
 
@@ -106,7 +107,13 @@ SOUNDS_CHOICES = (SOUNDS_SOFT, SOUNDS_OFF)
 ACCOUNT_FEATURES = ("calendar", "gmail_send", "gmail_read", "gmail_tidy")
 BACKEND_GOOGLE = "google"
 BACKEND_COMPOSIO = "composio"     # accepted, but not built into this version
-ACCOUNT_BACKENDS = (BACKEND_GOOGLE, BACKEND_COMPOSIO)
+BACKEND_MICROSOFT = "microsoft"   # an Outlook / Microsoft account: read only in this version (ms_auth, outlook)
+ACCOUNT_BACKENDS = (BACKEND_GOOGLE, BACKEND_COMPOSIO, BACKEND_MICROSOFT)
+# What a Microsoft account may do (read only): "calendar" puts its events in the Day view beside the personal Google
+# calendar's; "mail_read" lets Jarvis read its inbox's headers and snippets (outlook.OutlookMailReader). Both by default.
+MICROSOFT_FEATURES = ("calendar", "mail_read")
+MICROSOFT_TENANTS = ("common", "consumers", "organizations")
+_GUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 DEFAULT_ACCOUNT = "personal"
 UNDO_SECONDS_RANGE = (3, 30)
 
@@ -114,7 +121,7 @@ _MISSING = object()
 _KNOWN_TABLES = ("voice", "prompt", "polling", "sections", "notion", "calendar", "actions",
                  "accounts", "schedule", "hotkey", "agenda", "display", "ask", "research", "assistant", "live",
                  "productivity", "ui", "meetings", "desktop", "agent", "talk", "instant", "standing", "look",
-                 "docs", "wake", "mcp")
+                 "docs", "wake", "mcp", "microsoft")
 # Library loggers kept at WARNING, also under --debug. The Google sign-in libraries log the
 # authorization code, the access token and the refresh token at DEBUG (requests_oauthlib),
 # before Jarvis could register them for redaction, so they never get DEBUG here.
@@ -214,8 +221,8 @@ class AccountConfig:
     """One ``[accounts.<alias>]`` table: which service acts for the alias and what it may do."""
 
     alias: str
-    backend: str = BACKEND_GOOGLE                     # "google"; "composio" is not built yet
-    features: tuple[str, ...] = ("calendar",)         # ACCOUNT_FEATURES
+    backend: str = BACKEND_GOOGLE                     # "google"; "microsoft" (read only); "composio" is not built yet
+    features: tuple[str, ...] = ("calendar",)         # ACCOUNT_FEATURES (MICROSOFT_FEATURES for "microsoft")
 
     def __post_init__(self) -> None:
         if not isinstance(self.features, tuple):
@@ -630,6 +637,18 @@ class McpConfig:
 
 
 @dataclass(frozen=True)
+class MicrosoftConfig:
+    """``[microsoft]``: Outlook / Microsoft accounts (``[accounts.<alias>]`` with ``backend = "microsoft"``). ``client_id``
+    is the Application (client) id of the owner's own free app registration (README "Microsoft / Outlook accounts");
+    "" (the default) means none yet: Connect then says so. ``tenant``: which accounts may sign in - "common" (work,
+    school and personal), "consumers" (personal outlook.com ones only), "organizations", or a directory id. Never a
+    secret: a public client has none."""
+
+    client_id: str = ""
+    tenant: str = "common"
+
+
+@dataclass(frozen=True)
 class Config:
     notion_token: str = field(repr=False)   # "" when missing; NEVER logged
     page_id: str                            # normalized 32-hex, no dashes; "" when missing or invalid
@@ -668,6 +687,7 @@ class Config:
     docs: DocsConfig = field(default_factory=DocsConfig)
     mcp: McpConfig = field(default_factory=McpConfig)
     wake: WakeConfig = field(default_factory=WakeConfig)
+    microsoft: MicrosoftConfig = field(default_factory=MicrosoftConfig)
     # Settings changed in the app (overrides.py: settings.json in the data folder, merged before the parsers): the
     # "table.key" names in use here, and what config.toml alone gives each of them. hash=False keeps Config hashable.
     overridden: frozenset[str] = frozenset()
@@ -820,6 +840,7 @@ def load_config(project_root: Path | None = None, *,
         docs=_parse_docs(doc),
         mcp=_parse_mcp(doc),
         wake=_parse_wake(doc),
+        microsoft=_parse_microsoft(doc),
         overridden=overridden,
         toml_values=MappingProxyType(toml_values),
     )
@@ -1175,11 +1196,18 @@ def _parse_accounts(doc: Mapping[str, Any]) -> Mapping[str, AccountConfig]:
         key = f"accounts.{alias}"
         r = _TableReader({key: value}, key, ("backend", "features"))
         backend = r.choice("backend", d.backend, ACCOUNT_BACKENDS)
+        if backend == BACKEND_MICROSOFT and alias == DEFAULT_ACCOUNT:
+            logger.warning("config.toml: accounts.%s is always the Google account (its calendar is the agenda's); "
+                           "give the Outlook account another name; using google", alias)
+            backend = BACKEND_GOOGLE
+        # A Microsoft account reads only: its own features (both by default); the Google ones never apply to it.
+        known, default = ((MICROSOFT_FEATURES, MICROSOFT_FEATURES) if backend == BACKEND_MICROSOFT
+                          else (ACCOUNT_FEATURES, d.features))
         features = []
-        for feature in r.names("features", d.features):
-            if feature.casefold() not in ACCOUNT_FEATURES:
+        for feature in r.names("features", default):
+            if feature.casefold() not in known:
                 logger.warning("config.toml: accounts.%s.features entry %s is not one of %s; skipped",
-                               alias, _short_repr(feature), ", ".join(ACCOUNT_FEATURES))
+                               alias, _short_repr(feature), ", ".join(known))
             elif feature.casefold() not in features:
                 features.append(feature.casefold())
         accounts[alias] = AccountConfig(alias, backend=backend, features=tuple(features))
@@ -1615,6 +1643,30 @@ def _parse_docs(doc: Mapping[str, Any]) -> DocsConfig:
         logger.warning("config.toml: docs.export_folder is not a full folder path; using the default (Jarvis\\Exports "
                        "in your user folder)")
     return DocsConfig(enabled=r.boolean("enabled", d.enabled), export_folder=folder)
+
+
+def _parse_microsoft(doc: Mapping[str, Any]) -> MicrosoftConfig:
+    """``[microsoft]``, or the defaults (no client id, tenant "common") when the table is absent. A client id that is
+    not a GUID is left out with a warning that does not repeat it; a tenant that is neither one of MICROSOFT_TENANTS
+    nor a directory id is "common"."""
+    d = MicrosoftConfig()
+    r = _TableReader(doc, "microsoft", _field_names(MicrosoftConfig))
+    raw = r.table.get("client_id", "")
+    client_id = raw.strip() if isinstance(raw, str) else ""
+    if client_id and not _GUID_RE.fullmatch(client_id):
+        logger.warning("config.toml: microsoft.client_id is not an Application (client) id like "
+                       "00000000-0000-0000-0000-000000000000; Outlook accounts stay unconnected")
+        client_id = ""
+    elif not isinstance(raw, str):
+        logger.warning("config.toml: microsoft.client_id should be a text value; Outlook accounts stay unconnected")
+    tenant = r.string("tenant", d.tenant)
+    if tenant.casefold() in MICROSOFT_TENANTS:
+        tenant = tenant.casefold()
+    elif not _GUID_RE.fullmatch(tenant):
+        logger.warning("config.toml: microsoft.tenant should be common, consumers, organizations or a directory id; "
+                       "using common")
+        tenant = d.tenant
+    return MicrosoftConfig(client_id=client_id, tenant=tenant)
 
 
 def _parse_mcp(doc: Mapping[str, Any]) -> McpConfig:

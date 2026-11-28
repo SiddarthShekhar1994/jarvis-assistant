@@ -3622,7 +3622,8 @@ class AgendaPanel(ChamferPanel):
 
     ``set_day(title, meta)`` names the day; ``set_events(rows)`` shows
     AgendaRows, or ``set_message(text, color, link, tooltip)`` shows one line
-    instead, with an optional link button (``link_button``, ``linkClicked``).
+    instead, with an optional link button (``link_button``, ``linkClicked``);
+    ``show_note(text, color, link, tooltip)`` shows that line under the rows, which stay.
     ``set_deadlines(rows, empty_text)`` and ``set_deadlines_meta(text)`` fill
     the DEADLINES part. Row widgets are reused, so a refresh does not flicker.
     ``set_mode(AGENDA_DAY)`` names the hologram's Day view (the panel lives in its drawer; the FOLLOW-UPS
@@ -3761,6 +3762,17 @@ class AgendaPanel(ChamferPanel):
                     tooltip: str = "") -> None:
         """One line instead of the agenda rows; ``link`` adds a link button under it."""
         _reuse_rows(self._event_rows, self._events_layout, (), AgendaRow)
+        self.message_label.setText(text)
+        self.message_label.setToolTip(tooltip)
+        set_label_color(self.message_label, color)
+        self.link_button.setText(link or "Connect")
+        self.link_button.setVisible(bool(link))
+        self.link_button.updateGeometry()
+        self._message_box.setVisible(bool(text or link))
+
+    def show_note(self, text: str, color: str | QColor = TEXT_SOFT, *, link: str = "", tooltip: str = "") -> None:
+        """The message line (and its link button) under the rows ``set_events`` shows, which stay: an Outlook
+        account's rows while Google's Connect line still applies."""
         self.message_label.setText(text)
         self.message_label.setToolTip(tooltip)
         set_label_color(self.message_label, color)
