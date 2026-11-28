@@ -24,7 +24,9 @@ Public API
     A slim bar over the card column at any width: "Add all N to calendar..." while at least two own-calendar cards
     could go together, "Adding 2 of 5..." with Stop while a batch runs, hidden else. ``ApprovalsStage.set_batch(count,
     state, text)`` sets it; ``batchRequested`` / ``batchStopRequested`` are its clicks. It only asks: the app opens the
-    confirm dialog, and each card is still carried out on its own path.
+    confirm dialog, and each card is still carried out on its own path. Beside it, "Mark N overdue to-dos done..."
+    (the walkthrough of 2026-11-28) while two or more to-do hand-offs are overdue and no Add all runs:
+    ``set_overdue(count)`` sets it, ``overdueDoneRequested`` is its click (the app's confirm, then each card's own Done).
 
 Nothing here decides or sends anything: the tiles only point at the cards, whose buttons decide.
 """
@@ -503,6 +505,8 @@ BATCH_ADD_TEXT = "Add all {count} to calendar..."
 BATCH_STOP_TEXT = "Stop"
 BATCH_STOPPING_TEXT = "Stopping..."
 BATCH_TIP = "Lists them first; nothing is added before you confirm"
+DONE_ALL_TEXT = "Mark {count} overdue to-dos done..."
+DONE_ALL_TIP = "Lists them first; Done only records that you handled them - nothing is sent or changed"
 
 
 class BatchBar(QWidget):
@@ -511,12 +515,14 @@ class BatchBar(QWidget):
 
     requested = Signal()
     stopRequested = Signal()
+    doneRequested = Signal()       # "Mark N overdue to-dos done..."
     HEIGHT = 40
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._state = BATCH_HIDDEN
         self._count = 0
+        self._overdue = 0
         self.setAccessibleName("Add all")
         row = QHBoxLayout(self)
         row.setContentsMargins(4, 0, 0, 4)
@@ -525,6 +531,12 @@ class BatchBar(QWidget):
         row.addWidget(self.label, 1)
         self.button = holo.HoloButton("", holo.AMBER_GHOST, size=holo.SIZE_SM)
         self.button.clicked.connect(self._on_click)
+        # The overdue to-dos (the walkthrough of 2026-11-28): their Done only records, so they may go together.
+        self.done_button = holo.HoloButton("", holo.GHOST, size=holo.SIZE_SM)
+        self.done_button.setToolTip(DONE_ALL_TIP)
+        self.done_button.clicked.connect(self.doneRequested)
+        self.done_button.hide()
+        row.addWidget(self.done_button, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         row.addWidget(self.button, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.setFixedHeight(self.HEIGHT)
         self.hide()
@@ -545,8 +557,24 @@ class BatchBar(QWidget):
             self.button.set_variant(holo.GHOST)
             self.button.setToolTip("Stops after the card being added now; each added card keeps its Undo")
             self.button.setEnabled(not stopping)
+        self.button.setVisible(self._state != BATCH_HIDDEN)
         self.button.updateGeometry()
-        self.setVisible(self._state != BATCH_HIDDEN)
+        self._sync_visible()
+
+    def set_overdue(self, count: int) -> None:
+        """"Mark N overdue to-dos done..." while ``count`` > 0 and no Add all runs (0 hides it)."""
+        self._overdue = max(0, int(count))
+        self.done_button.setText(DONE_ALL_TEXT.format(count=self._overdue))
+        self._sync_visible()
+
+    def overdue(self) -> int:
+        return self._overdue
+
+    def _sync_visible(self) -> None:
+        done = self._overdue > 0 and self._state != BATCH_RUNNING
+        self.done_button.setVisible(done)
+        self.done_button.updateGeometry()
+        self.setVisible(self._state != BATCH_HIDDEN or done)
 
     def state(self) -> str:
         return self._state
@@ -575,6 +603,7 @@ class ApprovalsStage(QWidget):
 
     batchRequested = Signal()
     batchStopRequested = Signal()
+    overdueDoneRequested = Signal()
 
     def __init__(self, cards: hud.ActionList, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -586,6 +615,7 @@ class ApprovalsStage(QWidget):
         self.batch_bar = BatchBar(self)
         self.batch_bar.requested.connect(self.batchRequested)
         self.batch_bar.stopRequested.connect(self.batchStopRequested)
+        self.batch_bar.doneRequested.connect(self.overdueDoneRequested)
         cards.changed.connect(self._schedule_sync)
         self._sync_pending = False
         self._schedule_sync()
@@ -611,6 +641,13 @@ class ApprovalsStage(QWidget):
         ("Adding 2 of 5..."), or BATCH_HIDDEN."""
         shown = self.batch_bar.isVisibleTo(self)
         self.batch_bar.set_batch(count, state, text)
+        if self.batch_bar.isVisibleTo(self) != shown:
+            self._place()
+
+    def set_overdue(self, count: int) -> None:
+        """The batch bar's "Mark N overdue to-dos done..." (0 hides it)."""
+        shown = self.batch_bar.isVisibleTo(self)
+        self.batch_bar.set_overdue(count)
         if self.batch_bar.isVisibleTo(self) != shown:
             self._place()
 

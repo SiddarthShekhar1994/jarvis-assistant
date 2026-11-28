@@ -1664,6 +1664,7 @@ class RestingGroupTests(CanvasApp):
         self.assertEqual(list(kinds), ["approvals", "calendar", "todos"])  # what waits first; no agents: none made
         heads = [message for message in board.of_type("group") if message["id"] == group]
         self.assertEqual(heads[-1]["topic"], "Now")
+        self.assertEqual(heads[-1]["time"], "")      # the walkthrough of 2026-11-28: no start time that reads as stale
         self.assertEqual(kinds["approvals"]["body"]["count"], self.reading.needs_ok_count())
         self.assertEqual(kinds["calendar"]["title"], "Today")
         self.assertNotIn("now", self.canvas().buttons())                  # it is up: no "Now" button ...

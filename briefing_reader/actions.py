@@ -1899,11 +1899,14 @@ def _due_text(due: date | datetime, *, show_year: bool) -> str:
 
 
 def _due_words(due: date | datetime | None, today: date) -> str:
-    """"due today", "due tomorrow" or "due Wed Oct 7" (+ ", 11:59 PM" when timed); "" without a due."""
+    """"due today", "due tomorrow" or "due Wed Oct 7" (+ ", 11:59 PM" when timed); "overdue, was due Sun Nov 22"
+    before today; "" without a due."""
     if due is None:
         return ""
     day = due.date() if isinstance(due, datetime) else due
-    if day == today:
+    if day < today:              # the walkthrough of 2026-11-28: a card due last week read like one still to come
+        words = "overdue, was due " + _short_day(day, day.year != today.year)
+    elif day == today:
         words = "due today"
     elif day == today + timedelta(days=1):
         words = "due tomorrow"
@@ -1915,11 +1918,13 @@ def _due_words(due: date | datetime | None, today: date) -> str:
 
 
 def _spoken_due(due: date | datetime | None, today: date) -> str:
-    """"due today", "due Wednesday October 7 at 11:59 PM"."""
+    """"due today", "due Wednesday October 7 at 11:59 PM"; "overdue, it was due Sunday November 22" before today."""
     if due is None:
         return ""
     day = due.date() if isinstance(due, datetime) else due
-    if day == today:
+    if day < today:
+        words = "overdue, it was due " + _long_day(day, day.year != today.year)
+    elif day == today:
         words = "due today"
     elif day == today + timedelta(days=1):
         words = "due tomorrow"
