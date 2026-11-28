@@ -3524,7 +3524,8 @@ something you have not seen):
   WITHDRAWN), each match a rule told you of, with the values it found, each
   tidy-up with its own **Undo** or why there was none, and a run that made
   nothing ("Reached its runs for today; it waits until tomorrow.", "Missed a
-  run while the PC was off or asleep.", "Couldn't finish a run.").
+  run while the PC was off or asleep.", "Couldn't finish a run."). The
+  times, badges and **Undo** buttons each line up in one column.
 - **REPORTS**: what the agents wrote, each under "Written by Claude from your
   mail", and **Clear**, which deletes the reports and receipts kept on this PC
   at once (a card that still waits stays until you decide it).
@@ -3632,10 +3633,15 @@ briefing_reader --standing-run --origin task` at logon and every 5 minutes
 and it starts no job after 15 minutes. It reads Google with sign-ins it holds
 in memory only: it never saves, deletes or moves a sign-in and never signs
 in, so an account whose sign-in needs you waits for you ("The work account
-can't be read in the background: sign it in again in Jarvis."). Standing
-runs, the setup and dry runs too, do not show in LIVE: the Agents screen's
-ACTIVITY and REPORTS are their record, and the log keeps ids, kinds, counts,
-durations and statuses only. `--standing-check` prints how things stand (see
+can't be read in the background: sign it in again in Jarvis."). A standing
+run happens outside Jarvis, so LIVE can't watch it as it goes: once Jarvis
+reads a run that ended after he started, it shows in LIVE as a finished task
+under AGENTS, at the run's own time and length, with its steps - what started
+it, what it read (counts), the run (and why it failed, if it did) and what it
+made, each as ACTIVITY says it. It never opens LIVE by itself, and runs from
+before Jarvis started are not shown there. The setup and dry runs do not show
+in LIVE. The Agents screen's ACTIVITY and REPORTS are the record, and the log
+keeps ids, kinds, counts, durations and statuses only. `--standing-check` prints how things stand (see
 [Command line](#command-line)).
 
 **What goes where.** When a job runs, the text of each mail its filter matched

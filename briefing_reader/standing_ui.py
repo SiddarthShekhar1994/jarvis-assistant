@@ -62,6 +62,14 @@ The spoken line
     records, during focus mode, or while Windows says the owner is busy (presentation mode, a full-screen program);
     the conversation shows it at once. Each run is told once (AppState "announced"), never older than 12 hours.
 
+LIVE
+    Standing runs happen in the background check, outside Jarvis's process, so LIVE cannot watch them as they go. Each
+    run file read for the first time since Jarvis started goes to LIVE once as a finished task (TASK_STANDING, tag
+    AGENTS; it never opens LIVE by itself), at the run's own time and length: what started it (the trigger and which
+    check), what it read (counts, or why it read nothing), the run (how long, a reason word when it failed) and what
+    it made, each line as its ACTIVITY row says it. Runs from before this start are not posted (LIVE is this session
+    only).
+
 Radar (build plan item 6)
     While Documents are on, the Radar card offers the ready-made agents not added yet (standing.radar) and Hide
     (AppState "radar_hidden"; the line's link "standing:radar" brings it back); it steps aside while a setup card shows
@@ -88,6 +96,7 @@ from typing import Any
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from . import holo, standing_setup
+from . import live as live_events
 from .board.resting import AgentLine
 from .actions import CALENDAR, REPLY, SOURCE_STANDING, STANDING_MODES, STATUS_DENIED, TODO, ProposedAction
 from .google_auth import PROBLEM_DENIED, PROBLEM_SIGNED_OUT, logged_alias
@@ -226,6 +235,16 @@ _RUN_BADGES = {"nothing": "Nothing new", "signed_out": "Not read"}
 _HOLD_WHY = {"limit": "your Claude plan's limit", "overage": "extra usage would pay for it",
              "warning": "Claude Code said you are near your limit"}
 _CARD_WORDS = {TODO: "To-do", CALENDAR: "Event", REPLY: "Reply draft"}
+# LIVE (a run told after the fact, from its run file)
+LIVE_KIND_WORDS = {KIND_AGENT: "Agent", KIND_RULE: "Rule"}
+LIVE_TRIGGER_WORDS = {"time": "Its set time", "every": "Its interval", "mail": "New mail", "manual": "Run now"}
+LIVE_ORIGIN_WORDS = {"task": "The background check (Windows)", "app": "Jarvis's own check while he is open",
+                     "now": "Your Run now"}
+LIVE_RAN = ("ok", "failed")                  # the statuses of a run that read and ran (the others never ran)
+LIVE_STATUSES = {"ok": live_events.STATUS_OK, "nothing": live_events.STATUS_OK,
+                 "signed_out": live_events.STATUS_WARN, "missed": live_events.STATUS_WARN,
+                 "capped": live_events.STATUS_BLOCKED, "held": live_events.STATUS_BLOCKED,
+                 "failed": live_events.STATUS_FAILED}
 DOT = "\u00b7"
 
 
@@ -323,6 +342,61 @@ def when_text(moment: datetime | None, now: datetime, hour24: bool = False) -> s
     if 1 < days < 7 or -7 < days < -1:
         return f"{local.strftime('%a')} {clock}"
     return f"{local.strftime('%b')} {local.day} {clock}"
+
+
+def _read_words(counts: Mapping[str, Any]) -> list[tuple[str, str]]:
+    def number(key: str) -> int:
+        value = counts.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+    fields = [("Mail", _plural(number("mails"), "new mail", "new mails"))]
+    if "events" in counts:
+        fields.append(("Calendar", _plural(number("events"), "event", "events")))
+    return fields
+
+
+def live_run(stream: Any, run: RunView, name: str, made: Sequence[ActivityRow], *, now: datetime,
+             hour24: bool = False) -> Any:
+    """One standing run in LIVE (see the module docstring), finished, at its own time and length; None when LIVE is
+    off. ``made``: its ACTIVITY rows (the cards, answers and tidy-ups, as the Agents screen says them)."""
+    task = stream.task(live_events.TASK_STANDING, f"{LIVE_KIND_WORDS.get(run.job_kind, 'Job')}: {name}")
+    if task is live_events.NO_TASK:
+        return None
+    status = LIVE_STATUSES.get(run.status, live_events.STATUS_WARN)
+    took = (run.ended - run.started).total_seconds() if run.started is not None and run.ended is not None else None
+    trigger = LIVE_TRIGGER_WORDS.get(run.trigger, "A check")
+    origin = LIVE_ORIGIN_WORDS.get(run.origin, "A background check")
+    fields = [("Started by", trigger), ("Checked by", origin)]
+    fields += [(label, when_text(moment, now, hour24)) for label, moment in (("Started", run.started),
+                                                                             ("Ended", run.ended)) if moment is not None]
+    task.step(live_events.STANDING_START, "What started it", fields=fields).done(
+        live_events.STATUS_OK, summary=f"{trigger} {DOT} {origin}")
+    read = _read_words(run.counts)
+    read_line = ", ".join(value for _label, value in read)
+    if run.status not in LIVE_RAN:
+        first = run.status == "nothing" and run.problem == "first"
+        line = FIRST_LOOK_LINE if first else RUN_LINES.get(run.status, "It didn't run.")
+        task.step(live_events.STANDING_READ, "What Jarvis read", fields=read if run.status == "nothing" else ()).done(
+            status, status_text=_RUN_BADGES.get(run.status, ""), summary=line)
+        task.finish(status, summary=line, at=run.started, took_s=took)
+        return task
+    task.step(live_events.STANDING_READ, "What Jarvis read", fields=read).done(live_events.STATUS_OK,
+                                                                                summary=read_line)
+    if run.status == "failed":
+        why = run.problem or "unknown"
+        task.step(live_events.STANDING_RUN, "The run", fields=[("Why", why)]).done(
+            status, summary=f"{RUN_LINES['failed']} ({why})", took_s=took)
+        task.finish(status, summary=RUN_LINES["failed"], at=run.started, took_s=took)
+        return task
+    task.step(live_events.STANDING_RUN, "The run").done(live_events.STATUS_OK, summary="Done", took_s=took)
+    items = [live_events.Item(row.text, status_text=row.state_text, note=row.detail) for row in made]
+    made_fields = [("Report", run.summary or "Written: under REPORTS on the Agents screen")] if run.report else []
+    words = _plural(len(items), "thing", "things") + " to show you" if items else (
+        "A report" if run.report else "Nothing to show you")
+    task.step(live_events.STANDING_MADE, "What it made", fields=made_fields, items=items).done(
+        live_events.STATUS_OK, summary=words)
+    task.finish(live_events.STATUS_OK, summary=f"{read_line} {DOT} {words}", at=run.started, took_s=took)
+    return task
 
 
 def trigger_text(job: Agent | Rule, hour24: bool = False) -> str:
@@ -466,6 +540,8 @@ class StandingController(QObject):
         self._held_timer: QTimer | None = None
         self._held: list[str] = []                          # run ids whose line waits (shown already)
         self._shown_runs: set[str] = set()                  # run ids whose entry is in the conversation
+        self._live_since = self._now()                      # LIVE: only the runs that end after this start
+        self._live_posted: set[str] = set()                 # run ids told to LIVE (or from before this start)
         self._deleted: dict[str, tuple[Agent | Rule, tuple[str, ...], datetime]] = {}   # job id -> its Undo
         self._screen_note: tuple[str, datetime] | None = None   # the answer to the last click on the screen
         self._reply_ok: dict[str, float] = {}               # card id -> monotonic time its check passed
@@ -617,10 +693,42 @@ class StandingController(QObject):
         self._import_to_docs()
         self._sweep_cleared()
         self.host._take_standing_cards(self._cards())
+        self._post_to_live()
         self._show()
         if announce:
             self._announce_new()
         self.changed.emit()
+
+    def _post_to_live(self) -> None:
+        """Each run read for the first time since Jarvis started goes to LIVE once (live_run; module docstring)."""
+        fresh = [run for run in self.runs if run.id not in self._live_posted]
+        if not fresh:
+            return
+        self._live_posted.update(run.id for run in fresh)
+        stream = getattr(self.host, "live", None)
+        if stream is None:
+            return
+        now, hour24 = self._now(), self._hour24()
+        jobs = self._jobs()
+        waiting = self._waiting_ids()
+        store = self.host._store
+        for run in fresh:
+            end = run.ended or run.started
+            if end is None or end < self._live_since:
+                continue
+            try:
+                job = jobs.get(run.job_id)
+                name = job.name if job is not None else (run.job_name or "A deleted job")
+                when = when_text(run.ended or run.started, now, hour24)
+                made: list[ActivityRow] = []
+                for receipt in run.receipts:
+                    for row in (self._receipt_row(run, receipt, name, when, waiting, store),
+                                self._tidy_row(run, receipt, name, when, now)):
+                        if row is not None:
+                            made.append(row)
+                live_run(stream, run, name, made, now=now, hour24=hour24)
+            except Exception as exc:  # noqa: BLE001 - LIVE only shows; the Agents screen goes on
+                logger.debug("Standing: run %s not shown in LIVE (%s)", run.id, type(exc).__name__)
 
     def _import_to_docs(self) -> None:
         """Build plan item 5: the agents' runs that land in a document or a sheet, each taken in once (docs_ui: their
