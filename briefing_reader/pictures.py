@@ -283,6 +283,7 @@ class PagePicture:
     idn: bool = False      # an "xn--" host: the note carries actions.IDN_WARNING
     still_loading: bool = False   # taken at the time limit while the page still loaded
     blocked: int = 0       # requests of the page Jarvis blocked (local / not https)
+    retry: bool = False    # UNAVAILABLE only: the owner's Try again may work (a passing failure, not tried again yet)
 
     def __repr__(self) -> str:
         return f"<PagePicture {len(self.image)} bytes, {self.width}x{self.height}>"
@@ -1350,9 +1351,10 @@ def page_ready(url: str, *, image: bytes, image_format: str = "JPG", width: int,
                    alt=_line(alt, ALT_CAP), page=page)
 
 
-def page_unavailable(url: str, reason: str) -> Picture:
-    """No picture of the page ("Picture unavailable: <reason>")."""
-    page = _page_base(url)
+def page_unavailable(url: str, reason: str, *, retry: bool = False) -> Picture:
+    """No picture of the page ("Picture unavailable: <reason>"). ``retry``: the board's frame offers Try again (the
+    snapshotter says so only for a passing failure it can take again, once, on the owner's click)."""
+    page = replace(_page_base(url), retry=bool(retry))
     return Picture(KIND_PAGE, page_caption(page.host), live.PICTURE_UNAVAILABLE,
                    note=_line(UNAVAILABLE_PREFIX + (reason or "it could not be taken"), 300),
                    alt=_line(f"No picture of the page {page.host or 'unknown site'}", ALT_CAP), page=page)

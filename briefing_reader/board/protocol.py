@@ -11,8 +11,11 @@ In (app -> page): check_message(message, known, groups=()) -> Checked
         frame    {"id", "kind", "title", "meta", "body", "status", "status_text", "status_meta", "waits", "changed",
                   "pinned", "closed"}: adds a frame (it draws in) or updates the one with that id in place. "body" is the
                   kind's own (KINDS: one checker per kind, as the page has one renderer per kind); "status" ok / failed
-                  (status_text says what failed: its warning, no button) / empty (status_text, status_meta "Checked
-                  9:44 AM"); "waits" the words of its amber chip ("" = it waits on nothing).
+                  (status_text says what failed: its warning) / empty (status_text, status_meta "Checked
+                  9:44 AM"); "waits" the words of its amber chip ("" = it waits on nothing). "retry" (only when
+                  given; true only on a failed frame, else refused): the page offers Try again, whose retry request
+                  the app takes only for such a frame (a page picture that failed for a passing reason, not tried
+                  again yet); a failed frame without it shows its warning and no button.
                   The bodies (DESIGN-SPEC 3.3; every string capped, every list at most ROWS_CAP rows, no other key):
                     text         {"text", "rows"?: [{"lead", "text", "meta"}]}        (rows only when given)
                     calendar     {"first", "last" (the day bar's minutes after midnight; equal: no bar), "now_min" (its
@@ -132,11 +135,13 @@ In (app -> page): check_message(message, known, groups=()) -> Checked
     The ids of lit, remove and picture must be frames the app sent (``known``), and a group's those of groups it sent
     (``groups``); a new frame past MAX_FRAMES is refused.
 
-Out (page -> app): check_request(kind, payload, known) -> Request
+Out (page -> app): check_request(kind, payload, known, retryable=()) -> Request
     kind one of REQUEST_KINDS; payload a small JSON object (at most PAYLOAD_CAP characters, no NaN or Infinity) of that
     kind's fields only; every frame id one the app sent (``known``):
         ready {"v"?} | layout {"frames": [{"id", "top", "height"}, ...], "scrolling"} | pin {"id", "on"}
-        | focus, open, close, bring_back, go_approvals {"id"}   (canvas part 5A: no retry - no frame offers it)
+        | focus, open, close, bring_back, go_approvals {"id"}
+        | retry {"id"}    a failed frame's Try again: the id must also be one the app sent with "retry" and has not
+                          had a Try again of since (``retryable``); anything else is refused (R_ID)
         | hold {"id", "on"}   a closed frame's row has the pointer over it or the keyboard focus in it (on: its Bring
                           back stays offered, the app holds its leaving) or has neither any more (off: its CLOSE_S
                           starts again, on the page and in the app)
@@ -277,7 +282,8 @@ TODO_STATES = ("open", "waits", "done")
 CAPTURE_STATES = ("waits", "on_calendar", "decided", "past", "cant_add")
 MOTION_LEVELS = ("lively", "calm", "off")
 REQUEST_KINDS = ("ready", "layout", "focus", "open", "close", "pin", "bring_back", "go_approvals",
-                 "clear", "restore", "show_new", "reading", "focus_out", "landed", "big", "go", "chrome", "hold")
+                 "clear", "restore", "show_new", "reading", "focus_out", "landed", "big", "go", "chrome", "hold",
+                 "retry")
 _ID_KINDS = frozenset({"focus", "open", "close", "bring_back", "go_approvals"})
 _BARE_KINDS = frozenset({"clear", "restore", "show_new"})     # a payload of no field at all
 _ID = re.compile(r"[A-Za-z0-9_-]{1,%d}" % ID_CAP)
@@ -711,7 +717,7 @@ KINDS: dict[str, Callable[[Any], dict[str, Any]]] = {
 # --------------------------------------------------------------------------
 
 _FRAME_FIELDS = ("type", "id", "kind", "title", "meta", "body", "status", "status_text", "status_meta", "waits",
-                 "changed", "pinned", "closed", "fact", "group")
+                 "changed", "pinned", "closed", "fact", "group", "retry")
 
 
 def _frame(value: dict[str, Any], known: Collection[str], groups: Collection[str]) -> tuple[dict[str, Any], str, str]:
@@ -737,6 +743,11 @@ def _frame(value: dict[str, Any], known: Collection[str], groups: Collection[str
     }
     if "fact" in fields:        # part 5b: a satellite's one fact (only when given)
         clean["fact"] = _text(fields["fact"], FACT_CAP)
+    if "retry" in fields:       # the page's Try again (only when given; true only on a failed frame)
+        retry = _flag(fields["retry"])
+        if retry and clean["status"] != "failed":
+            raise Refused(R_FIELD)
+        clean["retry"] = retry
     group_id = ""
     if "group" in fields:       # part 5a: the answer it belongs to (only when given: a group the app sent)
         group_id = clean["group"] = _known_id(fields["group"], groups)
@@ -1006,8 +1017,9 @@ def _chrome_request(value: Any) -> Request:
     return Request("chrome", width=width, bar=bar, holes=tuple(_box(item) for item in holes), maximize=maximize)
 
 
-def check_request(kind: Any, payload: Any, known: Collection[str]) -> Request:
-    """The page's ``post(kind, payload)`` as a Request (see the module doc), or Refused."""
+def check_request(kind: Any, payload: Any, known: Collection[str], retryable: Collection[str] = ()) -> Request:
+    """The page's ``post(kind, payload)`` as a Request (see the module doc), or Refused. ``retryable``: the frames
+    whose Try again the app takes now (a retry about any other frame is refused)."""
     if type(kind) is not str or kind not in REQUEST_KINDS:
         raise Refused(R_KIND)
     if type(payload) is not str:
@@ -1061,6 +1073,12 @@ def check_request(kind: Any, payload: Any, known: Collection[str]) -> Request:
         return Request("go", to=_choice(fields["to"], GO_WORDS))
     if kind == "chrome":
         return _chrome_request(value)
+    if kind == "retry":
+        fields = _fields(value, ("id",), ("id",))
+        frame_id = _known_id(fields["id"], known)
+        if frame_id not in retryable:
+            raise Refused(R_ID)                  # a frame that offers no Try again (or had its one)
+        return Request("retry", frame_id)
     if kind not in _ID_KINDS:
         raise Refused(R_KIND)
     fields = _fields(value, ("id",), ("id",))

@@ -7099,6 +7099,20 @@ class AppController(QObject):
         if snapper is not None:
             getattr(snapper, name)(*args)
 
+    def retry_picture(self, step_id: int) -> str:
+        """The board's Try again on a page picture that failed (the owner's click): the snapshotter takes the same page
+        again on that LIVE step, once ("" queued), else why not ("off": no page pictures now; the snapshotter's own
+        reason). Never raises."""
+        snapper = self._snapshots
+        retry = getattr(snapper, "retry", None) if snapper is not None else None
+        if not callable(retry):
+            return "off"
+        try:
+            return str(retry(step_id) or "")
+        except Exception as exc:  # noqa: BLE001 - a Try again never changes what Jarvis does
+            logger.debug("Page pictures: Try again failed (%s)", type(exc).__name__)
+            return "off"
+
     def _create_player(self) -> BriefingPlayer:
         player = BriefingPlayer(self, section_gap_ms=self.config.voice.section_gap_ms,
                                 volume=self._volume)

@@ -15,7 +15,8 @@ checked source its answer cites, and takes a picture of its first screen, for th
     PageSnapshotter(parent, ...)      the LIVE side: request(step, url, task_id=) from any thread (a
                                       PENDING picture at once), the shots one at a time on the GUI
                                       thread, READY / "Picture unavailable" on the step; end_run,
-                                      cancel_task, drop_cleared (LIVE's Clear), shutdown
+                                      cancel_task, drop_cleared (LIVE's Clear), shutdown; retry(step_id)
+                                      (the owner's Try again on a picture that failed: the same page, once)
 
 How a shot runs (PageCamera, GUI thread only): QtWebEngine is imported on first use (never at
 import: this module imports QtCore and QtGui only), with the Software Qt Quick API and the Chromium
@@ -78,7 +79,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections import Counter, deque
+from collections import Counter, OrderedDict, deque
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -93,6 +94,7 @@ logger = logging.getLogger(__name__)
 MIN_QT_VERSION = (6, 8)          # QWebEnginePermission
 HTTP_CACHE_BYTES = 32 * 1024 * 1024
 TEST_PLATFORMS = frozenset({"offscreen", "minimal"})   # no network page is ever opened on these
+FAILED_KEPT = 32                 # failed pictures a Try again may take again (the oldest go first)
 GRAB_MIN_PROGRESS = 30           # at the time limit a page this far along is pictured anyway
 _UNIFORM_SAMPLE = (48, 30)       # a grab is "blank" when this smooth thumbnail of it is one colour
 _LOCAL_SCHEMES = frozenset({"data", "blob", "about"})
@@ -1244,17 +1246,27 @@ class ShotJob:
     """One page to picture for one step of a research run (``waited``: it already waited
     START_DELAY_MS for the web engine's first start)."""
 
-    __slots__ = ("task_id", "step", "url", "number", "waited")
+    __slots__ = ("task_id", "step", "url", "number", "waited", "again")
 
-    def __init__(self, task_id: int, step: Any, url: str, number: int) -> None:
+    def __init__(self, task_id: int, step: Any, url: str, number: int, *, again: bool = False) -> None:
         self.task_id = task_id
         self.step = step
         self.url = url
         self.number = number
         self.waited = False
+        self.again = again          # the owner's Try again (a failure of it offers no other)
 
     def __repr__(self) -> str:   # never the URL
-        return f"ShotJob(task={self.task_id}, number={self.number})"
+        return f"ShotJob(task={self.task_id}, number={self.number}, again={self.again})"
+
+
+def _step_id(step: Any) -> int:
+    """The LIVE step's id (0 when it has none)."""
+    try:
+        step_id = step.id
+        return step_id if type(step_id) is int and step_id > 0 else 0
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def _shown(step: Any) -> bool:
@@ -1283,7 +1295,9 @@ class PageSnapshotter(QObject):
     asked has ended and nothing is queued (else after IDLE_STOP_S without a request).
     cancel_task(task_id) drops the run's queued pages and stops its running shot; drop_cleared()
     (LIVE's Clear) does the same for the steps that went; shutdown() stops everything for good.
-    Never raises, never blocks.
+    retry(step_id) (GUI thread) is the owner's Try again on a picture that failed for a passing
+    reason (snapshots.RETRY_REASONS): the same page on the same step, once (RunBudget.retry), through
+    every check of the first time but the same-page rule. Never raises, never blocks.
     """
 
     _wake = Signal()
@@ -1307,6 +1321,10 @@ class PageSnapshotter(QObject):
         self._asked: set[int] = set()
         self._budget = snapshots.RunBudget()
         self._counts = {"requested": 0, "taken": 0, "unavailable": 0, "refused": 0}
+        self._retries = {"offered": 0, "taken": 0, "refused": 0}     # the owner's Try agains (retry_counts)
+        # The failed pictures a Try again may take again: step id -> its job (GUI thread; at most FAILED_KEPT, the
+        # oldest go first). A job leaves when it is tried again, cancelled, Cleared or Jarvis closes.
+        self._failed: OrderedDict[int, ShotJob] = OrderedDict()
         self._camera: Any = None
         self._current: ShotJob | None = None
         self._view_open = False
@@ -1397,6 +1415,11 @@ class PageSnapshotter(QObject):
         with self._lock:
             return dict(self._counts)
 
+    def retry_counts(self) -> dict[str, int]:
+        """The owner's Try agains: offered (a failed picture that may be taken again) / taken / refused."""
+        with self._lock:
+            return dict(self._retries)
+
     # ---- GUI thread --------------------------------------------------------------------------
 
     def drop_cleared(self) -> None:
@@ -1406,6 +1429,8 @@ class PageSnapshotter(QObject):
             with self._lock:
                 kept = deque(job for job in self._jobs if _shown(job.step))
                 self._jobs = kept
+            for step_id in [key for key, job in self._failed.items() if not _shown(job.step)]:
+                del self._failed[step_id]
             current = self._current
             if current is not None and not _shown(current.step) and self._camera is not None:
                 self._camera.abort()   # finished(R_CANCELLED) -> _on_shot -> the next job
@@ -1460,8 +1485,63 @@ class PageSnapshotter(QObject):
 
     def _unavailable(self, job: ShotJob, reason: str) -> None:
         self._add("unavailable")
-        job.step.picture(pictures.page_unavailable(job.url, reason))
-        logger.info("Page snapshot: unavailable (%s)", snapshots.reason_kind(reason))
+        offer = snapshots.retryable(reason) and not job.again and not self._shut
+        if offer:
+            step_id = _step_id(job.step)
+            if step_id:
+                self._failed.pop(step_id, None)
+                self._failed[step_id] = job
+                while len(self._failed) > FAILED_KEPT:
+                    self._failed.popitem(last=False)
+                with self._lock:
+                    self._retries["offered"] += 1
+            else:
+                offer = False
+        job.step.picture(pictures.page_unavailable(job.url, reason, retry=offer))
+        logger.info("Page snapshot: unavailable (%s)%s", snapshots.reason_kind(reason),
+                    ", Try again offered" if offer else "")
+
+    def retry(self, step_id: int) -> str:
+        """The owner's Try again on the step's failed picture (GUI thread): "" when the same page is
+        queued again (the step shows "Opening..."), else why not (snapshots.R_NO_RETRY: no failed
+        picture of that step is held - it never failed for a passing reason, was tried again
+        already, was Cleared or cancelled -; R_SHUTDOWN, R_TEXT_OFF, the page's own rule,
+        RunBudget.retry's). A refusal for a step still shown puts its picture back as unavailable
+        with that reason and no Try again. Never raises."""
+        try:
+            job = self._failed.pop(step_id, None) if type(step_id) is int else None
+            if job is None or not _shown(job.step):
+                return self._retry_refused(None, snapshots.R_NO_RETRY)
+            with self._lock:
+                shut = self._shut
+            if shut:
+                return self._retry_refused(job, snapshots.R_SHUTDOWN)
+            if not self._keep_text:
+                return self._retry_refused(job, snapshots.R_TEXT_OFF)
+            reason = snapshots.snapshot_url_problem(job.url) or self._budget.retry(job.task_id, job.url)
+            if reason:
+                return self._retry_refused(job, reason)
+            again = ShotJob(job.task_id, job.step, job.url, job.number, again=True)
+            again.waited = True                       # the engine started for the first try: no start delay
+            job.step.picture(pictures.page_pending(job.url))
+            with self._lock:
+                self._jobs.append(again)
+                self._asked.add(job.task_id)
+                self._retries["taken"] += 1
+            logger.info("Page snapshot: tried again on the owner's click")
+            self._wake.emit()
+            return ""
+        except Exception as exc:  # noqa: BLE001 - a Try again never changes what Jarvis does
+            logger.debug("Page snapshots: retry failed (%s)", type(exc).__name__)
+            return snapshots.R_NO_RETRY
+
+    def _retry_refused(self, job: ShotJob | None, reason: str) -> str:
+        with self._lock:
+            self._retries["refused"] += 1
+        if job is not None and _shown(job.step):
+            job.step.picture(pictures.page_unavailable(job.url, reason))
+        logger.info("Page snapshot: Try again refused (%s)", snapshots.reason_kind(reason))
+        return reason
 
     def _pump(self) -> None:
         try:
@@ -1546,6 +1626,8 @@ class PageSnapshotter(QObject):
             with self._lock:
                 dropped = [job for job in self._jobs if job.task_id == task_id]
                 self._jobs = deque(job for job in self._jobs if job.task_id != task_id)
+            for step_id in [key for key, job in self._failed.items() if job.task_id == task_id]:
+                del self._failed[step_id]
             for job in dropped:
                 self._unavailable(job, snapshots.R_CANCELLED)
             current = self._current
@@ -1592,6 +1674,7 @@ class PageSnapshotter(QObject):
                 self._shut = True
                 jobs = list(self._jobs)
                 self._jobs.clear()
+            self._failed.clear()
             self._start_timer.stop()
             self._idle_timer.stop()
             current, self._current = self._current, None

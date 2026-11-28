@@ -14,8 +14,9 @@ raises for odd data; only a frame id that is not one raises ValueError (the call
         data: URL: as it is when it already is a JPEG of at most PICTURE_WIDTH px and protocol.PICTURE_BYTES, else
         re-encoded; when even that does not fit, no picture message, the frame says so and ``refused`` counts it);
         KIND_SEARCH -> text (the query as the title, the results as rows: title and host). A picture that is not ready
-        -> the frame in its failed (unavailable: its warning, no button) or empty (on its way, not kept) state, with
-        the picture's own note, and Built's ``not_ready`` set.
+        -> the frame in its failed (unavailable: its warning; "retry" - the page's Try again - only when the page
+        picture says one may work) or empty (on its way, not kept) state, with the picture's own note, and Built's
+        ``not_ready`` set.
     from_research(answer, *, frame_id, title="")
         a web research answer (ask.research.ResearchAnswer): the answer as text, its sources as rows (title and host,
         never a link)
@@ -281,16 +282,20 @@ _STATE_WORDS = {live.PICTURE_UNAVAILABLE: "Picture unavailable", live.PICTURE_DR
 
 
 def _not_ready(picture: Any, kind: str, frame_id: str, title: str) -> dict[str, Any]:
-    """The frame in its failed (unavailable: no button re-reads it) or empty (on its way, not kept) state, saying the
-    picture's own note."""
+    """The frame in its failed (unavailable) or empty (on its way, not kept) state, saying the picture's own note. A
+    failed page picture the snapshotter can take again (its ``retry``: a passing failure, not tried again yet) has
+    "retry": the page offers Try again; any other failure keeps its words with no button."""
     state = getattr(picture, "state", "")
     note = clean(getattr(picture, "note", "") or _STATE_WORDS.get(state, "Picture unavailable"), protocol.WORDS_CAP)
     body = dict(_EMPTY_BODIES[kind])
     page = getattr(picture, "page", None)
     if kind == "picture" and page is not None:
         body["caption"] = _caption(page)
-    return _frame(frame_id, kind, _title_of(picture, title), body=body,
-                  status="failed" if state == live.PICTURE_UNAVAILABLE else "empty", status_text=note)
+    frame = _frame(frame_id, kind, _title_of(picture, title), body=body,
+                   status="failed" if state == live.PICTURE_UNAVAILABLE else "empty", status_text=note)
+    if state == live.PICTURE_UNAVAILABLE and kind == "picture" and getattr(page, "retry", False) is True:
+        frame["retry"] = True                  # the page's Try again (its request: board.protocol "retry")
+    return frame
 
 
 def _name_of(sender: str) -> str:

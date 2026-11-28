@@ -110,7 +110,7 @@ class StandInBoard(view.BoardView):
         from briefing_reader.board import protocol
 
         try:
-            checked = protocol.check_request(kind, json.dumps(payload), self.known_ids())
+            checked = protocol.check_request(kind, json.dumps(payload), self.known_ids(), self.retryable_ids())
         except protocol.Refused:
             return False
         self._on_request(checked)
