@@ -98,7 +98,6 @@ _CAPTURE_ORDER = {"waits": 0, "cant_add": 1, "on_calendar": 2, "decided": 3, "pa
 _SURROGATE_RE = re.compile("[\ud800-\udfff]")
 _PART_ESCAPE_RE = re.compile(r"<(?:U(?:\+[0-9A-F]{0,6})?)?$")    # the start of a "<U+202E>" a cut would split
 _ADDRESSED_RE = re.compile(r"(.+?) <[^<>\s]+@[^<>\s]+>")
-_NON_WORD_RE = re.compile(r"[\W_]+")
 
 
 @dataclass(frozen=True, repr=False)
@@ -627,10 +626,6 @@ def from_local(answer: Any, *, frame_id: str) -> Built:
     return Built((_frame(frame_id, "text", LOCAL_TITLE, meta=LOCAL_META, body=body),))
 
 
-def _title_key(title: Any) -> str:
-    return " ".join(_NON_WORD_RE.sub(" ", str(title or "").casefold()).split())
-
-
 def _due_point(due: Any, now: datetime) -> datetime | None:
     """A due date or time as a naive wall time to sort by (a date at its end, as agenda sorts deadlines)."""
     if isinstance(due, datetime):
@@ -684,20 +679,20 @@ def from_todos(todos: Iterable[Any], deadlines: Iterable[Any], *, frame_id: str,
         point = _due_point(due, now)
         title = getattr(action, "title", "")
         items.append(((state == "done", point is None, point or datetime.max),
-                      {"text": clean(title or pictures.NO_TITLE, protocol.TITLE_CAP),
+                      {"text": clean(agenda.strip_lead(title) or pictures.NO_TITLE, protocol.TITLE_CAP),
                        "meta": _due_words(due, now) if state == "open" else "", "state": state}))
-        keys.append((point.date() if point else None, _title_key(title)))
+        keys.append((point.date() if point else None, str(title or "")))
     for deadline in deadlines or ():
         due = getattr(deadline, "due", None)
         point = _due_point(due, now)
         if point is None:
             continue
-        key = _title_key(getattr(deadline, "title", ""))
-        if any(day == point.date() and other and key and (f" {key} " in f" {other} " or f" {other} " in f" {key} ")
-               for day, other in keys):
-            continue                            # the same to-do as a card's: the card's row says more
+        title = str(getattr(deadline, "title", "") or "")
+        if any(day == point.date() and other and title and agenda.same_title(title, other) for day, other in keys):
+            continue                            # the same to-do as a card's (or an earlier row's): shown once
+        keys.append((point.date(), title))
         items.append(((False, False, point),
-                      {"text": clean(getattr(deadline, "title", "") or pictures.NO_TITLE, protocol.TITLE_CAP),
+                      {"text": clean(agenda.strip_lead(title) or pictures.NO_TITLE, protocol.TITLE_CAP),
                        "meta": _due_words(due, now), "state": "open"}))
     items.sort(key=lambda pair: pair[0])
     rows = [row for _key, row in items]

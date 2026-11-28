@@ -4358,6 +4358,8 @@ SCREEN_MARGIN = 24
 _PROMPT_MARGINS = (10, 4, 10, 10)
 _READING_MARGINS = (6, 4, 6, 6)     # the hologram: the Dock near the edge; 6 px stay the resize grab zone
 _WM_SETTINGCHANGE = 0x001A          # Windows: "Show animations in Windows" (reduced motion) may have changed
+_WM_DPICHANGED = 0x02E0             # Windows: the window's scaling changed (another screen, a Remote Desktop reconnect)
+REFIT_DELAY_MS = 700                # a screen change settles (several messages come together) before the window re-fits
 MAIN_WINDOW_TITLE = "Jarvis"                  # the taskbar button, Alt+Tab and the window's accessible name
 HEADER_SUBTITLE = f"assistant {DOT} desktop"  # next to the JARVIS wordmark (the LIVE pop-out has its own)
 
@@ -4503,6 +4505,15 @@ class BriefingWindow(hud.HudWindowFrame):
         self._solid_timer.setInterval(window_chrome.REMOTE_CHECK_MS)
         self._solid_timer.timeout.connect(self._keep_solid)
         self._solid_logged = False
+        # A screen change (a Remote Desktop reconnect at another size or scaling, a monitor added or taken away, a new
+        # resolution): the window lays itself out for the screen it is on now (``refit``), once things have settled.
+        self._refit_timer = QTimer(self)
+        self._refit_timer.setSingleShot(True)
+        self._refit_timer.setInterval(REFIT_DELAY_MS)
+        self._refit_timer.timeout.connect(self.refit)
+        self._screens_watched = False
+        self._watched_screens: list[Any] = []   # the screens whose size and scaling this window watches
+        self.refits = 0                        # how many times the window re-fitted (the tests read it)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt override
         event.ignore()   # the controller decides what closing means
@@ -4513,6 +4524,7 @@ class BriefingWindow(hud.HudWindowFrame):
         handle = self.windowHandle()
         if handle is not None:
             orb_mod.watch_input(handle)    # the owner's keys and mouse here end the orbs' deep idle
+        self._watch_screens(handle)
         self._sync_chrome()                   # (a flag change made Qt set its own style again)
         self._keep_solid()
         if _native_windows():
@@ -4561,12 +4573,95 @@ class BriefingWindow(hud.HudWindowFrame):
                     QTimer.singleShot(0, holo.refresh_reduced_motion)
                 elif msg.message in (window_chrome.WM_DISPLAYCHANGE, window_chrome.WM_WTSSESSION_CHANGE):
                     QTimer.singleShot(0, self._keep_solid)   # Remote Desktop may have just connected
+                    self.screen_changed()
+                elif msg.message == _WM_DPICHANGED:
+                    self.screen_changed()
                 answer = self._chrome.handle(msg)
                 if answer is not None:
                     return answer
         except Exception:  # noqa: BLE001 - a message this cannot read changes nothing
             pass
         return super().nativeEvent(event_type, message)
+
+    # ---- a screen change: the window re-fits the screen it is on now ---------------------------------------------------
+
+    def _watch_screens(self, handle: Any) -> None:
+        """Qt's own word that the screens changed (once per window): screens added or taken away, the primary one, the
+        window going to another screen, a screen's size or scaling. Windows' WM_DISPLAYCHANGE and WM_DPICHANGED come
+        through ``nativeEvent``."""
+        if self._screens_watched:
+            return
+        app = QGuiApplication.instance()
+        if app is None:
+            return
+        self._screens_watched = True
+        for signal in (app.screenAdded, app.screenRemoved, app.primaryScreenChanged):
+            signal.connect(self._on_screens)
+        if handle is not None:
+            handle.screenChanged.connect(self._on_screens)
+        self._on_screens()
+        self._refit_timer.stop()          # watching starts: nothing changed yet
+
+    def _on_screens(self, *_args: Any) -> None:
+        """A screen came, went or changed: watch every screen's size and scaling, then re-fit."""
+        app = QGuiApplication.instance()
+        if app is None:
+            return
+        for screen in app.screens():
+            if any(screen is seen for seen in self._watched_screens):
+                continue
+            self._watched_screens.append(screen)
+            screen.destroyed.connect(self._forget_screens)
+            screen.geometryChanged.connect(self.screen_changed)
+            screen.availableGeometryChanged.connect(self.screen_changed)
+            screen.logicalDotsPerInchChanged.connect(self.screen_changed)
+        self.screen_changed()
+
+    def _forget_screens(self, *_args: Any) -> None:
+        """A screen went away: keep only the ones Qt still has."""
+        app = QGuiApplication.instance()
+        alive = app.screens() if app is not None else []
+        self._watched_screens = [screen for screen in self._watched_screens if any(screen is now for now in alive)]
+
+    def screen_changed(self, *_args: Any) -> None:
+        """Something about the screens changed: re-fit once it settles (REFIT_DELAY_MS after the last change)."""
+        if self.isVisible():
+            self._refit_timer.start()
+
+    def refit(self) -> bool:
+        """Lay the window out again for the screen it is on now (the walkthrough of 2026-11-28: after a Remote Desktop
+        reconnect at another size the window kept the old layout - the top bar cut off, the Ask bar and the orb below
+        the screen - until it was restored and maximised again). Maximised or full screen: out of it and back in, which
+        makes Windows and Qt size it afresh. Its own size: moved and shrunk into the screen's free area where it no
+        longer fits. False when there was nothing to do (hidden or minimised)."""
+        if not self.isVisible() or self.isMinimized():
+            return False
+        screen = self.screen()
+        state = self.windowState()
+        if state & Qt.WindowState.WindowFullScreen:
+            word = "full screen"
+            self.setWindowState(state & ~Qt.WindowState.WindowFullScreen)
+            self.setWindowState(state)
+        elif state & Qt.WindowState.WindowMaximized:
+            word = "maximised"
+            self.setWindowState(state & ~Qt.WindowState.WindowMaximized)
+            self.setWindowState(state)
+        else:
+            word = "own size"
+            if screen is not None:
+                area = screen.availableGeometry()
+                frame = self.frameGeometry()
+                width = min(frame.width(), area.width())
+                height = min(frame.height(), area.height())
+                left = min(max(frame.left(), area.left()), area.right() + 1 - width)
+                top = min(max(frame.top(), area.top()), area.bottom() + 1 - height)
+                if (left, top, width, height) != (frame.left(), frame.top(), frame.width(), frame.height()):
+                    self.resize(max(1, self.width() - (frame.width() - width)),
+                                max(1, self.height() - (frame.height() - height)))
+                    self.move(left, top)
+        self.refits += 1
+        logger.info("Window: re-fitted to the screen after a screen change (%s)", word)
+        return True
 
     # ---- the window brief: Windows' own window behaviour in canvas mode (window_chrome) ------------------------------
 
@@ -7146,6 +7241,7 @@ class AppController(QObject):
         reading.approveClicked.connect(self.approve_action)
         reading.approvals_stage.batchRequested.connect(self.request_batch)
         reading.approvals_stage.batchStopRequested.connect(self.stop_batch)
+        reading.approvals_stage.overdueDoneRequested.connect(self.request_overdue_done)
         reading.denyClicked.connect(self.deny_action)
         reading.lockedClicked.connect(self._on_locked_click)
         reading.openLink.connect(self.open_action_link)
@@ -8770,8 +8866,58 @@ class AppController(QObject):
             text = "Stopping..." if run.stop else f"Adding {shown} of {len(run.ids)}..."
             stage.set_batch(len(run.ids), approvals_view.BATCH_RUNNING, text)
             return
-        count = 0 if self._batch_blocked() else len(self._batch_candidates())
+        blocked = self._batch_blocked()
+        count = 0 if blocked else len(self._batch_candidates())
         stage.set_batch(count, approvals_view.BATCH_IDLE if count >= batch.MIN_BATCH else approvals_view.BATCH_HIDDEN)
+        overdue = 0 if blocked else len(self._overdue_candidates())
+        stage.set_overdue(overdue if overdue >= batch.MIN_DONE else 0)
+
+    # ---- the overdue to-dos' Mark done (the walkthrough of 2026-11-28): one confirm, each card's own Done ----------
+
+    def _overdue_candidates(self) -> list[ProposedAction]:
+        """The to-do hand-offs due before today that "Mark N overdue to-dos done..." would mark done now."""
+        if self.state == STATE_QUITTING:
+            return []
+        decided = {action.id for action in self._actions if self._store.is_decided(action.id)}
+        return [action for action in batch.overdue_todos(self._pending_actions(), decided=decided,
+                                                         jobs=set(self._jobs), today=self._now().date())
+                if not self._locked_out(action.id)]
+
+    def request_overdue_done(self) -> None:
+        """The bar's "Mark N overdue to-dos done...": the confirm lists each one; nothing is marked before its
+        "Mark N done". Only this click opens it (never voice, Ask, the canvas or the HUD)."""
+        if self._decision_click_too_soon() or self._batch is not None or self._batch_blocked():
+            return
+        listed = self._overdue_candidates()
+        if len(listed) < batch.MIN_DONE:
+            self._sync_batch_bar()
+            return
+        rows = batch.done_rows(listed, self._now().date())
+        others = max(0, len(self._pending_actions()) - len(listed))
+        dialog = hud.BatchConfirmDialog(rows, others, parent=self.window, words=hud.DONE_ALL_WORDS)
+        dialog.confirmed.connect(self._on_overdue_confirmed)
+        dialog.finished.connect(self._on_batch_dialog_closed)
+        self._batch_dialog = dialog
+        logger.info("Overdue to-dos: listing %d card(s) (%d other(s) wait for their own click)", len(rows), others)
+        self._sync_batch_bar()
+        dialog.open()
+
+    def _on_overdue_confirmed(self, shown: str) -> None:
+        """"Mark N done": the list is made again now; it goes only when it is exactly the one the dialog showed, and
+        each card goes through its own Done (_mark_done)."""
+        self._batch_dialog = None
+        listed = self._overdue_candidates()
+        if (self._batch is not None or self._batch_blocked() or not listed
+                or batch.digest(batch.done_rows(listed, self._now().date())) != shown):
+            logger.info("Overdue to-dos: the list changed before the confirm; nothing marked")
+            self._activity(hud.TAG_WAIT, BATCH_CHANGED_TEXT, "MARK DONE")
+            self._sync_batch_bar()
+            return
+        self._decision_clicked_at = self._click_now()   # a second click right after never decides a card
+        for action in listed:
+            self._mark_done(action)
+        logger.info("Overdue to-dos: marked %d done", len(listed))
+        self._sync_batch_bar()
 
     def request_batch(self) -> None:
         """The bar's "Add all N to calendar...": the confirm dialog lists exactly what each card adds. Only this

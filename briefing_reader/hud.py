@@ -7610,6 +7610,25 @@ BATCH_CANCEL_TEXT = "Cancel"
 BATCH_ADD_TEXT = "Add {count}"
 
 
+@dataclass(frozen=True)
+class BatchWords:
+    """A batch confirm's own words (BatchConfirmDialog): Add all's, or the overdue to-dos' Mark done."""
+
+    title: str = "Add these {count} to your calendar?"
+    heading: str = "Add all"
+    subheading: str = "PERSONAL CALENDAR"
+    footer: str = ""
+    commit: str = BATCH_ADD_TEXT
+    commit_description: str = "Adds each one to your personal calendar, one at a time"
+
+
+DONE_ALL_WORDS = BatchWords(
+    title="Mark these {count} overdue to-dos done?", heading="Mark done", subheading="OVERDUE TO-DOS",
+    footer=("Done only records that you handled each one, as its own Done button does: nothing is sent, added or "
+            "changed anywhere. Each card moves to Decided today."),
+    commit="Mark {count} done", commit_description="Records each one as done")
+
+
 class BatchConfirmDialog(QDialog):
     """Add all's one more confirm (mail extras, part 1): "Add these N to your calendar?", one row per card with exactly
     what it adds (its title, then when / where / which calendar, as the card says it), how many other cards wait for
@@ -7627,22 +7646,24 @@ class BatchConfirmDialog(QDialog):
     _SCREEN_MARGIN = 16
     _ROWS_MAX = 360
 
-    def __init__(self, rows: Sequence[Any], excluded_count: int = 0, parent: QWidget | None = None) -> None:
+    def __init__(self, rows: Sequence[Any], excluded_count: int = 0, parent: QWidget | None = None,
+                 words: BatchWords | None = None) -> None:
         flags = Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint
         super().__init__(parent, flags)
         from . import batch
 
         holo = _holo()
+        words = words or BatchWords(title=BATCH_TITLE, footer=BATCH_FOOTER)
         self.rows = tuple(rows)
         self.digest = batch.digest(self.rows)
         self._answered = False
         count = len(self.rows)
-        title = BATCH_TITLE.format(count=count)
+        title = words.title.format(count=count)
         self.setWindowModality(Qt.WindowModality.WindowModal)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setWindowTitle(title)
         self.setAccessibleName(title)
-        self.panel = ChamferPanel("Add all", "PERSONAL CALENDAR", variant=PANEL_AMBER, border_alpha=0.5,
+        self.panel = ChamferPanel(words.heading, words.subheading, variant=PANEL_AMBER, border_alpha=0.5,
                                   padding=(18, 14, 18, 16), spacing=8)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -7677,15 +7698,15 @@ class BatchConfirmDialog(QDialog):
             mono_font(10), TEXT_MUTED, wrap=True)
         self.excluded_label.setVisible(others > 0)
         layout.addWidget(self.excluded_label)
-        self.footer_label = make_label(BATCH_FOOTER, mono_font(10), TEXT_DIM, wrap=True)
+        self.footer_label = make_label(words.footer or BATCH_FOOTER, mono_font(10), TEXT_DIM, wrap=True)
         layout.addWidget(self.footer_label)
         buttons = QHBoxLayout()
         buttons.setContentsMargins(0, 6, 0, 0)
         buttons.setSpacing(8)
         buttons.addStretch(1)
         self.cancel_button = holo.HoloButton(BATCH_CANCEL_TEXT, holo.GHOST, size=holo.SIZE_SM)
-        self.add_button = holo.HoloButton(BATCH_ADD_TEXT.format(count=count), holo.AMBER_COMMIT, size=holo.SIZE_SM)
-        self.add_button.setAccessibleDescription("Adds each one to your personal calendar, one at a time")
+        self.add_button = holo.HoloButton(words.commit.format(count=count), holo.AMBER_COMMIT, size=holo.SIZE_SM)
+        self.add_button.setAccessibleDescription(words.commit_description)
         buttons.addWidget(self.cancel_button)
         buttons.addWidget(self.add_button)
         layout.addLayout(buttons)

@@ -1183,7 +1183,11 @@ LIVE keeps them.
   Alt+Space, for the system menu. Hovering the maximise button at the top right
   shows Windows 11's Snap Layouts. The edges resize it. It is no longer always
   on top of other windows. The close button at the top right closes Jarvis, and
-  "Hey Jarvis" stops with him; minimise him to keep him listening.
+  "Hey Jarvis" stops with him; minimise him to keep him listening. When the
+  screen changes under him (a Remote Desktop reconnect from another device, a
+  new resolution or scaling, a monitor added or taken away) he lays himself out
+  for the new screen a moment later: maximised or full screen he stays so, and a
+  window of its own size moves back onto the screen if it no longer fits.
 - **The orb** is a set of glowing rings on one axis, drawn by the canvas
   itself. Each state moves in its own way: waiting, a slow precession like
   breathing; listening, the rings lean toward you and the tick ring follows
@@ -1250,7 +1254,11 @@ LIVE keeps them.
   three and two), and the frames of a row equally tall. On a small window where
   even rows would not show them all whole, they sit side by side at their own
   heights instead, all whole; only when even that has no room do the last ones
-  fold to small tiles you can open.
+  fold to small tiles you can open. The group's heading has no time: it is
+  always now (the top bar has the clock). The To-dos frame shows each to-do
+  once: one from your page and a calendar's "DUE: ..." event of the same day
+  count as the same when most of the shorter title's words are in the other,
+  and a lead word like "DUE:" is left off.
 - **A task card first.** While Jarvis works on a request, a card says what he
   is doing in his own words ("Reading your calendar"), a timer, the steps and
   sources so far, and **Stop** (exactly the ask line's own cancel). When the
@@ -4911,6 +4919,16 @@ says how far it got ("Added 3 of 5; stopped: failed"). Replies, emails,
 invitations, moves, cancels, unsubscribes, day plan blocks and cards with an
 amber note never go in Add all: each waits for its own click. Voice, Ask, the
 canvas and the desktop HUD never start it.
+
+**Overdue to-dos.** A card whose due day has passed says so: "Overdue, was due
+Sun Nov 22" (spoken: "overdue, it was due Sunday November 22"). While two or
+more to-do cards are overdue and their Done only records that you handled them
+(no block to add), the same bar offers **Mark N overdue to-dos done...**. It
+lists them first ("Mark these 3 overdue to-dos done?"), with Cancel and
+**Mark N done**; Enter does nothing. Each then goes through its own Done:
+nothing is sent, added or changed anywhere, and each card moves to Decided
+today. A to-do with a block, one still to come and every other kind of card
+keep their own click.
 
 ## Ask Jarvis (optional)
 

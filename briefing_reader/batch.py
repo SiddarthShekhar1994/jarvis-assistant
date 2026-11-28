@@ -12,6 +12,9 @@ with an amber note waits for its own look: none of them ever goes in Add all.
     digest(rows)              one short hash of exactly that list (the confirm re-checks it)
     stop_reason(status)       "" when a step's result lets the batch go on, else its reason word
     log_end(added, total, reason)   the one log line of a batch (counts and a reason word only)
+    overdue_todos(actions, *, decided, jobs, today)   the to-do hand-offs due before today that
+        "Mark N overdue to-dos done..." would mark done (the walkthrough of 2026-11-28; Done only records)
+    done_rows(actions, today)  what its confirm lists for each (title, the card's detail)
 
 Qt-free and pure: nothing here adds anything (the app steps through its own per-card path). Logs hold
 counts and reason words only, never a title, a time or an id list.
@@ -136,6 +139,44 @@ def digest(listed: Sequence[Row]) -> str:
             hasher.update(b"\x1f")
         hasher.update(b"\x1e")
     return hasher.hexdigest()[:24]
+
+
+MIN_DONE = 2                     # "Mark N overdue to-dos done..." shows only while at least this many wait
+
+
+def overdue_todos(actions: Sequence[ProposedAction], *, decided: Collection[str], jobs: Collection[str],
+                  today: date) -> list[ProposedAction]:
+    """The to-do cards "Mark N overdue to-dos done..." would mark done now, in card order (the walkthrough of
+    2026-11-28: 17 cards waited, most of them to-dos due days before).
+
+    Each is a Todo hand-off: decidable, not actionable (its Done only records that you handled it - no block to add,
+    nothing sent, nothing changed anywhere), not decided, not running, with a due day before ``today``."""
+    out: list[ProposedAction] = []
+    seen: set[str] = set()
+    for action in actions:
+        if action.id in seen:
+            continue
+        seen.add(action.id)
+        if action.kind != TODO or not action.decidable or action.actionable:
+            continue
+        if action.id in decided or action.id in jobs:
+            continue
+        due = action.due()
+        if due is None:
+            continue
+        day = due.date() if isinstance(due, datetime) else due
+        if day < today:
+            out.append(action)
+    return out
+
+
+def done_rows(actions: Sequence[ProposedAction], today: date) -> tuple[Row, ...]:
+    """What the Mark done confirm lists for each overdue to-do: its title and its card's detail."""
+    out: list[Row] = []
+    for action in actions:
+        view = card_view(action, today)
+        out.append(Row(action.id, "To-do", view.title, view.detail))
+    return tuple(out)
 
 
 def stop_reason(status: str) -> str:

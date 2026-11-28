@@ -74,6 +74,13 @@ _SPACES_RE = re.compile(r"\s+")
 _DUE_LEAD_RE = re.compile(
     rf"^(?:(?:due|by|on|at|before)\b|@|t(?=\d)|{actions._WEEKDAY_WORD}(?=\s|$))\s*")
 _NON_WORD_RE = re.compile(r"[\W_]+")
+# A deadline's lead word ("DUE: Engramme sign-in", "To-do - Read chapter 2"): not part of what it is.
+_LEAD_RE = re.compile(r"^\s*(?:due|todo|to-do|to do|deadline)\s*[:\-\u2013\u2014]\s*", re.IGNORECASE)
+# Words that never tell two to-dos apart (same_title's word match).
+_SMALL_WORDS = frozenset({"a", "an", "and", "at", "by", "for", "in", "my", "of", "on", "or", "the", "to", "up",
+                          "with", "your"})
+SAME_WORDS_SHARE = 0.8      # same_title: this share of the shorter title's words in the other one
+SAME_WORDS_LEAST = 3        # ... and at least this many words (shorter titles need one inside the other)
 # A link without a scheme, as meeting locations often are: "meet.google.com/abc-defg-hij".
 _BARE_LINK_RE = re.compile(r"(?<![\w@.])(?:[a-z0-9-]+\.)+[a-z]{2,}/[^\s()<>|]*", re.I)
 
@@ -509,10 +516,30 @@ def merge_deadlines(page: Iterable[Deadline], calendar: Iterable[Deadline], now:
 def _same_deadline(a: Deadline, b: Deadline, now: datetime) -> bool:
     if _due_point(a.due, now)[0] != _due_point(b.due, now)[0]:
         return False
-    first, second = _title_key(a.title), _title_key(b.title)
+    return same_title(a.title, b.title)
+
+
+def strip_lead(title: str) -> str:
+    """``title`` without a lead word: "DUE: Bayprofs: line up..." -> "Bayprofs: line up..."."""
+    text = str(title or "")
+    stripped = _LEAD_RE.sub("", text, count=1)
+    return stripped if stripped.strip() else text
+
+
+def same_title(a: str, b: str) -> bool:
+    """Whether two to-do or deadline titles (of the same day) name the same thing (the walkthrough of 2026-11-28:
+    "Bayprofs line up parent and appointed guardian" and "DUE: Bayprofs: line up parent + appointed guardian for NRA"
+    showed as two rows). Lead words ("DUE:") and case never count; then one title inside the other, or at least
+    SAME_WORDS_SHARE of the shorter one's words (SAME_WORDS_LEAST or more, small words left out) in the longer one."""
+    first, second = _title_key(strip_lead(a)), _title_key(strip_lead(b))
     if not first or not second:
         return first == second
-    return f" {first} " in f" {second} " or f" {second} " in f" {first} "
+    if f" {first} " in f" {second} " or f" {second} " in f" {first} ":
+        return True
+    words_a = {word for word in first.split() if word not in _SMALL_WORDS}
+    words_b = {word for word in second.split() if word not in _SMALL_WORDS}
+    small, big = (words_a, words_b) if len(words_a) <= len(words_b) else (words_b, words_a)
+    return len(small) >= SAME_WORDS_LEAST and len(small & big) >= SAME_WORDS_SHARE * len(small)
 
 
 def _title_key(title: str) -> str:

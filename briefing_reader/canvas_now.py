@@ -32,6 +32,8 @@ it is on the canvas (the walk's 6: Today twice) - it comes back once that answer
 as soon as something is there when it was never up this session (the resilience review's M2); its timer rests while
 the window is not up (``rest``; the review's L3).
 
+The group's head has no time (it is always now; the top bar has the clock).
+
 Logs: counts and kinds only.
 """
 
@@ -48,7 +50,6 @@ from PySide6.QtCore import QObject, QTimer
 from . import pictures
 from .board import frames as board_frames
 from .board import resting
-from .text_prep import format_time
 
 logger = logging.getLogger(__name__)
 
@@ -328,7 +329,9 @@ class NowController(QObject):
         desk, feed = self.desk, self._feed()
         if desk.ensure_board() is None:
             return
-        when = format_time(self._now(), hour24=self._hour24())
+        # No time on the group's head (the walkthrough of 2026-11-28: "NOW 3:40 AM" was when the app started, read as
+        # stale while every frame was current): the group is always now, and the top bar has the clock.
+        when = ""
         below = first and bool(feed.groups())
         messages: list[dict[str, Any]] = []
         for rank, source in enumerate(SOURCES + tuple(source for source in entries if source not in SOURCES)):
