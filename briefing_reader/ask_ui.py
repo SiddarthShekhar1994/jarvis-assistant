@@ -68,7 +68,8 @@ clears the bar, so nothing typed later is wiped, and a click-started run (an off
 touches what the owner may be typing.
 
 Typed routes (the productivity bundle, ``route_flags``): after the stop and empty checks and when the
-text does not start with "web:", ask.routes.route() decides; a memory route is handed to the app
+text does not start with "web:" or "local:" (the simpler model on this PC: local_llm; no shortcut or instant answer
+takes it either), ask.routes.route() decides; a memory route is handed to the app
 (``memoryRequested``) before the busy and blocked checks. The bar emits only while idle (it is
 read-only while a request runs), so in practice a memory route arrives when nothing runs; MEMORY's
 own Add field saves a note meanwhile. ``memory(command)`` (the notes the planner would get for the
@@ -137,7 +138,7 @@ from typing import Any
 import shiboken6
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 
-from . import hud
+from . import hud, local_llm
 from .actions import is_web_open, link_host
 from .ask import desktop_mode
 from .ask import planner as ask_planner
@@ -191,8 +192,11 @@ STAGE_TEXTS = {
     ask_planner.STAGE_DAY: "Reading your calendar...",
     ask_planner.STAGE_PREP_MAIL: "Reading your mail...",
     ask_planner.STAGE_THREAD: "Reading the thread...",
+    ask_planner.STAGE_LOCAL: "Answering on this PC...",
 }
-_TIMED_STAGES = (ask_planner.STAGE_PLANNING, ask_planner.STAGE_PLANNING_AGAIN, ask_planner.STAGE_RESEARCH)
+_TIMED_STAGES = (ask_planner.STAGE_PLANNING, ask_planner.STAGE_PLANNING_AGAIN, ask_planner.STAGE_RESEARCH,
+                 ask_planner.STAGE_LOCAL)
+LOCAL_META = "answered on this PC by a simpler model"
 # A planner mode's status while it runs (with the seconds; the meta line says Esc cancels).
 MODE_STATUS = {MODE_PLAN: "Planning your day...", MODE_PREP: "Preparing your brief...",
                MODE_NUDGE: "Drafting a reply...", MODE_MEETING: "Writing the meeting summary...",
@@ -715,7 +719,8 @@ class AskController(QObject):
             self.bar.take_request(text)        # taken: the words leave the bar (Up brings them back)
             return
         found = NO_ROUTE
-        if text and forced_question(text) is None:   # "web:" always wins over a shortcut
+        forced_local = local_llm.forced_question(text) is not None    # "local:" too: the model on this PC only
+        if text and forced_question(text) is None and not forced_local:   # "web:" always wins over a shortcut
             found = self._route(text)
             if found.kind in MEMORY_ROUTES:
                 logger.info("Ask: a typed %s shortcut (no planner run)", found.kind)
@@ -747,7 +752,8 @@ class AskController(QObject):
             logger.info("Ask: a typed %s shortcut", found.kind)
             self.submit_mode(ModeRequest(MODE_PREP, ORIGIN_TYPED, target=found.payload, typed_route=True), text)
             return
-        if text and self._instant is not None and not self._instant_skip and forced_question(text) is None:
+        if (text and self._instant is not None and not self._instant_skip and forced_question(text) is None
+                and not forced_local):
             try:
                 taken = bool(self._instant(text, bool(getattr(self, "_spoken_now", False))))
             except Exception as exc:  # noqa: BLE001 - what Jarvis can't answer himself is Claude's, as before
@@ -1048,8 +1054,11 @@ class AskController(QObject):
             self.finishing_task = NO_TASK
         self._finish_task(running.task, outcome)
         self._update_chip()
-        if not outcome.ok and outcome.kind not in (ask_planner.EMPTY, "busy"):
-            self.refresh()   # a failed run checks Claude Code again (the planner forgot its readiness)
+        local = getattr(outcome, "local", None)
+        if (not outcome.ok and outcome.kind not in (ask_planner.EMPTY, "busy", ask_planner.LOCAL_OFF,
+                                                    ask_planner.LOCAL_NOT_READY, ask_planner.LOCAL_FAILED))                 or (local is not None and not local.forced):
+            self.refresh()   # a failed run checks Claude Code again (the planner forgot its readiness), also when
+                             # the model on this PC answered in its place
         elif outcome.mail.threads or outcome.search or outcome.message:
             self.refresh(full=False)   # mail was read (or could not be): which accounts may read now
 
@@ -1184,7 +1193,11 @@ class AskController(QObject):
         research runs left, which the research caps can make fewer."""
         parts: list[str] = []
         report = getattr(outcome, "research", None) if outcome is not None and outcome.ok else None
-        if outcome is not None and getattr(outcome, "agent_task", ""):
+        if outcome is not None and getattr(outcome, "local", None) is not None:
+            parts.append(LOCAL_META)       # the whole time (any Claude run that failed first included) follows
+            if not outcome.runs:
+                parts.append(f"{outcome.duration_ms / 1000:.1f} s")
+        elif outcome is not None and getattr(outcome, "agent_task", ""):
             parts.append(AGENT_META)
         elif report is not None:
             # "2 source cards + 1 proposal under ASK": the sources' Open cards, then the suggestions.
@@ -1489,6 +1502,8 @@ def _finish_words(outcome: Any, *, cancelled: bool) -> tuple[str, str]:
     has a recipient you didn't type - the header says so without opening a step."""
     if cancelled or outcome.kind == CANCELLED:
         return STATUS_CANCELLED, "Cancelled; nothing was proposed"
+    if outcome.ok and getattr(outcome, "local", None) is not None:
+        return STATUS_OK, local_llm.LABEL     # plain words only: never a card
     if outcome.ok and getattr(outcome, "agent_task", ""):
         return STATUS_OK, AGENT_HANDED_TEXT
     report = getattr(outcome, "research", None)
@@ -1663,4 +1678,7 @@ def default_planner(config: Config, calendars: Mapping[str, Any], senders: Mappi
     engine.prestart = ask_prestart.Prestarter(engine.runner, extra_files=(
         PROJECT_ROOT / CONFIG_FILE_NAME, ask_planner.cli.SCHEMA_FILE, ask_planner.cli.DESKTOP_SCHEMA_FILE))
     sources = ask_planner.GoogleSources(config, calendars, senders, readers)
-    return ask_planner.AskPlanner(config, engine, sources)
+    planner = ask_planner.AskPlanner(config, engine, sources)
+    # The simpler model on this PC ([local_model]; None while it is off): nothing loads before its first answer.
+    planner.local = local_llm.LocalModel.from_config(config)
+    return planner

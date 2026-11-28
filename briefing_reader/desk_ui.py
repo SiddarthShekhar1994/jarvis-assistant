@@ -40,7 +40,8 @@ its topic: Ask's ``topic`` field, part 6, else the first frame's title):
 - a LIVE step's picture of the answer's task once ready (``apply``: the app's LIVE feed hands every change here) - a
   mail thread Jarvis read, a web search, a page picture (also one that comes ready after the answer), a day plan's
   day - and the calendar Jarvis read when the answer is about the calendar (today's day, else the week);
-- the answer (``on_ask_outcome``): a web research's answer with its sources, the cards that wait on Approvals - a Reply
+- the answer (``on_ask_outcome``): a web research's answer with its sources, an answer made on this PC by the
+  simpler model (its words under "On this PC" / "simpler model": local_llm), the cards that wait on Approvals - a Reply
   or Email as the mail it sends (a reply and the thread it answers are ONE frame: the mail as read with the reply's
   amber chip, whose go_approvals opens the reply's card), a calendar card's change on its day -, the to-dos the
   answer proposes or speaks of, and the follow-ups it speaks of;
@@ -881,6 +882,7 @@ class DeskController(QObject):
         report = getattr(outcome, "research", None)
         answer.cited = len(tuple(getattr(report, "sources", ()) or ())) if report is not None else 0
         entries += self._research_entries(outcome)
+        entries += self._local_entries(outcome)
         entries += self._frame_entries(outcome)
         if not planned:
             entries += self._card_entries(outcome)
@@ -994,6 +996,15 @@ class DeskController(QObject):
             return built
 
         return [("research", research, "", "")]
+
+    @staticmethod
+    def _local_entries(outcome: Any) -> list[tuple[Any, ...]]:
+        """An answer made on this PC by the simpler model: its words as one text frame labelled "On this PC" /
+        "simpler model" (board.frames.from_local). Never a card: such an answer has none."""
+        if getattr(outcome, "local", None) is None:
+            return []
+        words = str(getattr(outcome, "say", "") or "")
+        return [("local", lambda frame_id: board_frames.from_local(words, frame_id=frame_id), "", "")]
 
     def _on_canvas(self) -> bool:
         """Home is the canvas now (never once it fell back to the native ring and the read-only tiles)."""

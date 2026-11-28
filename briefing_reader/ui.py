@@ -1121,6 +1121,7 @@ def needs_ok_chip(count: int) -> str:
 SHOW_WINDOW_TEXT = live_view.SHOW_WINDOW_TEXT
 BRING_BACK_TEXT = live_view.BRING_BACK_TEXT
 SEE_STEPS_TEXT = "See every step"                    # the link under an Ask's answer in the conversation
+LOCAL_SPOKEN_LEAD = "This is from the simpler model on this PC, {sir}."   # said before an answer made here
 # Canvas part 3: the ask line's status line never repeats what the caption carried (ReadingView.caption_said).
 CAPTION_CARRIED = 6                  # the caption's last lines kept for the check
 CAPTION_MATCH = 10                   # a line's first words that must be found as they are, in order
@@ -10938,6 +10939,9 @@ class AppController(QObject):
         if outcome.ok and getattr(outcome, "research", None) is not None:
             self._converse_research(outcome)
             return
+        if outcome.ok and getattr(outcome, "local", None) is not None:
+            self._converse_local(outcome)
+            return
         if outcome.ok:
             decidable = sum(1 for card in outcome.cards if not card.error)
             sub = [f"{_plural(decidable, 'proposal')} under NEEDS YOUR OK" if decidable else "no proposals"]
@@ -11016,6 +11020,31 @@ class AppController(QObject):
         self._voice_call("stop_key", ASK_SAY_KEY)
         if self.state == STATE_READING:
             self.window.reading.correct_caption(words, alert=True, spoken=spoken and not self._voice_silent())
+
+    def _converse_local(self, outcome: Any) -> None:
+        """An answer made on this PC by the simpler model (local_llm): one JARVIS entry, its label first ("Answered on
+        this PC by a simpler model (why)") and the sub line saying so again, never a card; then Jarvis says the answer
+        (through the same guards as an Ask's, after a short line that says where it came from). Words Claude had
+        already begun to say before its run failed go first. The answer never reaches a later Ask's conversation (a
+        simpler model's words are not Claude's context)."""
+        from . import local_llm
+        from .ask_ui import AskController
+
+        assistant = self.config.assistant
+        stream, self._say_stream = self._say_stream, None
+        sub = [local_llm.SUB_WORDS, f"{outcome.duration_ms / 1000:.1f} s"]
+        task_id = self._ask_task_id
+        link = (SEE_STEPS_TEXT, f"live:{task_id}") if self.live.enabled and task_id else ("", "")
+        self._jarvis(AskController._answer(outcome), tone=hud.TONE_DONE, sub=f" {DOT} ".join(sub), link=link,
+                     context=False)
+        if not assistant.speak_replies:
+            return
+        reply = ask_reply_speech(outcome, assistant.address)
+        if reply.guarded:
+            logger.info("Answer on this PC not spoken as written (it claimed something was done)")
+        spoken = " ".join(part for part in (with_address(LOCAL_SPOKEN_LEAD, assistant.address), reply.text) if part)
+        self._correct_say(stream, spoken)
+        self._say(KIND_REPLY, spoken)
 
     def _converse_research(self, outcome: Any) -> None:
         """A web research's answer in the conversation: one JARVIS entry with the answer and its
@@ -11114,7 +11143,13 @@ class AppController(QObject):
         if outcome.ok and getattr(outcome, "suggestion", ""):
             self._offer_memory_suggestion(outcome.suggestion)
         report = getattr(outcome, "research", None) if outcome.ok else None
-        if report is not None:
+        local = getattr(outcome, "local", None) if outcome.ok else None
+        if local is not None:
+            # Answered on this PC: counts and times only (never the question or the answer); never a card.
+            self._activity(hud.TAG_ASK, "Answered on this PC (simpler model)",
+                           f" {DOT} ".join([f"{outcome.duration_ms / 1000:.1f} s",
+                                            _plural(local.output_tokens, "token")]))
+        elif report is not None:
             # Web research: counts only (never the question, the answer, a title or a site).
             from .ask.research_validate import cards_words, steps_words
             from .ask_ui import research_proposals
