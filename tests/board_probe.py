@@ -129,6 +129,9 @@ Cases:
                frames keep their places); the corner's "Now" shown only while the app says so, a press posting "now";
                a day with nothing booked ("empty") only as tall as its words;
                hostile bodies put into board.apply directly refused by the page
+    canvas_now  the resting group "Now" (its group message "rest") with 3, 4 and 5 frames at 1120x700, 1389x868 and
+               1920x1080: the layout in numbers and the group's rows (each row's frames, their lines, widths, heights,
+               bottoms and any cut); with JARVIS_PROBE_STILLS set, a still of each saved there
     canvas_hear  the window brief at 1389x868: HEY JARVIS listening, paused and can't hear you (amber only then), the
                app's few words for the other problems, the can't-hear note with the microphone's name as text and its
                one button (a real press posts "mic_settings"), clear of the frames and the ask line; hostile names as
@@ -1046,6 +1049,8 @@ def main(case: str) -> dict[str, Any]:
         report.update(canvas_fixes_case(make, wait_until, pump, main_world, settle_end))
     elif case == "canvas_resting":
         report.update(canvas_resting_case(make, wait_until, pump, main_world, settle_end))
+    elif case == "canvas_now":
+        report.update(canvas_now_case(make, wait_until, pump, main_world, settle_end))
     elif case == "canvas_hear":
         report.update(canvas_hear_case(make, wait_until, pump, main_world, settle_end))
     elif case == "canvas_5b":
@@ -4008,7 +4013,8 @@ CANVAS2_LOOK = r"""JSON.stringify((function (marks) {
   var names = {};
   attrs.forEach(function (name) { names[name] = (names[name] || 0) + 1; });
   return {
-    win: look.win, area: area, grid: look.grid, orb: look.orb, untidy: look.untidy, over: look.over, packs: look.packs,
+    win: look.win, area: area, grid: look.grid, rest: look.rest, orb: look.orb, untidy: look.untidy, over: look.over,
+    packs: look.packs,
     card: look.card, heads: look.heads, items: look.items, filter: look.filter, lines: look.lines,
     full: look.items.filter(function (i) { return i.shown && i.kind === 'full'; }).length,
     tiles: look.items.filter(function (i) { return i.shown && i.kind === 'tile'; }).length,
@@ -4956,6 +4962,117 @@ CHROME_PAGE = r"""JSON.stringify((function () {
             return !b.hidden && b.getClientRects().length > 0; }).map(box),
           wordmark: box(c.querySelector('.c-word'))};
 })())"""
+
+
+# ---- the resting group "Now" laid out (its rows even: no lone frame, equal heights, nothing cut) ---------------------
+
+CANVAS_NOW_SIZES = ((1120, 700), (1389, 868), (1920, 1080))
+CANVAS_NOW_COUNTS = (3, 4, 5)
+
+
+def canvas_now_frames(count: int) -> list[dict[str, Any]]:
+    """The resting group "Now" as canvas_now builds it, with made-up content: what waits, the day, the to-dos, the
+    agents (and a fifth, a mail list, as mail_entries would add it): ``count`` of them, 3 to 5."""
+    from datetime import datetime, timedelta
+
+    from briefing_reader import pictures
+    from briefing_reader.board import frames as board_frames
+    from briefing_reader.board import resting
+    from briefing_reader.gcal import CalendarEvent
+
+    now = datetime.now().astimezone().replace(hour=9, minute=41, second=0, microsecond=0)
+
+    def at(hour: int, minute: int = 0) -> datetime:
+        return now.replace(hour=hour, minute=minute)
+
+    events = [CalendarEvent("Team stand-up", start=at(11, 45), end=at(12, 0)),
+              CalendarEvent("Lunch with Maya", start=at(13), end=at(14)),
+              CalendarEvent("Study group", start=at(15), end=at(16)),
+              CalendarEvent("Gym", start=at(18), end=at(19))]
+    picture = pictures.plan_picture({"personal": events}, (), day=now.date(), now=now)
+    day = dict(board_frames.from_picture(picture, frame_id="n2", now=now, title="Today").messages[0])
+    approvals = dict(resting.from_approvals(3, [("REPLY · WORK", "Re: Budget numbers"),
+                                                ("EVENT", "Study group moved to 4 PM"),
+                                                ("REPLY", "Lab section moved")], frame_id="n1").messages[0])
+    agents = dict(resting.from_agents([
+        resting.AgentLine("Morning mail sweep", "on", last="8:00 AM", came=2, next="Tomorrow 8:00 AM", waits=1),
+        resting.AgentLine("Invoices to the sheet", "paused", last="Mon 9:41 AM", came=0)], frame_id="n4").messages[0])
+    todos = {"type": "frame", "id": "n3", "kind": "todos", "title": "To-dos", "meta": "3",
+             "body": {"rows": [{"text": "Send budget comments to Dana", "meta": "Waits", "state": "waits"},
+                               {"text": "LING essay draft", "meta": "Thu", "state": "open"},
+                               {"text": "Print boarding pass", "meta": "", "state": "done"}]}}
+    mail = {"type": "frame", "id": "n5", "kind": "mail_list", "title": "Unread", "meta": "2",
+            "body": {"rows": [{"sender": "Prof. Ana Ruiz", "time": "8:02 AM", "subject": "Lab section moved",
+                               "meta": "", "unread": True},
+                              {"sender": "Maya", "time": "7:40 AM", "subject": "Lunch at one?", "meta": "",
+                               "unread": True}]}}
+    order = {3: [approvals, day, agents], 4: [approvals, day, todos, agents], 5: [approvals, day, todos, agents, mail]}
+    return order[count]
+
+
+def canvas_now_rows(look: dict[str, Any], group: str) -> list[dict[str, Any]]:
+    """The group's whole frames by grid row (the cell's first line), in reading order: each row's frames, their
+    cells' heights in lines and widths in columns, the columns the row spans and any frame whose body is cut."""
+    rows: dict[int, list[dict[str, Any]]] = {}
+    for item in look["items"]:
+        if item["group"] == group and item["shown"] and item["kind"] == "full" and item["cell"]:
+            rows.setdefault(item["cell"][1], []).append(item)
+    found = []
+    for line in sorted(rows):
+        row = sorted(rows[line], key=lambda item: item["cell"][0])
+        found.append({"line": line, "ids": [item["id"] for item in row], "lines": [item["cell"][3] for item in row],
+                      "cols": [item["cell"][2] for item in row],
+                      "heights": [item["box"][3] + (item["box"][1] - row[0]["box"][1]) for item in row],
+                      "bottoms": [item["box"][1] + item["box"][3] for item in row],
+                      "cut": [item["id"] for item in row if item["cut"]]})
+    return found
+
+
+def canvas_now_case(make: Any, wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> dict[str, Any]:
+    """The resting group "Now" with 3, 4 and 5 frames at 1120x700, 1389x868 and 1920x1080 in the real page: each
+    layout in numbers and the group's rows (canvas_now_rows). With JARVIS_PROBE_STILLS set, a still of each is saved
+    there (now<count>_<w>x<h>.png: offscreen, made-up content)."""
+    report: dict[str, Any] = {"sizes": {}}
+    stills = os.environ.get("JARVIS_PROBE_STILLS", "")
+    host, board = _canvas2_start(make, wait_until, pump, CANVAS_NOW_SIZES[0])
+    report["ready"] = board.is_ready()
+    board.set_motion("off")
+    marks = json.dumps(list(CANVAS2_MARKS))
+    for size in CANVAS_NOW_SIZES:
+        host.resize(*size)
+        board.setGeometry(0, 0, *size)
+        pump(0.3)
+        for count in CANVAS_NOW_COUNTS:
+            board.apply({"type": "clear"})
+            pump(0.2)
+            frames = canvas_now_frames(count)
+            group = f"now{count}"
+            board.apply({"type": "group", "id": group, "time": "9:41 AM", "topic": "Now", "frames": [],
+                         "older": False, "rest": True})
+            for frame in frames:
+                board.apply(dict(frame, group=group))
+            board.apply({"type": "group", "id": group, "time": "9:41 AM", "topic": "Now",
+                         "frames": [frame["id"] for frame in frames], "older": False, "rest": True})
+            board.apply({"type": "bar", "frames": len(frames), "waits": 0, "pinned": 0, "compact": False})
+            board.apply({"type": "desk", "state": "enter"})
+            settled = _canvas2_settled(board, main_world, pump, size, least=0.5)
+            look = json.loads(main_world(board, CANVAS2_LOOK % marks))
+            key = f"{count}@{size[0]}x{size[1]}"
+            report["sizes"][key] = {"settled": settled, "grid": look["grid"], "rest": look["rest"],
+                                    "rows": canvas_now_rows(look, group),
+                                    "overlaps": look["overlaps"], "outside": look["outside"], "on_orb": look["on_orb"],
+                                    "lost": look["lost"], "tiles": look["tiles"], "full": look["full"],
+                                    "area": look["area"], "heads": [head["box"] for head in look["heads"]]}
+            if stills:
+                folder = Path(stills)
+                folder.mkdir(parents=True, exist_ok=True)
+                host.grab().save(str(folder / f"now{count}_{size[0]}x{size[1]}.png"))
+    counts = board.counts()
+    report["blocked"] = counts.get("blocked", {})
+    report["allowed"] = counts.get("allowed", {})
+    report["messages_refused"] = {key: value for key, value in counts.items() if key.startswith("refused:")}
+    settle_end(report, board)
+    return report
 
 
 def canvas_hear_case(make: Any, wait_until: Any, pump: Any, main_world: Any, settle_end: Any) -> dict[str, Any]:

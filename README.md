@@ -1103,6 +1103,13 @@ LIVE keeps them.
   with its state and what it last did; its button opens Agents). They are
   kept current while they show: a frame that changes glows once, and one whose
   source has nothing left goes. A later answer always takes the first places.
+  The group's frames sit in even rows under its heading: as many side by side
+  as the window gives room (four on a 1920-wide screen, three on a smaller
+  one), never one frame left alone on a row (four make two and two, five make
+  three and two), and the frames of a row equally tall. On a small window where
+  even rows would not show them all whole, they sit side by side at their own
+  heights instead, all whole; only when even that has no room do the last ones
+  fold to small tiles you can open.
 - **A task card first.** While Jarvis works on a request, a card says what he
   is doing in his own words ("Reading your calendar"), a timer, the steps and
   sources so far, and **Stop** (exactly the ask line's own cancel). When the

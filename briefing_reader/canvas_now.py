@@ -20,7 +20,10 @@ its frame, one with nothing left takes its frame away, and a frame the owner clo
 like any other group; while it is not on the canvas (cleared, closed, made room for) and something could be in it,
 ``can_show()`` says the corner's "Now" button can work, and ``show()`` (its ``go now``) brings it back. A group made
 while answers are on the board goes under them (feed ``below``): it never takes an answer's best places; an answer
-that comes later is the newest, and the Now group's frames fold as any older group's do.
+that comes later is the newest, and the Now group's frames fold as any older group's do. Its group is sent as the
+resting group (feed ``rest``): the canvas lays its frames out in even rows - as many across as the width gives room,
+never a lone frame on a row of its own, a row's frames equally tall, the group's head over the whole first row (on a
+small window where those rows would fold a frame, its frames at their own heights instead while that keeps all whole).
 
 Canvas part 5B: an answer that shows today's calendar (same kind, same day) takes the group's day frame away while
 it is on the canvas (the walk's 6: Today twice) - it comes back once that answer's frame is gone; the group goes up
@@ -329,7 +332,7 @@ class NowController(QObject):
             if built is None or not built.messages:
                 continue
             put = feed.put(self._answer, source, built.messages, when=when, topic=TOPIC, rank=float(rank),
-                           again=not first, below=below)
+                           again=not first, below=below, rest=True)
             if frame_id in feed.frame_ids():
                 self._ids[source] = frame_id
             messages += put
